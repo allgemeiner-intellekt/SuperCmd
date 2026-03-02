@@ -134,6 +134,17 @@ export interface ExtensionContextType {
   supportPath: string;
   owner: string;
   preferences: Record<string, any>;
+  preferenceDefinitions?: Array<{
+    scope: 'extension' | 'command';
+    name: string;
+    title?: string;
+    description?: string;
+    placeholder?: string;
+    required?: boolean;
+    type?: string;
+    default?: any;
+    data?: Array<{ title?: string; value?: string }>;
+  }>;
   commandMode: 'view' | 'no-view' | 'menu-bar';
 }
 
@@ -146,8 +157,53 @@ let _extensionContext: ExtensionContextType = {
   supportPath: '/tmp/supercmd',
   owner: '',
   preferences: {},
+  preferenceDefinitions: [],
   commandMode: 'view',
 };
+
+type RuntimePreferenceDefinition = NonNullable<ExtensionContextType['preferenceDefinitions']>[number];
+
+function getDefaultPreferenceValue(def: RuntimePreferenceDefinition): any {
+  if (def.default !== undefined) return def.default;
+  if (def.type === 'checkbox') return false;
+  if (def.type === 'dropdown') return def.data?.[0]?.value ?? '';
+  return '';
+}
+
+function normalizePreferenceValue(def: RuntimePreferenceDefinition, value: any): any {
+  if (value === undefined || value === null) return getDefaultPreferenceValue(def);
+
+  if (def.type === 'checkbox') {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+    return getDefaultPreferenceValue(def);
+  }
+
+  if (def.type === 'dropdown') {
+    const normalized = typeof value === 'string' ? value.trim() : String(value).trim();
+    const options = Array.isArray(def.data)
+      ? def.data
+          .map((option) => ({
+            value: String(option?.value ?? '').trim(),
+            title: String(option?.title ?? '').trim(),
+          }))
+          .filter((option) => option.value || option.title)
+      : [];
+    if (options.length === 0) return normalized;
+    const match = options.find((option) =>
+      option.value === normalized ||
+      option.title === normalized ||
+      option.title.toLowerCase() === normalized.toLowerCase()
+    );
+    return match?.value || getDefaultPreferenceValue(def);
+  }
+
+  return value;
+}
 
 export function setExtensionContext(ctx: ExtensionContextType) {
   _extensionContext = ctx;
@@ -1620,6 +1676,7 @@ export function getPreferenceValues<Values extends PreferenceValues = Preference
   const scoped = getCurrentScopedExtensionContext();
   const context = scoped || _extensionContext;
   const contextPrefs = (context?.preferences || {}) as Record<string, any>;
+  const preferenceDefinitions = Array.isArray(context?.preferenceDefinitions) ? context.preferenceDefinitions : [];
   const extName = String(context?.extensionName || _extensionContext.extensionName || '').trim();
   const cmdName = String(context?.commandName || _extensionContext.commandName || '').trim();
 
@@ -1638,14 +1695,24 @@ export function getPreferenceValues<Values extends PreferenceValues = Preference
   const extStored = extName ? readStoredPrefs(`sc-ext-prefs:${extName}`) : {};
   const cmdStored = extName && cmdName ? readStoredPrefs(`sc-ext-cmd-prefs:${extName}/${cmdName}`) : {};
   const stored = { ...extStored, ...cmdStored };
-
-  const merged = { ...stored, ...contextPrefs };
+  const defaults = preferenceDefinitions.reduce<Record<string, any>>((acc, def) => {
+    if (!def?.name) return acc;
+    acc[def.name] = getDefaultPreferenceValue(def);
+    return acc;
+  }, {});
+  const merged = { ...defaults, ...stored, ...contextPrefs };
   for (const [key, value] of Object.entries(contextPrefs)) {
     if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
       if (stored[key] !== undefined) {
         merged[key] = stored[key];
+      } else if (defaults[key] !== undefined) {
+        merged[key] = defaults[key];
       }
     }
+  }
+  for (const def of preferenceDefinitions) {
+    if (!def?.name) continue;
+    merged[def.name] = normalizePreferenceValue(def, merged[def.name]);
   }
 
   return merged as Values;

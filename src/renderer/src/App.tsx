@@ -2555,6 +2555,7 @@ const App: React.FC = () => {
           supportPath={(entry.bundle as any).supportPath}
           owner={(entry.bundle as any).owner}
           preferences={(entry.bundle as any).preferences}
+          preferenceDefinitions={(entry.bundle as any).preferenceDefinitions}
           launchArguments={(entry.bundle as any).launchArguments}
           launchContext={(entry.bundle as any).launchContext}
           fallbackText={(entry.bundle as any).fallbackText}
@@ -2581,6 +2582,7 @@ const App: React.FC = () => {
           supportPath={(run.bundle as any).supportPath}
           owner={(run.bundle as any).owner}
           preferences={(run.bundle as any).preferences}
+          preferenceDefinitions={(run.bundle as any).preferenceDefinitions}
           launchArguments={(run.bundle as any).launchArguments}
           launchContext={(run.bundle as any).launchContext}
           fallbackText={(run.bundle as any).fallbackText}
@@ -2777,6 +2779,7 @@ const App: React.FC = () => {
               supportPath={(extensionView as any).supportPath}
               owner={(extensionView as any).owner}
               preferences={(extensionView as any).preferences}
+              preferenceDefinitions={(extensionView as any).preferenceDefinitions}
               launchArguments={(extensionView as any).launchArguments}
               launchContext={(extensionView as any).launchContext}
               fallbackText={(extensionView as any).fallbackText}

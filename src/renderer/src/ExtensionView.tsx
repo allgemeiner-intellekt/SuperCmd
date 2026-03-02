@@ -15,6 +15,7 @@ import * as JsxRuntime from 'react/jsx-runtime';
 import { ArrowLeft, AlertTriangle } from 'lucide-react';
 import * as RaycastAPI from './raycast-api';
 import { NavigationContext, setExtensionContext, setGlobalNavigation, ExtensionContextType, ExtensionInfoReactContext } from './raycast-api';
+import { withExtensionContext } from './raycast-api/context-scope-runtime';
 
 // Also import @raycast/utils stubs from our shim
 import * as RaycastUtils from './raycast-api';
@@ -56,10 +57,43 @@ interface ExtensionViewProps {
   extensionPath?: string;
   owner?: string;
   preferences?: Record<string, any>;
+  preferenceDefinitions?: Array<{
+    scope: 'extension' | 'command';
+    name: string;
+    title?: string;
+    description?: string;
+    placeholder?: string;
+    required?: boolean;
+    type?: string;
+    default?: any;
+    data?: Array<{ title?: string; value?: string }>;
+  }>;
   launchArguments?: Record<string, any>;
   launchContext?: Record<string, any>;
   fallbackText?: string | null;
   launchType?: 'userInitiated' | 'background';
+}
+
+function getDefaultExtensionPreferenceValue(def: NonNullable<ExtensionViewProps['preferenceDefinitions']>[number]): any {
+  if (def?.default !== undefined) return def.default;
+  if (def?.type === 'checkbox') return false;
+  if (def?.type === 'dropdown') return def.data?.[0]?.value ?? '';
+  return '';
+}
+
+function buildResolvedExtensionPreferences(
+  preferenceDefinitions: ExtensionViewProps['preferenceDefinitions'],
+  preferences: Record<string, any> | undefined
+): Record<string, any> {
+  const defaults = (preferenceDefinitions || []).reduce<Record<string, any>>((acc, def) => {
+    if (!def?.name) return acc;
+    acc[def.name] = getDefaultExtensionPreferenceValue(def);
+    return acc;
+  }, {});
+  return {
+    ...defaults,
+    ...(preferences || {}),
+  };
 }
 
 /**
@@ -2781,18 +2815,9 @@ function ensureGlobals() {
       };
       const body = await normalizeBody(requestBody);
 
-      // For GET/HEAD requests, also download binary data so arrayBuffer()/blob() work.
-      // The text-based httpRequest corrupts binary responses (GIFs, images, etc.) because
-      // it converts Buffer to UTF-8 string, losing binary fidelity.
       const binaryDownloader = (window as any).electron?.httpDownloadBinary;
       const canDownloadBinary = method === 'GET' && typeof binaryDownloader === 'function';
-
-      const [ipcRes, rawBytes] = await Promise.all([
-        (window as any).electron.httpRequest({ url, method, headers, body }),
-        canDownloadBinary
-          ? binaryDownloader(url).catch(() => null as Uint8Array | null)
-          : Promise.resolve(null as Uint8Array | null),
-      ]);
+      const ipcRes = await (window as any).electron.httpRequest({ url, method, headers, body });
 
       if (!ipcRes || ipcRes.status === 0) {
         if (typeof nativeFetch === 'function') {
@@ -2805,6 +2830,24 @@ function ensureGlobals() {
           }
         }
         throw new TypeError(ipcRes?.statusText || `Failed to fetch ${url}`);
+      }
+
+      const contentType = String(
+        ipcRes.headers?.['content-type'] ||
+        ipcRes.headers?.['Content-Type'] ||
+        ''
+      ).toLowerCase();
+      const requestAccept = String(headers?.Accept || headers?.accept || '').toLowerCase();
+      const looksLikeBinaryUrl = /\.(gif|png|apng|jpe?g|webp|bmp|ico|icns|tiff?|mp3|wav|ogg|aac|m4a|mp4|mov|webm|woff2?|ttf|otf|eot|pdf|zip|gz|tgz|bz2|7z|rar)(?:[?#]|$)/i.test(url);
+      const isBinaryContentType =
+        /^image\/(?!svg\+xml)/i.test(contentType) ||
+        /^(audio|video|font)\//i.test(contentType) ||
+        /^application\/(?:octet-stream|pdf|zip|gzip|x-gzip|x-bzip|x-7z-compressed|x-rar-compressed)/i.test(contentType);
+      const prefersBinaryResponse = requestAccept.includes('image/') || requestAccept.includes('application/octet-stream');
+
+      let rawBytes: Uint8Array | null = null;
+      if (canDownloadBinary && (isBinaryContentType || prefersBinaryResponse || looksLikeBinaryUrl)) {
+        rawBytes = await binaryDownloader(url).catch(() => null as Uint8Array | null);
       }
 
       // Build Response with binary body when available, text otherwise.
@@ -3322,6 +3365,7 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
   extensionPath = '',
   owner = '',
   preferences = {},
+  preferenceDefinitions = [],
   launchArguments = {},
   launchContext,
   fallbackText,
@@ -3329,39 +3373,47 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
 }) => {
   const [error, setError] = useState<string | null>(buildError || null);
   const [navStack, setNavStack] = useState<React.ReactElement[]>([]);
+  const resolvedPreferences = useMemo(
+    () => buildResolvedExtensionPreferences(preferenceDefinitions, preferences),
+    [preferenceDefinitions, preferences]
+  );
+  const extensionCtx = useMemo<ExtensionContextType>(() => ({
+    extensionName,
+    extensionDisplayName,
+    extensionIconDataUrl,
+    commandName,
+    assetsPath,
+    supportPath,
+    owner,
+    preferences: resolvedPreferences,
+    preferenceDefinitions,
+    commandMode: mode as 'view' | 'no-view' | 'menu-bar',
+  }), [
+    extensionName,
+    extensionDisplayName,
+    extensionIconDataUrl,
+    commandName,
+    assetsPath,
+    supportPath,
+    owner,
+    resolvedPreferences,
+    preferenceDefinitions,
+    mode,
+  ]);
 
   // Set extension context before loading (so getPreferenceValues etc. work)
   useEffect(() => {
-    setExtensionContext({
-      extensionName,
-      extensionDisplayName,
-      extensionIconDataUrl,
-      commandName,
-      assetsPath,
-      supportPath,
-      owner,
-      preferences,
-      commandMode: mode as 'view' | 'no-view' | 'menu-bar',
-    });
-  }, [extensionName, extensionDisplayName, extensionIconDataUrl, commandName, assetsPath, supportPath, owner, preferences, mode]);
+    setExtensionContext(extensionCtx);
+  }, [extensionCtx]);
 
   // Load the extension's default export (skip if there was a build error)
   const ExtExport = useMemo(() => {
     if (buildError || !code) return null;
-    // Set context before loading so it's available during module execution
-    setExtensionContext({
-      extensionName,
-      extensionDisplayName,
-      extensionIconDataUrl,
-      commandName,
-      assetsPath,
-      supportPath,
-      owner,
-      preferences,
-      commandMode: mode as 'view' | 'no-view' | 'menu-bar',
-    });
-    return loadExtensionExport(code, extensionPath);
-  }, [code, buildError, extensionName, extensionDisplayName, extensionIconDataUrl, commandName, assetsPath, supportPath, extensionPath, owner, preferences, mode]);
+    // Module scope code can call getPreferenceValues() immediately.
+    // Load under the extension's scoped context so other async extension work
+    // cannot leak a different context into this bundle.
+    return withExtensionContext(extensionCtx, () => loadExtensionExport(code, extensionPath));
+  }, [code, buildError, extensionCtx, extensionPath]);
 
   // Is this a no-view command? Trust the mode from package.json.
   // NOTE: 'menu-bar' commands ARE React components (they use hooks),
@@ -3419,27 +3471,7 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
     extensionIconDataUrl: extensionIconDataUrl || '',
   }), [extensionName, extensionDisplayName, extensionIconDataUrl, commandName, assetsPath, mode]);
 
-  const scopedCtx = useMemo<ExtensionContextType>(() => ({
-    extensionName,
-    extensionDisplayName,
-    extensionIconDataUrl,
-    commandName,
-    assetsPath,
-    supportPath,
-    owner,
-    preferences,
-    commandMode: mode as 'view' | 'no-view' | 'menu-bar',
-  }), [
-    extensionName,
-    extensionDisplayName,
-    extensionIconDataUrl,
-    commandName,
-    assetsPath,
-    supportPath,
-    owner,
-    preferences,
-    mode,
-  ]);
+  const scopedCtx = extensionCtx;
 
   if (error || !ExtExport) {
     const errorMessage = error

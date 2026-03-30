@@ -16,53 +16,53 @@ SuperCmd is an open-source alternative to Raycast, designed to provide a similar
 ### Project Structure
 
 ```
-launcher/
-├── src/
-│   ├── main/                          # Electron main process
-│   │   ├── main.ts                    # Entry point; IPC handlers, window management, global shortcuts
-│   │   ├── preload.ts                 # contextBridge — exposes window.electron API to renderer
-│   │   ├── commands.ts                # App/settings/extension/script discovery; getAvailableCommands() with cache
-│   │   ├── extension-runner.ts        # Extension execution engine (esbuild bundle + require shim)
-│   │   ├── extension-registry.ts      # Extension catalog, install, uninstall, update
-│   │   ├── script-command-runner.ts   # Raycast-compatible script command execution
-│   │   ├── ai-provider.ts             # AI streaming (OpenAI / Anthropic / Ollama) via Node http/https
-│   │   └── settings-store.ts          # JSON settings persistence (AppSettings, cached in memory)
-│   ├── renderer/                      # Electron renderer process (UI)
-│   │   ├── types/
-│   │   │   └── electron.d.ts          # TypeScript types for window.electron IPC bridge
-│   │   └── src/
-│   │       ├── App.tsx                # Root component — composes all hooks, routes to view components
-│   │       ├── raycast-api/            # @raycast/api + @raycast/utils compatibility runtime modules
-│   │       │   ├── index.tsx          # Integration/export surface (wires runtime modules)
-│   │       │   ├── action-runtime*.tsx # Action/ActionPanel registry + overlay runtime
-│   │       │   ├── list-runtime*.tsx   # List runtime (item registry, renderers, detail)
-│   │       │   ├── form-runtime*.tsx   # Form runtime (container + fields + context)
-│   │       │   ├── grid-runtime*.tsx   # Grid runtime (item registry + renderer + container)
-│   │       │   ├── detail-runtime.tsx  # Detail runtime
-│   │       │   └── menubar-runtime*.tsx # MenuBarExtra runtime
-│   │       ├── hooks/                 # Feature hooks (state + logic, no JSX)
-│   │       │   ├── useAppViewManager.ts      # View state machine — which screen is active
-│   │       │   ├── useAiChat.ts              # AI chat mode state + streaming
-│   │       │   ├── useCursorPrompt.ts        # Inline AI cursor prompt state + streaming
-│   │       │   ├── useMenuBarExtensions.ts   # Menu-bar extension lifecycle
-│   │       │   ├── useBackgroundRefresh.ts   # Interval-based background refresh for extensions/scripts
-│   │       │   ├── useSpeakManager.ts        # TTS (Read) overlay state + portal
-│   │       │   └── useWhisperManager.ts      # Whisper STT overlay state + portals
-│   │       ├── views/                 # Full-screen view components (pure UI, state from hooks)
-│   │       │   ├── AiChatView.tsx                  # Full-screen AI chat panel
-│   │       │   ├── CursorPromptView.tsx             # Inline/portal AI cursor prompt UI
-│   │       │   ├── ScriptCommandSetupView.tsx       # Script argument collection form
-│   │       │   ├── ScriptCommandOutputView.tsx      # Script stdout/stderr output viewer
-│   │       │   └── ExtensionPreferenceSetupView.tsx # Extension preference/argument form
-│   │       ├── utils/                 # Pure utility modules (no side-effects)
-│   │       │   ├── constants.ts              # localStorage keys, magic numbers, error strings
-│   │       │   ├── command-helpers.tsx        # filterCommands, icon renderers, display helpers
-│   │       │   └── extension-preferences.ts  # localStorage helpers, preference hydration, missing-pref checks
-│   │       ├── ExtensionView.tsx      # Renders a live Raycast extension inside the launcher
-│   │       ├── settings/              # Settings window UI (AITab, ExtensionsTab, GeneralTab, etc.)
-│   │       └── useDetachedPortalWindow.ts    # Hook to open/manage a detached Electron overlay window
-│   └── native/                        # Native Swift modules
-└── dist/                              # Build output
+src/
+├── main/                              # Electron main process
+│   ├── main.ts                        # Entry point; IPC handlers, window management, global shortcuts
+│   ├── preload.ts                     # contextBridge — exposes window.electron API to renderer
+│   ├── commands.ts                    # App/settings/extension/script/quick-link discovery; getAvailableCommands() with cache
+│   ├── extension-runner.ts            # Extension execution engine (esbuild bundle + require shim)
+│   ├── extension-registry.ts          # Extension catalog, install, uninstall, update
+│   ├── script-command-runner.ts       # Raycast-compatible script command execution
+│   ├── quicklink-store.ts             # Quick link persistence and app-target metadata
+│   ├── ai-provider.ts                 # AI streaming (OpenAI / Anthropic / Ollama) via Node http/https
+│   └── settings-store.ts              # JSON settings persistence (AppSettings, cached in memory)
+├── renderer/                          # Electron renderer process (UI)
+│   ├── types/
+│   │   └── electron.d.ts              # TypeScript types for window.electron IPC bridge
+│   └── src/
+│       ├── App.tsx                    # Root component — composes all hooks, routes to view components
+│       ├── QuickLinkManager.tsx       # Quick link create/search/edit UI
+│       ├── raycast-api/               # @raycast/api + @raycast/utils compatibility runtime modules
+│       │   ├── index.tsx              # Integration/export surface (wires runtime modules)
+│       │   ├── action-runtime*.tsx    # Action/ActionPanel registry + overlay runtime
+│       │   ├── list-runtime*.tsx      # List runtime (item registry, renderers, detail)
+│       │   ├── form-runtime*.tsx      # Form runtime (container + fields + context)
+│       │   ├── grid-runtime*.tsx      # Grid runtime (item registry + renderer + container)
+│       │   ├── detail-runtime.tsx     # Detail runtime
+│       │   └── menubar-runtime*.tsx   # MenuBarExtra runtime
+│       ├── hooks/                     # Feature hooks (state + logic, no JSX)
+│       │   ├── useAppViewManager.ts   # View state machine — which screen is active
+│       │   ├── useAiChat.ts           # AI chat mode state + streaming
+│       │   ├── useCursorPrompt.ts     # Inline AI cursor prompt state + streaming
+│       │   ├── useMenuBarExtensions.ts # Menu-bar extension lifecycle
+│       │   ├── useBackgroundRefresh.ts # Interval-based background refresh for extensions/scripts
+│       │   ├── useSpeakManager.ts     # TTS (Read) overlay state + portal
+│       │   └── useWhisperManager.ts   # Whisper STT overlay state + portals
+│       ├── views/                     # Full-screen view components (pure UI, state from hooks)
+│       │   ├── AiChatView.tsx                  # Full-screen AI chat panel
+│       │   ├── CursorPromptView.tsx            # Inline/portal AI cursor prompt UI
+│       │   ├── ScriptCommandSetupView.tsx      # Script argument collection form
+│       │   ├── ScriptCommandOutputView.tsx     # Script stdout/stderr output viewer
+│       │   └── ExtensionPreferenceSetupView.tsx # Extension preference/argument form
+│       ├── utils/                     # Pure utility modules (no side-effects)
+│       │   ├── constants.ts           # localStorage keys, magic numbers, error strings
+│       │   ├── command-helpers.tsx    # filterCommands, icon renderers, display helpers
+│       │   └── extension-preferences.ts # localStorage helpers, preference hydration, missing-pref checks
+│       ├── ExtensionView.tsx          # Renders a live Raycast extension inside the launcher
+│       ├── settings/                  # Settings window UI (AITab, ExtensionsTab, GeneralTab, etc.)
+│       └── useDetachedPortalWindow.ts # Hook to open/manage a detached Electron overlay window
+└── native/                            # Native Swift modules
 ```
 
 ### Extension Execution Model
@@ -116,7 +116,7 @@ The `src/renderer/src/raycast-api/` runtime modules (wired by `index.tsx`) provi
 | `popToRoot` | ✅ Implemented | Navigation reset |
 | `launchCommand` | ✅ Implemented | Command launching |
 | `getSelectedText` | ⚠️ Partial | May need macOS permissions |
-| `getSelectedFinderItems` | ⚠️ Partial | May need macOS permissions |
+| `getSelectedFinderItems` | ⚠️ Stub | Currently returns an empty array; needs real Finder selection integration |
 | `getApplications` | ✅ Implemented | Application listing; optional directory path filter |
 | `getDefaultApplication` | ✅ Implemented | Get default app for a file path |
 | `getFrontmostApplication` | ✅ Implemented | Active app detection |
@@ -196,8 +196,8 @@ The following APIs from `@raycast/api` may need additional work or verification:
 
 1. **OAuth** - Currently stubbed, needs full OAuth flow implementation
 2. **BrowserExtension** - Basic stub, may need browser extension integration
-3. **getSelectedText** / **getSelectedFinderItems** - May require additional macOS permissions handling
-4. **openExtensionPreferences** / **openCommandPreferences** - Currently console.log stubs, need real settings navigation
+3. **getSelectedText** - May require additional macOS permissions handling depending on the source app
+4. **getSelectedFinderItems** - Currently a stub that returns an empty array; needs real Finder selection integration
 5. **Advanced Window Management** - Some edge cases may need testing
 6. **Image Asset Loading** - Asset path resolution may need refinement
 
@@ -265,6 +265,7 @@ AI availability is checked via `environment.canAccess(AI)` and cached for perfor
 - **Global Hotkeys**: System-wide keyboard shortcuts
 - **Window Management**: Overlay window with transparency
 - **Application Detection**: Get running applications and frontmost app
+- **Open Folders in Terminal/iTerm**: Supported via `open(target, application)` and Quick Links that bind a folder path to a specific macOS app
 - **File System**: Trash operations, file access
 - **AppleScript**: Execute AppleScript commands
 - **Clipboard**: Read/write clipboard contents

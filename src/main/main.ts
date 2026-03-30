@@ -34,6 +34,11 @@ import {
   installExtension,
   uninstallExtension,
 } from './extension-registry';
+import {
+  searchExtensions,
+  getPopularExtensions,
+  getExtensionDetails,
+} from './extension-api';
 import { getExtensionBundle, buildAllCommands, discoverInstalledExtensionCommands, getInstalledExtensionsSettingsSchema } from './extension-runner';
 import {
   startClipboardMonitor,
@@ -86,7 +91,23 @@ import {
   startFileSearchIndexing,
   stopFileSearchIndexing,
 } from './file-search-index';
-import { getCalendarEvents } from './calendar-events';
+import { ensureCalendarAccess, getCalendarEvents } from './calendar-events';
+import {
+  initNoteStore,
+  getAllNotes,
+  searchNotes,
+  getNoteById,
+  createNote,
+  updateNote,
+  deleteNote,
+  deleteAllNotes,
+  duplicateNote,
+  togglePinNote,
+  copyNoteToClipboard,
+  exportNoteToFile,
+  exportNotesToFile,
+  importNotesFromFile,
+} from './notes-store';
 
 const electron = require('electron');
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, shell, Menu, Tray, nativeImage, protocol, net, dialog, systemPreferences, clipboard: systemClipboard } = electron;
@@ -119,6 +140,1046 @@ function getNativeBinaryPath(name: string): string {
   return resolvePackagedUnpackedPath(base);
 }
 
+const WHISPERCPP_FRAMEWORK_VERSION = 'v1.8.3';
+const WHISPERCPP_MODEL_NAME = 'base';
+const WHISPERCPP_MODEL_URL = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPERCPP_MODEL_NAME}.bin`;
+
+let whisperCppModelEnsurePromise: Promise<string> | null = null;
+type WhisperCppModelStatus = {
+  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+  modelName: string;
+  path: string;
+  bytesDownloaded: number;
+  totalBytes: number | null;
+  error?: string;
+};
+let whisperCppModelStatus: WhisperCppModelStatus | null = null;
+
+// ─── Parakeet TDT v3 (FluidAudio) ─────────────────────────────────
+type ParakeetModelStatus = {
+  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+  modelName: string;
+  path: string;
+  progress: number; // 0-1 fraction
+  error?: string;
+};
+let parakeetModelStatus: ParakeetModelStatus | null = null;
+let parakeetModelEnsurePromise: Promise<string> | null = null;
+
+// Persistent serve-mode process for fast transcription (models stay loaded in memory)
+let parakeetServerProcess: any = null; // ChildProcess
+let parakeetServerReady = false;
+let parakeetServerStarting: Promise<void> | null = null;
+let parakeetServerBuffer = '';
+type PendingParakeetRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
+let parakeetPendingRequest: PendingParakeetRequest | null = null;
+
+function killParakeetServer(): void {
+  if (parakeetServerProcess) {
+    try {
+      parakeetServerProcess.stdin?.write('{"command":"exit"}\n');
+      parakeetServerProcess.kill();
+    } catch {}
+    parakeetServerProcess = null;
+  }
+  parakeetServerReady = false;
+  parakeetServerStarting = null;
+  parakeetServerBuffer = '';
+  if (parakeetPendingRequest) {
+    parakeetPendingRequest.reject(new Error('Parakeet server killed'));
+    parakeetPendingRequest = null;
+  }
+}
+
+function ensureParakeetServer(): Promise<void> {
+  if (parakeetServerReady && parakeetServerProcess && !parakeetServerProcess.killed) {
+    return Promise.resolve();
+  }
+  if (parakeetServerStarting) return parakeetServerStarting;
+
+  parakeetServerStarting = (async () => {
+    killParakeetServer();
+    const binaryPath = getParakeetTranscriberBinaryPath();
+    if (!fs.existsSync(binaryPath)) {
+      throw new Error('parakeet-transcriber binary not found');
+    }
+
+    const { spawn } = require('child_process');
+    const child = spawn(binaryPath, ['serve'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    parakeetServerProcess = child;
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      console.log(`[Parakeet][server stderr] ${chunk.toString().trim()}`);
+    });
+
+    child.on('exit', (code: number | null) => {
+      console.log(`[Parakeet] Server process exited with code ${code}`);
+      parakeetServerReady = false;
+      parakeetServerProcess = null;
+      parakeetServerStarting = null;
+      if (parakeetPendingRequest) {
+        parakeetPendingRequest.reject(new Error(`Parakeet server exited with code ${code}`));
+        parakeetPendingRequest = null;
+      }
+    });
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      parakeetServerBuffer += chunk.toString();
+      const lines = parakeetServerBuffer.split('\n');
+      parakeetServerBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const json = JSON.parse(trimmed);
+          if (json.ready) {
+            parakeetServerReady = true;
+            console.log('[Parakeet] Server ready (models loaded)');
+            continue;
+          }
+          if (parakeetPendingRequest) {
+            const req = parakeetPendingRequest;
+            parakeetPendingRequest = null;
+            if (json.error) {
+              req.reject(new Error(json.error));
+            } else {
+              req.resolve(json);
+            }
+          }
+        } catch {}
+      }
+    });
+
+    // Wait for "ready" signal
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Parakeet server startup timed out (120s)'));
+        killParakeetServer();
+      }, 120_000);
+
+      const checkReady = setInterval(() => {
+        if (parakeetServerReady) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          resolve();
+        }
+        if (!parakeetServerProcess || parakeetServerProcess.killed) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          reject(new Error('Parakeet server process died during startup'));
+        }
+      }, 50);
+    });
+
+    parakeetServerStarting = null;
+  })();
+
+  return parakeetServerStarting;
+}
+
+function sendParakeetRequest(request: Record<string, any>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!parakeetServerProcess || parakeetServerProcess.killed || !parakeetServerReady) {
+      reject(new Error('Parakeet server not running'));
+      return;
+    }
+    if (parakeetPendingRequest) {
+      reject(new Error('Another Parakeet request is already in flight'));
+      return;
+    }
+    parakeetPendingRequest = { resolve, reject };
+    try {
+      parakeetServerProcess.stdin.write(JSON.stringify(request) + '\n');
+    } catch (err: any) {
+      parakeetPendingRequest = null;
+      reject(err);
+    }
+  });
+}
+
+function getParakeetTranscriberBinaryPath(): string {
+  return getNativeBinaryPath('parakeet-transcriber');
+}
+
+function getParakeetModelStatus(): ParakeetModelStatus {
+  if (parakeetModelStatus?.state === 'downloading') {
+    return { ...parakeetModelStatus };
+  }
+  if (parakeetModelStatus?.state === 'error') {
+    return { ...parakeetModelStatus };
+  }
+
+  // Ask the binary for the real status
+  const binaryPath = getParakeetTranscriberBinaryPath();
+  try {
+    if (!fs.existsSync(binaryPath)) {
+      parakeetModelStatus = {
+        state: 'error',
+        modelName: 'parakeet-tdt-0.6b-v3',
+        path: '',
+        progress: 0,
+        error: 'parakeet-transcriber binary not found. Rebuild with: node scripts/build-parakeet.mjs',
+      };
+      return parakeetModelStatus;
+    }
+    const { spawnSync } = require('child_process');
+    const result = spawnSync(binaryPath, ['status'], { timeout: 10_000 });
+    if (result.status === 0 && result.stdout) {
+      const json = JSON.parse(result.stdout.toString().trim());
+      if (json.state === 'downloaded') {
+        parakeetModelStatus = {
+          state: 'downloaded',
+          modelName: json.modelName || 'parakeet-tdt-0.6b-v3',
+          path: json.path || '',
+          progress: 1,
+        };
+      } else {
+        parakeetModelStatus = {
+          state: 'not-downloaded',
+          modelName: json.modelName || 'parakeet-tdt-0.6b-v3',
+          path: '',
+          progress: 0,
+        };
+      }
+      return parakeetModelStatus;
+    }
+  } catch {}
+
+  parakeetModelStatus = {
+    state: 'not-downloaded',
+    modelName: 'parakeet-tdt-0.6b-v3',
+    path: '',
+    progress: 0,
+  };
+  return parakeetModelStatus;
+}
+
+async function ensureParakeetModelDownloaded(): Promise<string> {
+  // Check if already downloaded
+  const status = getParakeetModelStatus();
+  if (status.state === 'downloaded' && status.path) {
+    return status.path;
+  }
+
+  if (parakeetModelEnsurePromise) {
+    return await parakeetModelEnsurePromise;
+  }
+
+  parakeetModelEnsurePromise = (async () => {
+    const binaryPath = getParakeetTranscriberBinaryPath();
+    if (!fs.existsSync(binaryPath)) {
+      throw new Error('parakeet-transcriber binary not found');
+    }
+
+    parakeetModelStatus = {
+      state: 'downloading',
+      modelName: 'parakeet-tdt-0.6b-v3',
+      path: '',
+      progress: 0,
+    };
+
+    try {
+      console.log('[Parakeet] Downloading Parakeet TDT v3 models');
+      const { spawn } = require('child_process');
+      const modelPath = await new Promise<string>((resolve, reject) => {
+        const child = spawn(binaryPath, ['download'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let lastLine = '';
+        let stderr = '';
+
+        child.stdout.on('data', (chunk: Buffer) => {
+          const lines = chunk.toString().split('\n').filter(Boolean);
+          for (const line of lines) {
+            try {
+              const json = JSON.parse(line);
+              if (json.state === 'downloading') {
+                parakeetModelStatus = {
+                  state: 'downloading',
+                  modelName: 'parakeet-tdt-0.6b-v3',
+                  path: '',
+                  progress: typeof json.progress === 'number' ? json.progress : 0,
+                };
+              }
+              lastLine = line;
+            } catch {}
+          }
+        });
+
+        child.stderr.on('data', (chunk: Buffer) => {
+          stderr += chunk.toString();
+        });
+
+        child.on('error', (error: Error) => reject(error));
+        child.on('exit', (code: number | null) => {
+          if (code === 0 && lastLine) {
+            try {
+              const json = JSON.parse(lastLine);
+              if (json.state === 'downloaded') {
+                resolve(json.path || '');
+                return;
+              }
+              if (json.error) {
+                reject(new Error(json.error));
+                return;
+              }
+            } catch {}
+          }
+          reject(new Error(stderr.trim() || `parakeet-transcriber download exited with code ${code}`));
+        });
+      });
+
+      parakeetModelStatus = {
+        state: 'downloaded',
+        modelName: 'parakeet-tdt-0.6b-v3',
+        path: modelPath,
+        progress: 1,
+      };
+      console.log(`[Parakeet] Models ready at ${modelPath}`);
+      return modelPath;
+    } catch (error) {
+      parakeetModelStatus = {
+        state: 'error',
+        modelName: 'parakeet-tdt-0.6b-v3',
+        path: '',
+        progress: 0,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      throw error;
+    } finally {
+      parakeetModelEnsurePromise = null;
+    }
+  })();
+
+  return await parakeetModelEnsurePromise;
+}
+
+/** Pad a 16kHz 16-bit mono WAV to at least 1 second by appending silence. */
+function padWavToMinDuration(wavBuffer: Buffer, minSamples = 16000): Buffer {
+  // WAV header is 44 bytes; data follows as 16-bit PCM samples (2 bytes each)
+  if (wavBuffer.length < 44) return wavBuffer;
+  const dataBytesPresent = wavBuffer.length - 44;
+  const samplesPresent = Math.floor(dataBytesPresent / 2);
+  if (samplesPresent >= minSamples) return wavBuffer;
+
+  const samplesToAdd = minSamples - samplesPresent;
+  const silenceBytes = Buffer.alloc(samplesToAdd * 2, 0);
+  const newDataSize = dataBytesPresent + silenceBytes.length;
+  const padded = Buffer.concat([wavBuffer, silenceBytes]);
+
+  // Patch RIFF chunk size (bytes 4-7) = file size - 8
+  padded.writeUInt32LE(padded.length - 8, 4);
+  // Patch data sub-chunk size (bytes 40-43)
+  padded.writeUInt32LE(newDataSize, 40);
+
+  return padded;
+}
+
+async function transcribeAudioWithParakeet(opts: {
+  audioBuffer: Buffer;
+  language?: string;
+  mimeType?: string;
+}): Promise<string> {
+  const status = getParakeetModelStatus();
+  if (status.state === 'downloading') {
+    throw new Error('Parakeet models are still downloading. Finish setup from onboarding or Settings -> AI -> SuperCmd Whisper.');
+  }
+  if (status.state !== 'downloaded') {
+    throw new Error('Parakeet models have not been downloaded yet. Download them from onboarding or Settings -> AI -> SuperCmd Whisper.');
+  }
+
+  // Ensure the persistent server process is running (models loaded in memory)
+  await ensureParakeetServer();
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-parakeet-'));
+  const audioPath = path.join(tempDir, 'input.wav');
+
+  try {
+    fs.writeFileSync(audioPath, padWavToMinDuration(opts.audioBuffer));
+
+    const result = await sendParakeetRequest({
+      command: 'transcribe',
+      file: audioPath,
+    });
+
+    return result.text || '';
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ─── Qwen3 ASR (FluidAudio) — macOS 15+ ──────────────────────────
+type Qwen3ModelStatus = {
+  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+  modelName: string;
+  path: string;
+  progress: number;
+  error?: string;
+};
+let qwen3ModelStatus: Qwen3ModelStatus | null = null;
+let qwen3ModelEnsurePromise: Promise<string> | null = null;
+
+let qwen3ServerProcess: any = null;
+let qwen3ServerReady = false;
+let qwen3ServerStarting: Promise<void> | null = null;
+let qwen3ServerBuffer = '';
+type PendingQwen3Request = { resolve: (json: any) => void; reject: (err: Error) => void };
+let qwen3PendingRequest: PendingQwen3Request | null = null;
+
+function killQwen3Server(): void {
+  if (qwen3ServerProcess) {
+    try {
+      qwen3ServerProcess.stdin?.write('{"command":"exit"}\n');
+      qwen3ServerProcess.kill();
+    } catch {}
+    qwen3ServerProcess = null;
+  }
+  qwen3ServerReady = false;
+  qwen3ServerStarting = null;
+  qwen3ServerBuffer = '';
+  if (qwen3PendingRequest) {
+    qwen3PendingRequest.reject(new Error('Qwen3 server killed'));
+    qwen3PendingRequest = null;
+  }
+}
+
+function ensureQwen3Server(): Promise<void> {
+  if (qwen3ServerReady && qwen3ServerProcess && !qwen3ServerProcess.killed) {
+    return Promise.resolve();
+  }
+  if (qwen3ServerStarting) return qwen3ServerStarting;
+
+  qwen3ServerStarting = (async () => {
+    killQwen3Server();
+    const binaryPath = getParakeetTranscriberBinaryPath();
+    if (!fs.existsSync(binaryPath)) {
+      throw new Error('parakeet-transcriber binary not found');
+    }
+
+    const { spawn } = require('child_process');
+    const child = spawn(binaryPath, ['serve', '--model', 'qwen3'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    qwen3ServerProcess = child;
+
+    child.stderr.on('data', (chunk: Buffer) => {
+      console.log(`[Qwen3][server stderr] ${chunk.toString().trim()}`);
+    });
+
+    child.on('exit', (code: number | null) => {
+      console.log(`[Qwen3] Server process exited with code ${code}`);
+      qwen3ServerReady = false;
+      qwen3ServerProcess = null;
+      qwen3ServerStarting = null;
+      if (qwen3PendingRequest) {
+        qwen3PendingRequest.reject(new Error(`Qwen3 server exited with code ${code}`));
+        qwen3PendingRequest = null;
+      }
+    });
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      qwen3ServerBuffer += chunk.toString();
+      const lines = qwen3ServerBuffer.split('\n');
+      qwen3ServerBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const json = JSON.parse(trimmed);
+          if (json.ready) {
+            qwen3ServerReady = true;
+            console.log('[Qwen3] Server ready (models loaded)');
+            continue;
+          }
+          if (qwen3PendingRequest) {
+            const req = qwen3PendingRequest;
+            qwen3PendingRequest = null;
+            if (json.error) {
+              req.reject(new Error(json.error));
+            } else {
+              req.resolve(json);
+            }
+          }
+        } catch {}
+      }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Qwen3 server startup timed out (120s)'));
+        killQwen3Server();
+      }, 120_000);
+
+      const checkReady = setInterval(() => {
+        if (qwen3ServerReady) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          resolve();
+        }
+        if (!qwen3ServerProcess || qwen3ServerProcess.killed) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          reject(new Error('Qwen3 server process died during startup'));
+        }
+      }, 50);
+    });
+
+    qwen3ServerStarting = null;
+  })();
+
+  return qwen3ServerStarting;
+}
+
+function sendQwen3Request(request: Record<string, any>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!qwen3ServerProcess || qwen3ServerProcess.killed || !qwen3ServerReady) {
+      reject(new Error('Qwen3 server not running'));
+      return;
+    }
+    if (qwen3PendingRequest) {
+      reject(new Error('Another Qwen3 request is already in flight'));
+      return;
+    }
+    qwen3PendingRequest = { resolve, reject };
+    try {
+      qwen3ServerProcess.stdin.write(JSON.stringify(request) + '\n');
+    } catch (err: any) {
+      qwen3PendingRequest = null;
+      reject(err);
+    }
+  });
+}
+
+function getQwen3ModelStatus(): Qwen3ModelStatus {
+  if (qwen3ModelStatus?.state === 'downloading') return { ...qwen3ModelStatus };
+  if (qwen3ModelStatus?.state === 'error') return { ...qwen3ModelStatus };
+
+  const binaryPath = getParakeetTranscriberBinaryPath();
+  try {
+    if (!fs.existsSync(binaryPath)) {
+      qwen3ModelStatus = { state: 'error', modelName: 'qwen3-asr-0.6b', path: '', progress: 0, error: 'Binary not found' };
+      return qwen3ModelStatus;
+    }
+    const { spawnSync } = require('child_process');
+    const result = spawnSync(binaryPath, ['status', '--model', 'qwen3'], { timeout: 10_000 });
+    if (result.status === 0 && result.stdout) {
+      const json = JSON.parse(result.stdout.toString().trim());
+      qwen3ModelStatus = {
+        state: json.state === 'downloaded' ? 'downloaded' : 'not-downloaded',
+        modelName: json.modelName || 'qwen3-asr-0.6b',
+        path: json.path || '',
+        progress: json.state === 'downloaded' ? 1 : 0,
+      };
+      return qwen3ModelStatus;
+    }
+  } catch {}
+
+  qwen3ModelStatus = { state: 'not-downloaded', modelName: 'qwen3-asr-0.6b', path: '', progress: 0 };
+  return qwen3ModelStatus;
+}
+
+async function ensureQwen3ModelDownloaded(): Promise<string> {
+  const status = getQwen3ModelStatus();
+  if (status.state === 'downloaded' && status.path) return status.path;
+  if (qwen3ModelEnsurePromise) return await qwen3ModelEnsurePromise;
+
+  qwen3ModelEnsurePromise = (async () => {
+    const binaryPath = getParakeetTranscriberBinaryPath();
+    if (!fs.existsSync(binaryPath)) throw new Error('parakeet-transcriber binary not found');
+
+    qwen3ModelStatus = { state: 'downloading', modelName: 'qwen3-asr-0.6b', path: '', progress: 0 };
+
+    try {
+      console.log('[Qwen3] Downloading Qwen3 ASR models (int8)');
+      const { spawn } = require('child_process');
+      const modelPath = await new Promise<string>((resolve, reject) => {
+        const child = spawn(binaryPath, ['download', '--model', 'qwen3'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let lastLine = '';
+        let stderr = '';
+
+        child.stdout.on('data', (chunk: Buffer) => {
+          for (const line of chunk.toString().split('\n').filter(Boolean)) {
+            try {
+              const json = JSON.parse(line);
+              if (json.state === 'downloading') {
+                qwen3ModelStatus = { state: 'downloading', modelName: 'qwen3-asr-0.6b', path: '', progress: typeof json.progress === 'number' ? json.progress : 0 };
+              }
+              lastLine = line;
+            } catch {}
+          }
+        });
+
+        child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+        child.on('error', (error: Error) => reject(error));
+        child.on('exit', (code: number | null) => {
+          if (code === 0 && lastLine) {
+            try {
+              const json = JSON.parse(lastLine);
+              if (json.state === 'downloaded') { resolve(json.path || ''); return; }
+              if (json.error) { reject(new Error(json.error)); return; }
+            } catch {}
+          }
+          reject(new Error(stderr.trim() || `download exited with code ${code}`));
+        });
+      });
+
+      qwen3ModelStatus = { state: 'downloaded', modelName: 'qwen3-asr-0.6b', path: modelPath, progress: 1 };
+      console.log(`[Qwen3] Models ready at ${modelPath}`);
+      return modelPath;
+    } catch (error) {
+      qwen3ModelStatus = { state: 'error', modelName: 'qwen3-asr-0.6b', path: '', progress: 0, error: error instanceof Error ? error.message : String(error) };
+      throw error;
+    } finally {
+      qwen3ModelEnsurePromise = null;
+    }
+  })();
+
+  return await qwen3ModelEnsurePromise;
+}
+
+async function transcribeAudioWithQwen3(opts: {
+  audioBuffer: Buffer;
+  language?: string;
+  mimeType?: string;
+}): Promise<string> {
+  const status = getQwen3ModelStatus();
+  if (status.state === 'downloading') throw new Error('Qwen3 models are still downloading.');
+  if (status.state !== 'downloaded') throw new Error('Qwen3 models have not been downloaded yet. Download them from Settings -> AI -> SuperCmd Whisper.');
+
+  await ensureQwen3Server();
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-qwen3-'));
+  const audioPath = path.join(tempDir, 'input.wav');
+
+  try {
+    fs.writeFileSync(audioPath, padWavToMinDuration(opts.audioBuffer));
+    const request: Record<string, any> = { command: 'transcribe', file: audioPath };
+    if (opts.language) request.language = opts.language;
+    const result = await sendQwen3Request(request);
+    return result.text || '';
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+function getWhisperCppRuntimeDir(): string {
+  const base = path.join(__dirname, '..', 'native', 'whisper-runtime');
+  return resolvePackagedUnpackedPath(base);
+}
+
+function getWhisperCppFrameworkPath(): string {
+  return path.join(getWhisperCppRuntimeDir(), 'whisper.framework');
+}
+
+function getWhisperCppTranscriberBinaryPath(): string {
+  return getNativeBinaryPath('whisper-transcriber');
+}
+
+function getWhisperCppModelPath(): string {
+  return path.join(app.getPath('userData'), 'whispercpp', 'models', `ggml-${WHISPERCPP_MODEL_NAME}.bin`);
+}
+
+function getWhisperCppModelStatus(): WhisperCppModelStatus {
+  const modelPath = getWhisperCppModelPath();
+  try {
+    if (fs.existsSync(modelPath)) {
+      const stats = fs.statSync(modelPath);
+      whisperCppModelStatus = {
+        state: 'downloaded',
+        modelName: WHISPERCPP_MODEL_NAME,
+        path: modelPath,
+        bytesDownloaded: Math.max(0, Number(stats.size) || 0),
+        totalBytes: Math.max(0, Number(stats.size) || 0),
+      };
+      return whisperCppModelStatus;
+    }
+  } catch {}
+
+  if (whisperCppModelStatus?.state === 'downloading') {
+    return {
+      ...whisperCppModelStatus,
+      modelName: WHISPERCPP_MODEL_NAME,
+      path: modelPath,
+    };
+  }
+
+  if (whisperCppModelStatus?.state === 'error') {
+    return {
+      ...whisperCppModelStatus,
+      modelName: WHISPERCPP_MODEL_NAME,
+      path: modelPath,
+    };
+  }
+
+  whisperCppModelStatus = {
+    state: 'not-downloaded',
+    modelName: WHISPERCPP_MODEL_NAME,
+    path: modelPath,
+    bytesDownloaded: 0,
+    totalBytes: null,
+  };
+  return whisperCppModelStatus;
+}
+
+function findFirstExistingPath(candidates: string[]): string | null {
+  for (const candidate of candidates) {
+    try {
+      if (candidate && fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch {}
+  }
+  return null;
+}
+
+async function downloadFileWithRedirects(
+  url: string,
+  destinationPath: string,
+  redirectsRemaining: number = 5,
+  onProgress?: (bytesDownloaded: number, totalBytes: number | null) => void,
+): Promise<void> {
+  if (redirectsRemaining < 0) {
+    throw new Error(`Too many redirects while downloading ${url}`);
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const parsedUrl = new URL(url);
+    const transport = parsedUrl.protocol === 'https:' ? require('https') : require('http');
+    const request = transport.get(
+      parsedUrl.toString(),
+      {
+        headers: {
+          'User-Agent': 'SuperCmd/1.0 whisper.cpp bootstrap',
+          'Accept': '*/*',
+        },
+      },
+      (response: any) => {
+        const statusCode = Number(response?.statusCode || 0);
+        const location = String(response?.headers?.location || '');
+
+        if (statusCode >= 300 && statusCode < 400 && location) {
+          response.resume();
+          const nextUrl = new URL(location, parsedUrl).toString();
+          void downloadFileWithRedirects(nextUrl, destinationPath, redirectsRemaining - 1, onProgress)
+            .then(() => {
+              if (settled) return;
+              settled = true;
+              resolve();
+            })
+            .catch((error) => {
+              if (settled) return;
+              settled = true;
+              reject(error);
+            });
+          return;
+        }
+
+        if (statusCode >= 400) {
+          response.resume();
+          if (!settled) {
+            settled = true;
+            reject(new Error(`HTTP ${statusCode} while downloading ${url}`));
+          }
+          return;
+        }
+
+        const fileStream = fs.createWriteStream(destinationPath);
+        const totalBytesHeader = Number.parseInt(String(response?.headers?.['content-length'] || ''), 10);
+        const totalBytes = Number.isFinite(totalBytesHeader) && totalBytesHeader > 0 ? totalBytesHeader : null;
+        let bytesDownloaded = 0;
+
+        response.on('data', (chunk: Buffer) => {
+          bytesDownloaded += chunk.length;
+          onProgress?.(bytesDownloaded, totalBytes);
+        });
+
+        response.pipe(fileStream);
+
+        fileStream.on('finish', () => {
+          fileStream.close(() => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          });
+        });
+
+        fileStream.on('error', (error) => {
+          try { fileStream.close(); } catch {}
+          try { fs.unlinkSync(destinationPath); } catch {}
+          if (settled) return;
+          settled = true;
+          reject(error);
+        });
+
+        response.on('error', (error: Error) => {
+          try { fileStream.close(); } catch {}
+          try { fs.unlinkSync(destinationPath); } catch {}
+          if (settled) return;
+          settled = true;
+          reject(error);
+        });
+      }
+    );
+
+    request.on('error', (error: Error) => {
+      try { fs.unlinkSync(destinationPath); } catch {}
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+  });
+}
+
+async function ensureWhisperCppModelDownloaded(): Promise<string> {
+  const modelPath = getWhisperCppModelPath();
+  try {
+    if (fs.existsSync(modelPath)) {
+      whisperCppModelStatus = {
+        state: 'downloaded',
+        modelName: WHISPERCPP_MODEL_NAME,
+        path: modelPath,
+        bytesDownloaded: Math.max(0, Number(fs.statSync(modelPath).size) || 0),
+        totalBytes: Math.max(0, Number(fs.statSync(modelPath).size) || 0),
+      };
+      return modelPath;
+    }
+  } catch {}
+
+  if (whisperCppModelEnsurePromise) {
+    return await whisperCppModelEnsurePromise;
+  }
+
+  whisperCppModelEnsurePromise = (async () => {
+    const modelDir = path.dirname(modelPath);
+    const tempPath = `${modelPath}.download`;
+    fs.mkdirSync(modelDir, { recursive: true });
+    whisperCppModelStatus = {
+      state: 'downloading',
+      modelName: WHISPERCPP_MODEL_NAME,
+      path: modelPath,
+      bytesDownloaded: 0,
+      totalBytes: null,
+    };
+
+    try {
+      console.log(`[Whisper][whisper.cpp] Downloading ${WHISPERCPP_MODEL_NAME} model`);
+      await downloadFileWithRedirects(WHISPERCPP_MODEL_URL, tempPath, 5, (bytesDownloaded, totalBytes) => {
+        whisperCppModelStatus = {
+          state: 'downloading',
+          modelName: WHISPERCPP_MODEL_NAME,
+          path: modelPath,
+          bytesDownloaded,
+          totalBytes,
+        };
+      });
+      fs.renameSync(tempPath, modelPath);
+      const finalSize = Math.max(0, Number(fs.statSync(modelPath).size) || 0);
+      whisperCppModelStatus = {
+        state: 'downloaded',
+        modelName: WHISPERCPP_MODEL_NAME,
+        path: modelPath,
+        bytesDownloaded: finalSize,
+        totalBytes: finalSize,
+      };
+      console.log(`[Whisper][whisper.cpp] Model ready at ${modelPath}`);
+      return modelPath;
+    } catch (error) {
+      try { fs.unlinkSync(tempPath); } catch {}
+      whisperCppModelStatus = {
+        state: 'error',
+        modelName: WHISPERCPP_MODEL_NAME,
+        path: modelPath,
+        bytesDownloaded: 0,
+        totalBytes: null,
+        error: error instanceof Error ? error.message : String(error),
+      };
+      throw error;
+    } finally {
+      whisperCppModelEnsurePromise = null;
+    }
+  })();
+
+  return await whisperCppModelEnsurePromise;
+}
+
+function ensureWhisperCppTranscriberBinary(): string {
+  const binaryPath = getWhisperCppTranscriberBinaryPath();
+  try {
+    if (fs.existsSync(binaryPath)) {
+      return binaryPath;
+    }
+  } catch {}
+
+  const frameworkPath = getWhisperCppFrameworkPath();
+  const runtimeDir = getWhisperCppRuntimeDir();
+  if (!fs.existsSync(frameworkPath)) {
+    throw new Error(
+      `SuperCmd Whisper runtime is missing. Rebuild native helpers to download the official ${WHISPERCPP_FRAMEWORK_VERSION} macOS framework.`
+    );
+  }
+
+  const sourcePath = findFirstExistingPath([
+    path.join(app.getAppPath(), 'src', 'native', 'whisper-transcriber.swift'),
+    path.join(process.cwd(), 'src', 'native', 'whisper-transcriber.swift'),
+    path.join(__dirname, '..', '..', 'src', 'native', 'whisper-transcriber.swift'),
+  ]);
+
+  if (!sourcePath) {
+    throw new Error('SuperCmd Whisper transcriber source is missing. Run npm run build:native to regenerate the binary.');
+  }
+
+  fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
+
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('swiftc', [
+      '-O',
+      '-module-cache-path', path.join(os.tmpdir(), 'supercmd-swift-module-cache'),
+      '-F', runtimeDir,
+      '-framework', 'whisper',
+      '-Xlinker', '-rpath',
+      '-Xlinker', '@executable_path/whisper-runtime',
+      '-o', binaryPath,
+      sourcePath,
+    ]);
+    console.log('[Whisper][whisper.cpp] Compiled whisper-transcriber binary');
+  } catch (error) {
+    console.error('[Whisper][whisper.cpp] Compile failed:', error);
+    throw new Error('Failed to compile SuperCmd Whisper transcriber. Ensure Xcode Command Line Tools are installed.');
+  }
+
+  return binaryPath;
+}
+
+async function transcribeAudioWithWhisperCpp(opts: {
+  audioBuffer: Buffer;
+  language?: string;
+  mimeType?: string;
+}): Promise<string> {
+  const mimeType = String(opts.mimeType || 'audio/wav').toLowerCase();
+  if (mimeType && !mimeType.includes('wav')) {
+    throw new Error(`SuperCmd Whisper transcription expects WAV audio, received ${mimeType}.`);
+  }
+
+  const binaryPath = ensureWhisperCppTranscriberBinary();
+  const status = getWhisperCppModelStatus();
+  if (status.state === 'downloading') {
+    throw new Error('The SuperCmd Whisper model is still downloading. Finish setup from onboarding or Settings -> AI -> SuperCmd Whisper.');
+  }
+  if (status.state !== 'downloaded') {
+    throw new Error('The SuperCmd Whisper model has not been downloaded yet. Download it from onboarding or Settings -> AI -> SuperCmd Whisper.');
+  }
+  const modelPath = status.path;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-whispercpp-'));
+  const audioPath = path.join(tempDir, 'input.wav');
+
+  try {
+    fs.writeFileSync(audioPath, opts.audioBuffer);
+
+    const language = normalizeWhisperLanguageCode(opts.language);
+    const { spawn } = require('child_process');
+
+    const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn(binaryPath, [
+        '--model', modelPath,
+        '--file', audioPath,
+        '--language', language,
+      ], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (chunk: Buffer | string) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on('data', (chunk: Buffer | string) => {
+        stderr += chunk.toString();
+      });
+      child.on('error', (error: Error) => reject(error));
+      child.on('exit', (code: number | null) => {
+        if (code === 0) {
+          resolve({ stdout, stderr });
+          return;
+        }
+        reject(new Error(stderr.trim() || `SuperCmd Whisper exited with code ${code}`));
+      });
+    });
+
+    const transcriptMarker = '__TRANSCRIPT__:';
+    const markerIndex = result.stdout.lastIndexOf(transcriptMarker);
+    if (markerIndex >= 0) {
+      return result.stdout.slice(markerIndex + transcriptMarker.length).trim();
+    }
+
+    return result.stdout.trim();
+  } finally {
+    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+  }
+}
+
+const WHISPER_LANGUAGE_CODE_MAP: Record<string, string> = {
+  ar: 'ar',
+  'ar-eg': 'ar',
+  arabic: 'ar',
+  zh: 'zh',
+  'zh-cn': 'zh',
+  chinese: 'zh',
+  mandarin: 'zh',
+  'chinese (mandarin)': 'zh',
+  en: 'en',
+  'en-us': 'en',
+  'en-gb': 'en',
+  english: 'en',
+  fr: 'fr',
+  'fr-ca': 'fr',
+  'fr-fr': 'fr',
+  french: 'fr',
+  de: 'de',
+  'de-de': 'de',
+  german: 'de',
+  hi: 'hi',
+  'hi-in': 'hi',
+  hindi: 'hi',
+  it: 'it',
+  'it-it': 'it',
+  italian: 'it',
+  ja: 'ja',
+  'ja-jp': 'ja',
+  japanese: 'ja',
+  ko: 'ko',
+  'ko-kr': 'ko',
+  korean: 'ko',
+  pt: 'pt',
+  'pt-br': 'pt',
+  portuguese: 'pt',
+  'portuguese (brazil)': 'pt',
+  ru: 'ru',
+  'ru-ru': 'ru',
+  russian: 'ru',
+  es: 'es',
+  'es-mx': 'es',
+  'es-es': 'es',
+  spanish: 'es',
+  'spanish (mexico)': 'es',
+  'spanish (spain)': 'es',
+};
+
+function normalizeWhisperLanguageCode(rawLanguage?: string): string {
+  const normalized = String(rawLanguage || '').trim().toLowerCase().replace(/_/g, '-');
+  if (!normalized) return 'en';
+
+  const directMatch = WHISPER_LANGUAGE_CODE_MAP[normalized];
+  if (directMatch) return directMatch;
+
+  const shortCode = normalized.split('-')[0];
+  return WHISPER_LANGUAGE_CODE_MAP[shortCode] || shortCode || 'en';
+}
 type WindowManagementLayoutItem = {
   id: string;
   bounds?: {
@@ -140,6 +1201,18 @@ let cachedElectronLiquidGlassApi: any | null | undefined = undefined;
 let hasLoggedLiquidGlassRuntimeIncompatibility = false;
 const liquidGlassAppliedWindowIds = new Set<number>();
 let windowManagerAccessRequested = false;
+
+// Tracks whether macOS Automation permission for "System Events" has been
+// granted.  Starts `false`; flipped to `true` after the first *successful*
+// osascript call that uses System Events.  While `false`, non-essential
+// System-Events AppleScript is skipped so we never surprise the user with the
+// permission dialog (e.g. during the first window show).
+let systemEventsPermissionConfirmed = false;
+
+/** Call after a successful System Events osascript to record that permission is granted. */
+function markSystemEventsPermissionGranted(): void {
+  systemEventsPermissionConfirmed = true;
+}
 let windowManagementTargetWindowId: string | null = null;
 let windowManagementTargetWorkArea: { x: number; y: number; width: number; height: number } | null = null;
 let launcherEntryWindowManagementTargetWindowId: string | null = null;
@@ -744,8 +1817,8 @@ async function getNodeSnapshot(): Promise<{ target: NodeWindowInfo | null; windo
 
 // ─── Window Configuration ───────────────────────────────────────────
 
-const DEFAULT_WINDOW_WIDTH = 800;
-const DEFAULT_WINDOW_HEIGHT = 500;
+const DEFAULT_WINDOW_WIDTH = 760;
+const DEFAULT_WINDOW_HEIGHT = 480;
 const ONBOARDING_WINDOW_WIDTH = 1120;
 const ONBOARDING_WINDOW_HEIGHT = 740;
 const CURSOR_PROMPT_WINDOW_WIDTH = 500;
@@ -930,6 +2003,8 @@ let memoryStatusRenderSeq = 0;
 let memoryStatusHideTimerSeq = 0;
 let settingsWindow: InstanceType<typeof BrowserWindow> | null = null;
 let extensionStoreWindow: InstanceType<typeof BrowserWindow> | null = null;
+let notesWindow: InstanceType<typeof BrowserWindow> | null = null;
+let pendingNoteJson: string | null = null;
 let isVisible = false;
 let suppressBlurHide = false; // When true, blur won't hide the window (used during file dialogs)
 let oauthBlurHideSuppressionDepth = 0; // Keep launcher alive while OAuth browser flow is in progress
@@ -1275,6 +2350,10 @@ const fnCommandWatcherRestartTimers = new Map<string, NodeJS.Timeout>();
 const fnCommandWatcherConfigs = new Map<string, string>();
 // When true, the Fn watcher is allowed to start even during onboarding (step 4 — Dictation test).
 let fnWatcherOnboardingOverride = false;
+let hyperKeyMonitorProcess: any = null;
+let hyperKeyMonitorStdoutBuffer = '';
+let hyperKeyMonitorRestartTimer: NodeJS.Timeout | null = null;
+let hyperKeyMonitorEnabled = false;
 let fnSpeakToggleLastPressedAt = 0;
 let fnSpeakToggleIsPressed = false;
 type LocalSpeakBackend = 'edge-tts' | 'system-say';
@@ -1320,13 +2399,79 @@ function setLauncherOverlayTopmost(enabled: boolean): void {
   try {
     mainWindow.setAlwaysOnTop(Boolean(enabled));
   } catch {}
+  const launcherShouldSpanAllWorkspaces =
+    Boolean(enabled) &&
+    (
+      process.platform !== 'darwin' ||
+      launcherMode === 'onboarding'
+    );
   try {
-    if (enabled) {
-      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    if (launcherShouldSpanAllWorkspaces) {
+      mainWindow.setVisibleOnAllWorkspaces(true, {
+        visibleOnFullScreen: true,
+        skipTransformProcessType: process.platform === 'darwin',
+      });
     } else {
-      mainWindow.setVisibleOnAllWorkspaces(false);
+      // Avoid the dock/process-type transform for the launcher panel so
+      // Mission Control keeps it on the active Space.
+      mainWindow.setVisibleOnAllWorkspaces(false, {
+        visibleOnFullScreen: true,
+        skipTransformProcessType: process.platform === 'darwin',
+      } as any);
     }
   } catch {}
+}
+
+/**
+ * If AeroSpace (tiling WM) is running, move the launcher window to the
+ * currently focused AeroSpace workspace so it opens where the user is,
+ * not on the workspace where the window was last shown.
+ *
+ * This is fire-and-forget — failures are silently ignored so we never
+ * block or delay the launcher for users who don't use AeroSpace.
+ */
+let aerospaceAvailable: boolean | null = null; // null = not yet checked
+function moveWindowToCurrentAerospaceWorkspace(): void {
+  if (aerospaceAvailable === false || process.platform !== 'darwin' || !mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const { execFileSync } = require('child_process');
+    // Quick check: is AeroSpace running?  list-workspaces --focused
+    // exits 0 only when the server is up.
+    const focusedWs = String(
+      execFileSync('aerospace', ['list-workspaces', '--focused'], {
+        timeout: 500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }) || ''
+    ).trim();
+    if (!focusedWs) return;
+    aerospaceAvailable = true;
+
+    // Find our window(s) by bundle-id
+    const windowsRaw = String(
+      execFileSync('aerospace', ['list-windows', '--all', '--app-bundle-id', 'com.supercmd.app', '--format', '%{window-id} %{workspace}'], {
+        timeout: 500,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }) || ''
+    ).trim();
+    if (!windowsRaw) return;
+
+    for (const line of windowsRaw.split('\n')) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 2) continue;
+      const [windowId, currentWs] = parts;
+      if (currentWs === focusedWs) continue; // already on the right workspace
+      execFileSync('aerospace', ['move-node-to-workspace', focusedWs, '--window-id', windowId], {
+        timeout: 500,
+        stdio: 'ignore',
+      });
+    }
+  } catch (err: any) {
+    // ENOENT = `aerospace` binary not found — will never appear, so skip future calls.
+    if (err?.code === 'ENOENT') {
+      aerospaceAvailable = false;
+    }
+    // Other errors (server not running, command failed) are transient — retry next time.
+  }
 }
 
 function clearOAuthBlurHideSuppression(): void {
@@ -2432,6 +3577,7 @@ function isWindowShownRoutedSystemCommand(commandId: string): boolean {
     commandId === 'system-clipboard-manager' ||
     commandId === 'system-search-snippets' ||
     commandId === 'system-create-snippet' ||
+    commandId === 'system-search-notes' ||
     commandId === 'system-search-quicklinks' ||
     commandId === 'system-create-quicklink' ||
     commandId === 'system-search-files' ||
@@ -3854,6 +5000,7 @@ async function getSelectedTextForSpeak(options?: { allowClipboardFallback?: bool
         end tell
       `;
       const { stdout } = await execFileAsync('/usr/bin/osascript', ['-e', script]);
+      markSystemEventsPermissionGranted();
       return String(stdout || '').trim();
     } catch {
       return '';
@@ -3917,6 +5064,12 @@ function getRecentSelectionSnapshot(): string {
 
 async function captureSelectionSnapshotBeforeShow(options?: { allowClipboardFallback?: boolean }): Promise<string> {
   if (launcherMode !== 'default') {
+    rememberSelectionSnapshot('');
+    return '';
+  }
+  // Skip System Events during window-show if permission hasn't been confirmed
+  // yet, to avoid triggering the macOS Automation dialog unexpectedly.
+  if (!systemEventsPermissionConfirmed) {
     rememberSelectionSnapshot('');
     return '';
   }
@@ -4281,6 +5434,285 @@ function stopAllFnCommandWatchers(): void {
     stopFnCommandWatcher(commandId);
   }
   fnCommandWatcherConfigs.clear();
+}
+
+// ─── Hyper Key Monitor ────────────────────────────────────────────────
+
+function isHyperShortcut(shortcut: string): boolean {
+  const parts = String(shortcut || '').split('+').map((p) => p.trim().toLowerCase());
+  return parts.some((p) => p === 'hyper' || p === '✦');
+}
+
+const HYPER_KEY_SOURCE_TO_KEYCODE: Record<string, number> = {
+  'caps-lock': 57,
+  'left-control': 59,
+  'left-shift': 56,
+  'left-option': 58,
+  'left-command': 55,
+  'right-control': 62,
+  'right-shift': 60,
+  'right-option': 61,
+  'right-command': 54,
+};
+
+// CapsLock cannot be reliably intercepted via CGEvent taps because macOS
+// toggles CapsLock state at the IOKit level before events reach the tap.
+// The proven solution (used by Karabiner, Hyperkey, etc.) is to remap
+// CapsLock to F18 via hidutil, then intercept F18's clean keyDown/keyUp.
+const CAPSLOCK_HID_SRC = 0x700000039; // CapsLock HID usage
+const F18_HID_DST = 0x70000006D;     // F18 HID usage
+const F18_KEYCODE = 79;              // F18 CGKeyCode (kVK_F18)
+let hyperKeyCapsLockRemapped = false;
+
+function applyCapsLockHidutilRemap(): void {
+  try {
+    const { execSync } = require('child_process');
+    // Read existing mappings, preserve non-CapsLock ones, add ours
+    let existing: Array<{ HIDKeyboardModifierMappingSrc: number; HIDKeyboardModifierMappingDst: number }> = [];
+    try {
+      const raw = execSync('hidutil property --get UserKeyMapping 2>/dev/null', { encoding: 'utf-8' });
+      // Parse old-style plist: extract Src/Dst pairs
+      const entryRe = /HIDKeyboardModifierMappingSrc\s*=\s*(\d+)[^}]*HIDKeyboardModifierMappingDst\s*=\s*(\d+)/g;
+      let m;
+      while ((m = entryRe.exec(raw)) !== null) {
+        existing.push({
+          HIDKeyboardModifierMappingSrc: parseInt(m[1], 10),
+          HIDKeyboardModifierMappingDst: parseInt(m[2], 10),
+        });
+      }
+    } catch {}
+    const filtered = existing.filter((e) => e.HIDKeyboardModifierMappingSrc !== CAPSLOCK_HID_SRC);
+    filtered.push({ HIDKeyboardModifierMappingSrc: CAPSLOCK_HID_SRC, HIDKeyboardModifierMappingDst: F18_HID_DST });
+    const json = JSON.stringify({ UserKeyMapping: filtered });
+    execSync(`hidutil property --set '${json}'`);
+    hyperKeyCapsLockRemapped = true;
+    console.log('[HyperKey] CapsLock remapped to F18 via hidutil');
+  } catch (error) {
+    console.warn('[HyperKey] Failed to remap CapsLock via hidutil:', error);
+  }
+}
+
+function restoreCapsLockHidutilRemap(): void {
+  if (!hyperKeyCapsLockRemapped) return;
+  try {
+    const { execSync } = require('child_process');
+    let existing: Array<{ HIDKeyboardModifierMappingSrc: number; HIDKeyboardModifierMappingDst: number }> = [];
+    try {
+      const raw = execSync('hidutil property --get UserKeyMapping 2>/dev/null', { encoding: 'utf-8' });
+      const entryRe = /HIDKeyboardModifierMappingSrc\s*=\s*(\d+)[^}]*HIDKeyboardModifierMappingDst\s*=\s*(\d+)/g;
+      let m;
+      while ((m = entryRe.exec(raw)) !== null) {
+        existing.push({
+          HIDKeyboardModifierMappingSrc: parseInt(m[1], 10),
+          HIDKeyboardModifierMappingDst: parseInt(m[2], 10),
+        });
+      }
+    } catch {}
+    const filtered = existing.filter((e) => e.HIDKeyboardModifierMappingSrc !== CAPSLOCK_HID_SRC);
+    const json = JSON.stringify({ UserKeyMapping: filtered });
+    execSync(`hidutil property --set '${json}'`);
+    hyperKeyCapsLockRemapped = false;
+    console.log('[HyperKey] CapsLock mapping restored via hidutil');
+  } catch (error) {
+    console.warn('[HyperKey] Failed to restore CapsLock via hidutil:', error);
+  }
+}
+
+function ensureHyperKeyMonitorBinary(): string | null {
+  const fs = require('fs');
+  const binaryPath = getNativeBinaryPath('hyper-key-monitor');
+  if (fs.existsSync(binaryPath)) return binaryPath;
+  try {
+    const { execFileSync } = require('child_process');
+    const sourceCandidates = [
+      path.join(app.getAppPath(), 'src', 'native', 'hyper-key-monitor.swift'),
+      path.join(process.cwd(), 'src', 'native', 'hyper-key-monitor.swift'),
+      path.join(__dirname, '..', '..', 'src', 'native', 'hyper-key-monitor.swift'),
+    ];
+    const sourcePath = sourceCandidates.find((candidate) => fs.existsSync(candidate));
+    if (!sourcePath) {
+      console.warn('[HyperKey] Source file not found for hyper-key-monitor.swift');
+      return null;
+    }
+    fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
+    execFileSync('swiftc', [
+      '-O',
+      '-o', binaryPath,
+      sourcePath,
+      '-framework', 'CoreGraphics',
+      '-framework', 'AppKit',
+      '-framework', 'Carbon',
+    ]);
+    return binaryPath;
+  } catch (error) {
+    console.warn('[HyperKey] Failed to compile hyper key monitor:', error);
+    return null;
+  }
+}
+
+function stopHyperKeyMonitor(): void {
+  hyperKeyMonitorEnabled = false;
+  if (hyperKeyMonitorRestartTimer) {
+    clearTimeout(hyperKeyMonitorRestartTimer);
+    hyperKeyMonitorRestartTimer = null;
+  }
+  if (hyperKeyMonitorProcess) {
+    // Remove all listeners BEFORE killing to prevent the old process's
+    // exit handler from nullifying hyperKeyMonitorProcess (losing the
+    // reference to a newly spawned process) and scheduling stale restarts.
+    try { hyperKeyMonitorProcess.removeAllListeners(); } catch {}
+    try { hyperKeyMonitorProcess.stdout?.removeAllListeners(); } catch {}
+    try { hyperKeyMonitorProcess.stderr?.removeAllListeners(); } catch {}
+    try { hyperKeyMonitorProcess.kill('SIGTERM'); } catch {}
+    hyperKeyMonitorProcess = null;
+    hyperKeyMonitorStdoutBuffer = '';
+  }
+  restoreCapsLockHidutilRemap();
+}
+
+function handleHyperKeyCombo(key: string): void {
+  const comboShortcut = `Hyper+${key.length === 1 ? key.toUpperCase() : key}`;
+
+  // Always forward to renderer windows (for HotkeyRecorder capture)
+  const windows = [mainWindow, settingsWindow].filter(Boolean) as Array<InstanceType<typeof BrowserWindow>>;
+  for (const win of windows) {
+    if (win.isDestroyed()) continue;
+    try {
+      win.webContents.send('hyper-key-combo', comboShortcut);
+    } catch {}
+  }
+
+  const settings = loadSettings();
+
+  // Check if the global shortcut matches (e.g. Hyper+Space toggles launcher)
+  const globalNorm = normalizeAccelerator(settings.globalShortcut);
+  if (isHyperShortcut(globalNorm)) {
+    const globalKey = globalNorm.split('+').pop()?.trim().toLowerCase() || '';
+    if (globalKey === key.toLowerCase()) {
+      toggleWindow();
+      return;
+    }
+  }
+
+  // Check command hotkeys
+  for (const [commandId, hotkeyValue] of Object.entries(settings.commandHotkeys)) {
+    if (!hotkeyValue) continue;
+    const normalized = normalizeAccelerator(hotkeyValue);
+    if (!isHyperShortcut(normalized)) continue;
+    const hotkeyKey = normalized.split('+').pop()?.trim().toLowerCase() || '';
+    if (hotkeyKey === key.toLowerCase()) {
+      void runCommandById(commandId, 'hotkey');
+      return;
+    }
+  }
+}
+
+function startHyperKeyMonitor(): void {
+  if (hyperKeyMonitorProcess) return;
+  const settings = loadSettings();
+  if (!settings.hyperKey.enabled) return;
+
+  const sourceKey = settings.hyperKey.sourceKey;
+  let sourceKeyCode = HYPER_KEY_SOURCE_TO_KEYCODE[sourceKey];
+  if (sourceKeyCode === undefined) {
+    console.warn('[HyperKey] Unknown source key:', sourceKey);
+    return;
+  }
+
+  const binaryPath = ensureHyperKeyMonitorBinary();
+  if (!binaryPath) {
+    console.warn('[HyperKey] Monitor binary unavailable');
+    return;
+  }
+
+  // For CapsLock with "escape" or "nothing": remap to F18 via hidutil
+  // to prevent CapsLock toggle. For "toggle": DON'T use hidutil — let
+  // CapsLock pass through so it toggles naturally on tap.
+  const isCapsLock = sourceKey === 'caps-lock';
+  const capsLockTapBehavior = settings.hyperKey.capsLockTapBehavior || 'escape';
+  const useHidutil = isCapsLock && capsLockTapBehavior !== 'toggle';
+
+  if (useHidutil) {
+    applyCapsLockHidutilRemap();
+    sourceKeyCode = F18_KEYCODE;
+  }
+
+  const spawnArgs = [
+    String(sourceKeyCode),
+    capsLockTapBehavior,
+  ];
+  if (useHidutil) {
+    spawnArgs.push('remapped');
+  }
+
+  const { spawn } = require('child_process');
+  hyperKeyMonitorProcess = spawn(
+    binaryPath,
+    spawnArgs,
+    { stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  hyperKeyMonitorEnabled = true;
+  hyperKeyMonitorStdoutBuffer = '';
+
+  hyperKeyMonitorProcess.stdout.on('data', (chunk: Buffer | string) => {
+    hyperKeyMonitorStdoutBuffer += chunk.toString();
+    const lines = hyperKeyMonitorStdoutBuffer.split('\n');
+    hyperKeyMonitorStdoutBuffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const payload = JSON.parse(trimmed);
+        if (payload?.combo) {
+          handleHyperKeyCombo(payload.combo);
+        }
+        if (payload?.ready) {
+          console.log('[HyperKey] Monitor ready');
+        }
+        if (payload?.error) {
+          console.warn('[HyperKey] Monitor error:', payload.error);
+        }
+      } catch {}
+    }
+  });
+
+  hyperKeyMonitorProcess.stderr.on('data', (chunk: Buffer | string) => {
+    const text = chunk.toString().trim();
+    if (text) console.warn('[HyperKey]', text);
+  });
+
+  const scheduleRestart = () => {
+    if (!hyperKeyMonitorEnabled) return;
+    hyperKeyMonitorRestartTimer = setTimeout(() => {
+      hyperKeyMonitorRestartTimer = null;
+      if (!hyperKeyMonitorEnabled) return;
+      startHyperKeyMonitor();
+    }, 250);
+  };
+
+  hyperKeyMonitorProcess.on('error', () => {
+    hyperKeyMonitorProcess = null;
+    hyperKeyMonitorStdoutBuffer = '';
+    scheduleRestart();
+  });
+
+  hyperKeyMonitorProcess.on('exit', () => {
+    hyperKeyMonitorProcess = null;
+    hyperKeyMonitorStdoutBuffer = '';
+    scheduleRestart();
+  });
+}
+
+function syncHyperKeyMonitor(): void {
+  const settings = loadSettings();
+  if (!settings.hyperKey.enabled) {
+    stopHyperKeyMonitor();
+    return;
+  }
+  // Restart to pick up any config changes
+  stopHyperKeyMonitor();
+  hyperKeyMonitorEnabled = true;
+  startHyperKeyMonitor();
 }
 
 function startFnCommandWatcher(commandId: string, shortcut: string): void {
@@ -4667,7 +6099,26 @@ function handleOAuthCallbackUrl(rawUrl: string): void {
 
 app.on('open-url', (event: any, url: string) => {
   event.preventDefault();
-  console.log('[OAuth] open-url event received:', url);
+  console.log('[open-url] event received:', url);
+
+  // Handle note deeplinks: supercmd://notes/<note-id>
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'supercmd:' && parsed.hostname === 'notes') {
+      const noteId = parsed.pathname.replace(/^\//, '');
+      if (noteId) {
+        const note = getNoteById(noteId);
+        if (note) {
+          pendingNoteJson = JSON.stringify(note);
+          openNotesWindow('search');
+          return;
+        }
+      }
+    }
+  } catch {
+    // not a valid URL, fall through to OAuth
+  }
+
   handleOAuthCallbackUrl(url);
 });
 
@@ -5097,6 +6548,7 @@ function createWindow(): void {
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width: screenWidth, height: screenHeight } =
     primaryDisplay.workAreaSize;
+  const useDarwinLauncherPanel = process.platform === 'darwin';
 
   mainWindow = new BrowserWindow({
     width: DEFAULT_WINDOW_WIDTH,
@@ -5112,6 +6564,14 @@ function createWindow(): void {
     vibrancy: false,
     transparent: true,
     backgroundColor: '#00000000',
+    ...(useDarwinLauncherPanel
+      ? {
+          // Use AppKit's panel-backed window on macOS for launcher semantics.
+          type: 'panel' as const,
+          hiddenInMissionControl: true,
+          fullscreenable: false,
+        }
+      : {}),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -5282,7 +6742,7 @@ function createWindow(): void {
     mainWindow.setWindowButtonVisibility(false);
   }
 
-  mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  setLauncherOverlayTopmost(true);
 
   // NOTE: Do NOT call app.dock.hide() here. Hiding the dock before the window
   // is loaded and shown prevents macOS from granting the app foreground status,
@@ -5327,6 +6787,7 @@ function computePromptWindowBounds(
   const rawFocusedInputRect = preCapturedInputRect !== undefined ? preCapturedInputRect : getFocusedInputRect();
 
   const frontWindowRect = (() => {
+    if (!systemEventsPermissionConfirmed) return null;
     try {
       const { execFileSync } = require('child_process');
       const script = `
@@ -5690,6 +7151,7 @@ function getTypingCaretRect():
 function getFocusedInputRect():
   | { x: number; y: number; width: number; height: number }
   | null {
+  if (!systemEventsPermissionConfirmed) return null;
   try {
     const { execFileSync } = require('child_process');
     const script = `
@@ -5827,11 +7289,26 @@ function setLauncherMode(mode: LauncherMode): void {
         }
       }
       if (mode === 'onboarding') {
+        // Make onboarding behave like a normal app window — visible in dock and
+        // Mission Control, doesn't drop behind other windows.
         mainWindow.setAlwaysOnTop(false);
-        mainWindow.setVisibleOnAllWorkspaces(false);
+        mainWindow.setSkipTaskbar(false);
+        try { mainWindow.setHiddenInMissionControl(false); } catch {}
+        if (process.platform === 'darwin') {
+          try { app.dock.show(); } catch {}
+        }
+        mainWindow.setVisibleOnAllWorkspaces(false, {
+          visibleOnFullScreen: true,
+          skipTransformProcessType: process.platform === 'darwin',
+        } as any);
       } else {
         mainWindow.setAlwaysOnTop(true);
-        mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+        mainWindow.setSkipTaskbar(true);
+        try { mainWindow.setHiddenInMissionControl(true); } catch {}
+        if (process.platform === 'darwin' && prevMode === 'onboarding') {
+          try { app.dock.hide(); } catch {}
+        }
+        setLauncherOverlayTopmost(true);
       }
     } catch {}
     const onboardingTintChanged = (prevMode === 'onboarding') !== (mode === 'onboarding');
@@ -5920,10 +7397,16 @@ function captureFrontmostAppContext(): void {
           return;
         }
       }
+      // lsappinfo succeeded but returned our own app — skip AppleScript fallback
+      return;
     }
   } catch {
     // Fallback below.
   }
+
+  // Only fall back to System Events if permission has already been confirmed,
+  // to avoid triggering the macOS Automation permission dialog unexpectedly.
+  if (!systemEventsPermissionConfirmed) return;
 
   try {
     const { execSync } = require('child_process');
@@ -5937,6 +7420,7 @@ function captureFrontmostAppContext(): void {
       end tell
     `;
     const result = execSync(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf-8' }).trim();
+    markSystemEventsPermissionGranted();
     const [name, appPath, bundleId] = result.split('|||');
     if (bundleId !== 'com.supercmd' && name !== 'SuperCmd' && name !== 'Electron') {
       lastFrontmostApp = { name, path: appPath, bundleId };
@@ -5949,6 +7433,7 @@ function captureFrontmostAppContext(): void {
 async function showWindow(options?: { systemCommandId?: string }): Promise<void> {
   if (!mainWindow) return;
   setLauncherOverlayTopmost(true);
+  const shouldActivateLauncherWindow = process.platform !== 'darwin' || launcherMode === 'onboarding';
   let selectionSnapshotPromise: Promise<string> | null = null;
 
   // Capture the frontmost app BEFORE showing our window.
@@ -5967,6 +7452,10 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
     launcherEntryWindowManagementTargetWindowId = null;
     launcherEntryWindowManagementTargetWorkArea = null;
   }
+
+  // Move window to the current AeroSpace workspace (if AeroSpace is active)
+  // so the launcher opens where the user is, not on a stale workspace.
+  moveWindowToCurrentAerospaceWorkspace();
 
   applyLauncherBounds(launcherMode);
   const initialSelectionSnapshot = getRecentSelectionSnapshot();
@@ -5991,11 +7480,18 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
     });
   }
 
-  try {
-    app.focus({ steal: true });
-  } catch {}
+  if (shouldActivateLauncherWindow) {
+    try {
+      app.focus({ steal: true });
+    } catch {}
+  }
   mainWindow.show();
-  mainWindow.focus();
+  if (shouldActivateLauncherWindow) {
+    mainWindow.focus();
+  } else {
+    try { (mainWindow as any).focusOnWebView?.(); } catch {}
+    try { mainWindow.webContents.focus(); } catch {}
+  }
   mainWindow.moveTop();
   isVisible = true;
 
@@ -6005,7 +7501,12 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
     if (mainWindow.isVisible()) return;
     try {
       mainWindow.show();
-      mainWindow.focus();
+      if (shouldActivateLauncherWindow) {
+        mainWindow.focus();
+      } else {
+        try { (mainWindow as any).focusOnWebView?.(); } catch {}
+        try { mainWindow.webContents.focus(); } catch {}
+      }
       mainWindow.moveTop();
       isVisible = true;
     } catch {}
@@ -6754,10 +8255,16 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     if (source === 'launcher') hideWindow();
     return true;
   }
+  if (commandId === 'system-create-note') {
+    openNotesWindow('create');
+    if (source === 'launcher') hideWindow();
+    return true;
+  }
   if (
     commandId === 'system-clipboard-manager' ||
     commandId === 'system-search-snippets' ||
     commandId === 'system-create-snippet' ||
+    commandId === 'system-search-notes' ||
     commandId === 'system-search-quicklinks' ||
     commandId === 'system-create-quicklink' ||
     commandId === 'system-search-files' ||
@@ -7831,8 +9338,8 @@ function openSettingsWindow(payload?: SettingsNavigationPayload): void {
     }
     return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
   })();
-  const settingsWidth = Math.max(1120, Math.min(1360, displayWidth - 96));
-  const settingsHeight = Math.max(720, Math.min(860, displayHeight - 96));
+  const settingsWidth = Math.max(900, Math.min(1200, displayWidth - 96));
+  const settingsHeight = Math.max(600, Math.min(760, displayHeight - 96));
   const settingsX = displayX + Math.floor((displayWidth - settingsWidth) / 2);
   const settingsY = displayY + Math.floor((displayHeight - settingsHeight) / 2);
   const useNativeLiquidGlass = shouldUseNativeLiquidGlass();
@@ -7842,15 +9349,15 @@ function openSettingsWindow(payload?: SettingsNavigationPayload): void {
     height: settingsHeight,
     x: settingsX,
     y: settingsY,
-    minWidth: 1120,
-    minHeight: 720,
+    minWidth: 800,
+    minHeight: 520,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
     transparent: true,
     backgroundColor: '#00000000',
     vibrancy: useNativeLiquidGlass ? false : 'hud',
     visualEffectState: 'active',
-    hasShadow: false,
+    hasShadow: true,
     show: false,
     webPreferences: {
       nodeIntegration: false,
@@ -7876,8 +9383,86 @@ function openSettingsWindow(payload?: SettingsNavigationPayload): void {
 
   settingsWindow.on('closed', () => {
     settingsWindow = null;
-    // Hide dock again when no settings/store windows are open
-    if (process.platform === 'darwin' && !extensionStoreWindow) {
+    // Hide dock again when no settings/store/notes windows are open
+    if (process.platform === 'darwin' && !extensionStoreWindow && !notesWindow) {
+      app.dock.hide();
+    }
+  });
+}
+
+// ─── Notes Window ─────────────────────────────────────────────────
+
+function openNotesWindow(mode?: 'search' | 'create'): void {
+  if (notesWindow) {
+    // Send mode + pending note JSON to the existing window
+    notesWindow.webContents.send('notes-mode-changed', { mode: mode || 'create', noteJson: pendingNoteJson });
+    pendingNoteJson = null;
+    notesWindow.show();
+    notesWindow.focus();
+    return;
+  }
+
+  if (process.platform === 'darwin') {
+    app.dock.show();
+  }
+
+  const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = (() => {
+    if (mainWindow) {
+      const b = mainWindow.getBounds();
+      const center = {
+        x: b.x + Math.floor(b.width / 2),
+        y: b.y + Math.floor(b.height / 2),
+      };
+      return screen.getDisplayNearestPoint(center).workArea;
+    }
+    return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  })();
+  const notesWidth = Math.max(520, Math.min(680, displayWidth - 300));
+  const notesHeight = Math.max(420, Math.min(560, displayHeight - 250));
+  const notesX = displayX + Math.floor((displayWidth - notesWidth) / 2);
+  const notesY = displayY + Math.floor((displayHeight - notesHeight) / 2);
+  const useNativeLiquidGlass = shouldUseNativeLiquidGlass();
+
+  notesWindow = new BrowserWindow({
+    width: notesWidth,
+    height: notesHeight,
+    x: notesX,
+    y: notesY,
+    minWidth: 420,
+    minHeight: 360,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 16, y: 16 },
+    transparent: true,
+    backgroundColor: '#00000000',
+    vibrancy: useNativeLiquidGlass ? false : 'hud',
+    visualEffectState: 'active',
+    hasShadow: false,
+    alwaysOnTop: true,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+  applyLiquidGlassToWindow(notesWindow, {
+    cornerRadius: 14,
+    fallbackVibrancy: 'hud',
+  });
+
+  // Only close on Cmd+W — NOT on Escape, NOT on blur/click outside
+  registerCloseWindowShortcut(notesWindow);
+
+  const hash = mode ? `/notes?mode=${mode}` : '/notes';
+  loadWindowUrl(notesWindow, hash);
+
+  notesWindow.once('ready-to-show', () => {
+    notesWindow?.show();
+  });
+
+  notesWindow.on('closed', () => {
+    notesWindow = null;
+    if (process.platform === 'darwin' && !settingsWindow && !extensionStoreWindow) {
       app.dock.hide();
     }
   });
@@ -7905,8 +9490,8 @@ function openExtensionStoreWindow(): void {
     }
     return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
   })();
-  const storeWidth = 980;
-  const storeHeight = 700;
+  const storeWidth = 860;
+  const storeHeight = 600;
   const storeX = displayX + Math.floor((displayWidth - storeWidth) / 2);
   const storeY = displayY + Math.floor((displayHeight - storeHeight) / 2);
   const useNativeLiquidGlass = shouldUseNativeLiquidGlass();
@@ -7916,15 +9501,15 @@ function openExtensionStoreWindow(): void {
     height: storeHeight,
     x: storeX,
     y: storeY,
-    minWidth: 860,
-    minHeight: 560,
+    minWidth: 720,
+    minHeight: 480,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
     transparent: true,
     backgroundColor: '#00000000',
     vibrancy: useNativeLiquidGlass ? false : 'hud',
     visualEffectState: 'active',
-    hasShadow: false,
+    hasShadow: true,
     show: false,
     webPreferences: {
       nodeIntegration: false,
@@ -7946,7 +9531,7 @@ function openExtensionStoreWindow(): void {
 
   extensionStoreWindow.on('closed', () => {
     extensionStoreWindow = null;
-    if (process.platform === 'darwin' && !settingsWindow) {
+    if (process.platform === 'darwin' && !settingsWindow && !notesWindow) {
       app.dock.hide();
     }
   });
@@ -8557,11 +10142,15 @@ function registerCommandHotkeys(hotkeys: Record<string, string>): void {
 
   for (const [commandId, shortcut] of Object.entries(hotkeys)) {
     if (!shortcut) continue;
+
     const normalizedShortcut = normalizeAccelerator(shortcut);
     if (commandId === 'system-supercmd-whisper-speak-toggle' && isFnOnlyShortcut(normalizedShortcut)) {
       continue;
     }
     if (isFnShortcut(normalizedShortcut)) {
+      continue;
+    }
+    if (isHyperShortcut(normalizedShortcut)) {
       continue;
     }
     try {
@@ -8576,6 +10165,7 @@ function registerCommandHotkeys(hotkeys: Record<string, string>): void {
 
   syncFnSpeakToggleWatcher(hotkeys);
   syncFnCommandWatchers(hotkeys);
+  syncHyperKeyMonitor();
 }
 
 function registerDevToolsShortcut(): void {
@@ -8725,6 +10315,7 @@ app.whenReady().then(async () => {
 
   // Initialize snippet store
   initSnippetStore();
+  initNoteStore();
   try { refreshSnippetExpander(); } catch (e) {
     console.warn('[SnippetExpander] Failed to start:', e);
   }
@@ -9164,6 +10755,9 @@ app.whenReady().then(async () => {
         syncFnSpeakToggleWatcher(loadSettings().commandHotkeys);
         syncFnCommandWatchers(loadSettings().commandHotkeys);
       }
+      if (patch.hyperKey !== undefined) {
+        syncHyperKeyMonitor();
+      }
       return result;
     }
   );
@@ -9276,6 +10870,7 @@ app.whenReady().then(async () => {
           commandId === 'system-supercmd-whisper-speak-toggle' &&
           isFnOnlyShortcut(normalizedHotkey);
         const isFnHotkey = isFnShortcut(normalizedHotkey);
+        const isHyperHotkey = isHyperShortcut(normalizedHotkey);
 
         // Register the new one
         try {
@@ -9286,6 +10881,11 @@ app.whenReady().then(async () => {
             const fnConfig = parseHoldShortcutConfig(normalizedHotkey);
             const binaryPath = ensureWhisperHoldWatcherBinary();
             success = Boolean(fnConfig && fnConfig.fn && binaryPath);
+          } else if (isHyperHotkey) {
+            // Hyper shortcuts are handled by the native hyper key monitor,
+            // NOT by Electron's globalShortcut (which would ignore "Hyper"
+            // and register just the bare key).
+            success = true;
           } else {
             success = globalShortcut.register(normalizedHotkey, async () => {
               await runCommandById(commandId, 'hotkey');
@@ -9307,7 +10907,7 @@ app.whenReady().then(async () => {
             return { success: false, error: 'unavailable' as const };
           }
           hotkeys[commandId] = hotkey;
-          if (!isFnSpeakToggle && !isFnHotkey) {
+          if (!isFnSpeakToggle && !isFnHotkey && !isHyperHotkey) {
             registeredHotkeys.set(normalizedHotkey, commandId);
           }
         } catch {
@@ -10009,6 +11609,17 @@ app.whenReady().then(async () => {
       }
     );
 
+    ipcMain.on('spawn-stdin', (_event: any, pid: number, data: Uint8Array | string, end?: boolean) => {
+      const proc = spawnedProcesses.get(pid);
+      if (!proc?.stdin) return;
+      try {
+        if (data != null && (typeof data === 'string' ? data.length > 0 : data.byteLength > 0)) {
+          proc.stdin.write(typeof data === 'string' ? data : Buffer.from(data));
+        }
+        if (end) proc.stdin.end();
+      } catch {}
+    });
+
     ipcMain.handle('spawn-kill', (_event: any, pid: number, signal?: string | number) => {
       const proc = spawnedProcesses.get(pid);
       if (proc) {
@@ -10287,8 +11898,37 @@ return appURL's |path|() as text`,
     }
   });
 
-  // Get frontmost application
+  // Get frontmost application — prefer lsappinfo (no permissions needed),
+  // fall back to System Events only when permission is already confirmed.
   ipcMain.handle('get-frontmost-application', async () => {
+    try {
+      const { execFileSync } = require('child_process');
+      const asn = String(execFileSync('/usr/bin/lsappinfo', ['front'], { encoding: 'utf-8' }) || '').trim();
+      if (asn) {
+        const info = String(
+          execFileSync('/usr/bin/lsappinfo', ['info', '-only', 'bundleid,name,path', asn], { encoding: 'utf-8' }) || ''
+        );
+        const bundleId =
+          info.match(/"CFBundleIdentifier"\s*=\s*"([^"]*)"/)?.[1]?.trim() ||
+          info.match(/"bundleid"\s*=\s*"([^"]*)"/i)?.[1]?.trim() ||
+          '';
+        const name =
+          info.match(/"LSDisplayName"\s*=\s*"([^"]*)"/)?.[1]?.trim() ||
+          info.match(/"name"\s*=\s*"([^"]*)"/i)?.[1]?.trim() ||
+          '';
+        const appPath = info.match(/"path"\s*=\s*"([^"]*)"/)?.[1]?.trim() || '';
+        if (bundleId || name || appPath) {
+          return { name: name || bundleId || 'Unknown', path: appPath, bundleId: bundleId || undefined };
+        }
+      }
+    } catch {
+      // lsappinfo failed — try System Events below.
+    }
+
+    if (!systemEventsPermissionConfirmed) {
+      return { name: 'SuperCmd', path: '', bundleId: 'com.supercmd' };
+    }
+
     try {
       const { execSync } = require('child_process');
       const script = `
@@ -10301,6 +11941,7 @@ return appURL's |path|() as text`,
         end tell
       `;
       const result = execSync(`osascript -e '${script.replace(/'/g, "'\"'\"'")}'`, { encoding: 'utf-8' }).trim();
+      markSystemEventsPermissionGranted();
       const [name, appPath, bundleId] = result.split('|||');
       return { name, path: appPath, bundleId };
     } catch (e) {
@@ -10329,6 +11970,20 @@ return appURL's |path|() as text`,
       throw new Error(e?.message || 'AppleScript execution failed');
     }
   });
+
+  ipcMain.handle(
+    'calendar-ensure-access',
+    async (_event: any, options?: { prompt?: boolean }) => {
+      const prompt = options?.prompt !== false;
+      const result = await ensureCalendarAccess(prompt);
+      // After the macOS permission dialog closes, the main window may have
+      // lost focus.  Re-focus it so the blur-to-hide mechanism works again.
+      if (prompt && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) {
+        try { mainWindow.focus(); } catch {}
+      }
+      return result;
+    }
+  );
 
   ipcMain.handle(
     'calendar-get-events',
@@ -10567,6 +12222,56 @@ return appURL's |path|() as text`,
         broadcastExtensionsUpdated();
       }
       return success;
+    }
+  );
+
+  ipcMain.handle(
+    'search-extensions',
+    async (_event: any, query: string, options?: { category?: string; limit?: number; offset?: number }) => {
+      try {
+        return await searchExtensions(query, options);
+      } catch (err: any) {
+        console.warn('search-extensions API failed, falling back to local catalog filter:', err?.message);
+        // Fallback: filter the cached catalog locally
+        const catalog = await getCatalog();
+        const q = (query || '').toLowerCase();
+        const filtered = catalog.filter(
+          (e) =>
+            e.name.toLowerCase().includes(q) ||
+            e.title.toLowerCase().includes(q) ||
+            e.description.toLowerCase().includes(q) ||
+            e.author.toLowerCase().includes(q)
+        );
+        const limit = options?.limit ?? 50;
+        const offset = options?.offset ?? 0;
+        return { results: filtered.slice(offset, offset + limit), total: filtered.length };
+      }
+    }
+  );
+
+  ipcMain.handle(
+    'get-popular-extensions',
+    async (_event: any, limit?: number) => {
+      try {
+        return await getPopularExtensions(limit);
+      } catch (err: any) {
+        console.warn('get-popular-extensions API failed, returning empty:', err?.message);
+        return [];
+      }
+    }
+  );
+
+  ipcMain.handle(
+    'get-extension-details',
+    async (_event: any, name: string) => {
+      try {
+        return await getExtensionDetails(name);
+      } catch (err: any) {
+        console.warn('get-extension-details API failed, falling back to catalog:', err?.message);
+        // Fallback: find in cached catalog
+        const catalog = await getCatalog();
+        return catalog.find((e) => e.name === name) ?? null;
+      }
     }
   );
 
@@ -10968,6 +12673,83 @@ if let tiff = image?.tiffRepresentation {
     }
   });
 
+  // ─── IPC: Notes Manager ──────────────────────────────────────────
+
+  ipcMain.handle('note-get-all', () => {
+    return getAllNotes();
+  });
+
+  ipcMain.handle('note-search', (_event: any, query: string) => {
+    return searchNotes(query);
+  });
+
+  ipcMain.handle('note-create', (_event: any, data: { title: string; icon?: string; content?: string; theme?: string }) => {
+    return createNote(data as any);
+  });
+
+  ipcMain.handle('note-update', (_event: any, id: string, data: any) => {
+    return updateNote(id, data);
+  });
+
+  ipcMain.handle('note-delete', (_event: any, id: string) => {
+    return deleteNote(id);
+  });
+
+  ipcMain.handle('note-delete-all', () => {
+    return deleteAllNotes();
+  });
+
+  ipcMain.handle('note-duplicate', (_event: any, id: string) => {
+    return duplicateNote(id);
+  });
+
+  ipcMain.handle('note-toggle-pin', (_event: any, id: string) => {
+    return togglePinNote(id);
+  });
+
+  ipcMain.handle('note-copy-to-clipboard', (_event: any, id: string, format: string) => {
+    return copyNoteToClipboard(id, format as any);
+  });
+
+  ipcMain.handle('note-export-to-file', async (event: any, id: string, format: string) => {
+    suppressBlurHide = true;
+    try {
+      return await exportNoteToFile(id, format as any, getDialogParentWindow(event));
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
+  ipcMain.handle('note-export', async (event: any) => {
+    suppressBlurHide = true;
+    try {
+      return await exportNotesToFile(getDialogParentWindow(event));
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
+  ipcMain.handle('note-import', async (event: any) => {
+    suppressBlurHide = true;
+    try {
+      return await importNotesFromFile(getDialogParentWindow(event));
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
+  ipcMain.handle('open-notes-window', (_event: any, mode?: string, noteJson?: string) => {
+    if (noteJson) pendingNoteJson = noteJson;
+    openNotesWindow(mode as 'search' | 'create' | undefined);
+  });
+
+  ipcMain.handle('notes-get-pending', () => {
+    const json = pendingNoteJson;
+    // Don't clear immediately — React StrictMode double-mounts in dev
+    if (json) setTimeout(() => { if (pendingNoteJson === json) pendingNoteJson = null; }, 3000);
+    return json;
+  });
+
   // ─── IPC: Quick Link Manager ───────────────────────────────────
 
   ipcMain.handle('quicklink-get-all', () => {
@@ -11268,6 +13050,65 @@ if let tiff = image?.tiffRepresentation {
     return await refineWhisperTranscript(transcript);
   });
 
+  ipcMain.handle('whispercpp-model-status', async () => {
+    return getWhisperCppModelStatus();
+  });
+
+  ipcMain.handle('whispercpp-download-model', async () => {
+    await ensureWhisperCppModelDownloaded();
+    return getWhisperCppModelStatus();
+  });
+
+  ipcMain.handle('parakeet-model-status', async () => {
+    return getParakeetModelStatus();
+  });
+
+  ipcMain.handle('parakeet-download-model', async () => {
+    await ensureParakeetModelDownloaded();
+    return getParakeetModelStatus();
+  });
+
+  ipcMain.handle('parakeet-warmup', async () => {
+    const status = getParakeetModelStatus();
+    if (status.state !== 'downloaded') {
+      return { ready: false, error: 'Models not downloaded' };
+    }
+    if (parakeetServerReady && parakeetServerProcess && !parakeetServerProcess.killed) {
+      return { ready: true };
+    }
+    try {
+      await ensureParakeetServer();
+      return { ready: true };
+    } catch (err: any) {
+      return { ready: false, error: err?.message || 'Warmup failed' };
+    }
+  });
+
+  ipcMain.handle('qwen3-model-status', async () => {
+    return getQwen3ModelStatus();
+  });
+
+  ipcMain.handle('qwen3-download-model', async () => {
+    await ensureQwen3ModelDownloaded();
+    return getQwen3ModelStatus();
+  });
+
+  ipcMain.handle('qwen3-warmup', async () => {
+    const status = getQwen3ModelStatus();
+    if (status.state !== 'downloaded') {
+      return { ready: false, error: 'Models not downloaded' };
+    }
+    if (qwen3ServerReady && qwen3ServerProcess && !qwen3ServerProcess.killed) {
+      return { ready: true };
+    }
+    try {
+      await ensureQwen3Server();
+      return { ready: true };
+    } catch (err: any) {
+      return { ready: false, error: err?.message || 'Warmup failed' };
+    }
+  });
+
   ipcMain.handle(
     'whisper-transcribe',
     async (_event: any, audioArrayBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }) => {
@@ -11279,13 +13120,19 @@ if let tiff = image?.tiffRepresentation {
         throw new Error('SuperCmd Whisper is disabled in Settings -> AI.');
       }
 
-      // Parse speechToTextModel to a concrete provider model.
-      let provider: 'openai' | 'elevenlabs' = 'openai';
-      let model = 'gpt-4o-transcribe';
+      // Parse speechToTextModel to a concrete provider/model pair.
+      let provider: 'parakeet' | 'qwen3' | 'whispercpp' | 'openai' | 'elevenlabs' = 'whispercpp';
+      let model = `ggml-${WHISPERCPP_MODEL_NAME}`;
       const sttModel = s.ai.speechToTextModel || '';
-      if (!sttModel || sttModel === 'default') {
-        provider = 'openai';
-        model = 'gpt-4o-transcribe';
+      if (sttModel === 'parakeet') {
+        provider = 'parakeet';
+        model = 'parakeet-tdt-0.6b-v3';
+      } else if (sttModel === 'qwen3') {
+        provider = 'qwen3';
+        model = 'qwen3-asr-0.6b';
+      } else if (!sttModel || sttModel === 'default' || sttModel === 'whispercpp') {
+        provider = 'whispercpp';
+        model = `ggml-${WHISPERCPP_MODEL_NAME}`;
       } else if (sttModel === 'native') {
         // Renderer should not call cloud transcription in native mode.
         // Return empty transcript instead of surfacing an IPC error.
@@ -11308,30 +13155,47 @@ if let tiff = image?.tiffRepresentation {
         throw new Error('ElevenLabs API key not configured. Set it in Settings -> AI (or ELEVENLABS_API_KEY env var).');
       }
 
-      // Convert BCP-47 (e.g. 'en-US') to ISO-639-1 (e.g. 'en')
       const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
-      const language = rawLang.split('-')[0].toLowerCase() || 'en';
+      const language = normalizeWhisperLanguageCode(rawLang);
       const mimeType = options?.mimeType;
 
       const audioBuffer = Buffer.from(audioArrayBuffer);
 
       console.log(`[Whisper] Transcribing ${audioBuffer.length} bytes, provider=${provider}, model=${model}, lang=${language}, mime=${mimeType || 'unknown'}`);
 
-      const text = provider === 'elevenlabs'
-        ? await transcribeAudioWithElevenLabs({
+      const text = provider === 'parakeet'
+        ? await transcribeAudioWithParakeet({
             audioBuffer,
-            apiKey: elevenLabsApiKey,
-            model,
             language,
             mimeType,
           })
-        : await transcribeAudio({
-            audioBuffer,
-            apiKey: s.ai.openaiApiKey,
-            model,
-            language,
-            mimeType,
-          });
+        : provider === 'qwen3'
+          ? await transcribeAudioWithQwen3({
+              audioBuffer,
+              language,
+              mimeType,
+            })
+          : provider === 'whispercpp'
+            ? await transcribeAudioWithWhisperCpp({
+              audioBuffer,
+              language,
+              mimeType,
+            })
+          : provider === 'elevenlabs'
+            ? await transcribeAudioWithElevenLabs({
+                audioBuffer,
+                apiKey: elevenLabsApiKey,
+                model,
+                language,
+                mimeType,
+              })
+            : await transcribeAudio({
+                audioBuffer,
+                apiKey: s.ai.openaiApiKey,
+                model,
+                language,
+                mimeType,
+              });
 
       console.log(`[Whisper] Transcription result: "${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`);
       return text;
@@ -12017,6 +13881,29 @@ if let tiff = image?.tiffRepresentation {
     }
   );
 
+  ipcMain.handle('pick-launcher-background-image', async (event: any) => {
+    suppressBlurHide = true;
+    try {
+      const result = await dialog.showOpenDialog(getDialogParentWindow(event), {
+        properties: ['openFile'],
+        filters: [
+          {
+            name: 'Images',
+            extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff', 'heic', 'heif', 'avif'],
+          },
+        ],
+      });
+      if (result.canceled) return null;
+      const selectedPath = String(result.filePaths?.[0] || '').trim();
+      return selectedPath || null;
+    } catch (error: any) {
+      console.error('pick-launcher-background-image failed:', error);
+      return null;
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
   // ─── IPC: Menu Bar (Tray) Extensions ────────────────────────────
 
   // Get all menu-bar extension bundles so the renderer can run them
@@ -12231,6 +14118,26 @@ if let tiff = image?.tiffRepresentation {
     return template;
   }
 
+  // ─── System Events permission probe ────────────────────────────
+  // For returning users (onboarding already complete), do a deferred
+  // background check to see if System Events permission was granted in a
+  // previous session.  On macOS the Automation prompt only appears the
+  // *very first time*; once the TCC entry exists (granted OR denied) the
+  // call returns instantly without a dialog.
+  if (settings.hasSeenOnboarding) {
+    setTimeout(() => {
+      try {
+        const { execFileSync } = require('child_process');
+        execFileSync('/usr/bin/osascript', [
+          '-e', 'tell application "System Events" to return 1',
+        ], { encoding: 'utf-8', timeout: 2000 });
+        markSystemEventsPermissionGranted();
+      } catch {
+        // Permission not granted — System Events calls remain guarded.
+      }
+    }, 3000);
+  }
+
   // ─── Window + Shortcuts ─────────────────────────────────────────
 
   createWindow();
@@ -12251,15 +14158,21 @@ if let tiff = image?.tiffRepresentation {
     hideWindow();
   });
 
-  // Wait for the renderer to finish loading before showing the window.
-  // Showing before load completes results in a blank/transparent frame.
-  if (mainWindow && mainWindow.webContents.isLoadingMainFrame()) {
-    mainWindow.webContents.once('did-finish-load', () => {
-      void openLauncherFromUserEntry();
-    });
-  } else {
+  // Wait for the renderer React app to mount before dispatching the initial
+  // window-shown / run-system-command.  `did-finish-load` only means the HTML
+  // document loaded — React useEffect listeners register asynchronously after
+  // that, so messages sent too early are silently lost.
+  let launcherEntryDispatched = false;
+  const dispatchLauncherEntry = () => {
+    if (launcherEntryDispatched) return;
+    launcherEntryDispatched = true;
     void openLauncherFromUserEntry();
-  }
+  };
+  ipcMain.once('renderer-ready', dispatchLauncherEntry);
+  // Safety fallback: if the renderer-ready signal never arrives (e.g. the
+  // renderer crashes or loads a different route), open the launcher anyway
+  // so first launch never silently hangs.
+  setTimeout(dispatchLauncherEntry, 5000);
 
   app.on('activate', () => {
     // During onboarding the window is shown but may lose visual focus to a system
@@ -12290,13 +14203,11 @@ if let tiff = image?.tiffRepresentation {
 
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
-      // New window — wait for content to load before showing.
-      if (mainWindow && mainWindow.webContents.isLoadingMainFrame()) {
-        mainWindow.webContents.once('did-finish-load', () => {
-          void openLauncherFromUserEntry();
-        });
-        return;
-      }
+      // New window — wait for the renderer React app to mount.
+      ipcMain.once('renderer-ready', () => {
+        void openLauncherFromUserEntry();
+      });
+      return;
     }
     void openLauncherFromUserEntry();
   });
@@ -12324,6 +14235,7 @@ app.on('will-quit', () => {
   stopWhisperHoldWatcher();
   stopFnSpeakToggleWatcher();
   stopAllFnCommandWatchers();
+  stopHyperKeyMonitor();
   stopSpeakSession({ resetStatus: false });
   stopClipboardMonitor();
   stopSnippetExpander();

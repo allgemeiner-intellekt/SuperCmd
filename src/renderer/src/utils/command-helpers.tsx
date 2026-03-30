@@ -13,9 +13,16 @@
  */
 
 import React from 'react';
-import { Search, Power, Settings, Puzzle, Sparkles, Clipboard, FileText, Mic, Volume2, Brain, TerminalSquare, RefreshCw, LayoutGrid, Link2, Camera, CalendarDays } from 'lucide-react';
+import { Search, Power, Settings, Puzzle, Sparkles, FileText, Mic, Volume2, Brain, TerminalSquare, RefreshCw, LayoutGrid } from 'lucide-react';
 import type { CommandInfo, EdgeTtsVoice } from '../../types/electron';
 import supercmdLogo from '../../../../supercmd.svg';
+import IconCalendar from '../icons/Calendar';
+import IconCamera from '../icons/Camera';
+import IconClipboard from '../icons/Clipboard';
+import IconMagnifier from '../icons/FileSearch';
+import IconLink from '../icons/QuickLinks';
+import IconCodeEditor from '../icons/Snippet';
+import IconNotes from '../icons/Notes';
 import { formatShortcutForDisplay } from './hyper-key';
 import { renderQuickLinkIconGlyph } from './quicklink-icons';
 
@@ -38,10 +45,27 @@ export type ReadVoiceOption = {
   label: string;
 };
 
-const SEARCH_TOKEN_SPLIT_REGEX = /[^a-z0-9]+/g;
+type Translator = (key: string, params?: Record<string, string | number>) => string;
+
+function buildCoreIconStyle(
+  gradient1Top: string,
+  gradient1Bottom: string,
+  gradient2Top: string,
+  gradient2Bottom: string
+): React.CSSProperties {
+  return {
+    '--nc-gradient-1-color-1': gradient1Top,
+    '--nc-gradient-1-color-2': gradient1Bottom,
+    '--nc-gradient-2-color-1': gradient2Top,
+    '--nc-gradient-2-color-2': gradient2Bottom,
+  } as React.CSSProperties;
+}
+
+const SEARCH_TOKEN_SPLIT_REGEX = /[^\p{L}\p{N}]+/gu;
 
 function normalizeSearchText(value: string): string {
   return String(value || '')
+    .normalize('NFKD')
     .toLowerCase()
     .replace(SEARCH_TOKEN_SPLIT_REGEX, ' ')
     .trim();
@@ -152,7 +176,11 @@ function bestTermScore(term: string, candidates: SearchCandidate[]): number {
 /**
  * Filter and sort commands based on search query
  */
-export function filterCommands(commands: CommandInfo[], query: string): CommandInfo[] {
+export function filterCommands(
+  commands: CommandInfo[],
+  query: string,
+  aliasLookup: Record<string, string> = {}
+): CommandInfo[] {
   const normalizedQuery = normalizeSearchText(query);
   if (!normalizedQuery) {
     return commands;
@@ -164,11 +192,15 @@ export function filterCommands(commands: CommandInfo[], query: string): CommandI
     .map((cmd) => {
       const title = normalizeSearchText(cmd.title);
       const subtitle = normalizeSearchText(String(cmd.subtitle || ''));
+      const normalizedAlias = normalizeSearchText(aliasLookup[cmd.id] || '');
+      const aliasTokens = normalizedAlias ? tokenizeSearchText(normalizedAlias) : [];
       const keywordTokens = (cmd.keywords || []).flatMap((keyword) => tokenizeSearchText(keyword));
       const titleTokens = tokenizeSearchText(cmd.title);
       const subtitleTokens = tokenizeSearchText(String(cmd.subtitle || ''));
+      const hasExactAliasMatch = Boolean(normalizedAlias) && normalizedAlias === normalizedQuery;
 
       const candidates: SearchCandidate[] = [
+        ...aliasTokens.map((token) => ({ token, weight: 1.08 })),
         ...titleTokens.map((token) => ({ token, weight: 1 })),
         ...keywordTokens.map((token) => ({ token, weight: 0.92 })),
         ...subtitleTokens.map((token) => ({ token, weight: 0.76 })),
@@ -180,12 +212,18 @@ export function filterCommands(commands: CommandInfo[], query: string): CommandI
 
       let score = 0;
 
-      if (title === normalizedQuery) {
+      if (hasExactAliasMatch) {
+        score += 1200;
+      } else if (title === normalizedQuery) {
         score += 420;
       } else if (title.startsWith(normalizedQuery)) {
         score += 320;
       } else if (title.includes(normalizedQuery)) {
         score += 260;
+      } else if (normalizedAlias && normalizedAlias.startsWith(normalizedQuery)) {
+        score += 240;
+      } else if (normalizedAlias && normalizedAlias.includes(normalizedQuery)) {
+        score += 200;
       } else if (keywordTokens.includes(normalizedQuery)) {
         score += 225;
       } else if (keywordTokens.some((keyword) => keyword.includes(normalizedQuery))) {
@@ -216,10 +254,16 @@ export function filterCommands(commands: CommandInfo[], query: string): CommandI
       // Favor concise titles when scores are close.
       score += Math.max(0, 12 - Math.max(0, title.length - normalizedQuery.length));
 
-      return { cmd, score, title };
+      return { cmd, score, title, hasExactAliasMatch };
     })
-    .filter((entry): entry is { cmd: CommandInfo; score: number; title: string } => Boolean(entry) && entry.score > 0)
+    .filter(
+      (entry): entry is { cmd: CommandInfo; score: number; title: string; hasExactAliasMatch: boolean } =>
+        Boolean(entry) && entry.score > 0
+    )
     .sort((a, b) => {
+      if (a.hasExactAliasMatch !== b.hasExactAliasMatch) {
+        return Number(b.hasExactAliasMatch) - Number(a.hasExactAliasMatch);
+      }
       if (b.score !== a.score) return b.score - a.score;
       return a.title.localeCompare(b.title);
     });
@@ -230,19 +274,19 @@ export function filterCommands(commands: CommandInfo[], query: string): CommandI
 /**
  * Get category display label
  */
-export function getCategoryLabel(category: string): string {
+export function getCategoryLabel(category: string, t?: Translator): string {
   switch (category) {
     case 'settings':
-      return 'System Settings';
+      return t ? t('launcher.badges.settings') : 'System Settings';
     case 'system':
-      return 'System';
+      return t ? t('common.system') : 'System';
     case 'extension':
-      return 'Extension';
+      return t ? t('launcher.badges.extension') : 'Extension';
     case 'script':
-      return 'Script';
+      return t ? t('launcher.badges.script') : 'Script';
     case 'app':
     default:
-      return 'Application';
+      return t ? t('launcher.badges.application') : 'Application';
   }
 }
 
@@ -270,10 +314,10 @@ export function getCommandAccessoryLabel(command: CommandInfo): string {
   return '';
 }
 
-export function getCommandTypeBadgeLabel(command: CommandInfo): string {
+export function getCommandTypeBadgeLabel(command: CommandInfo, t?: Translator): string {
   const commandId = String(command.id || '').trim();
   if (commandId.startsWith('quicklink-')) {
-    return 'Quick Link';
+    return t ? t('launcher.badges.quickLink') : 'Quick Link';
   }
   return '';
 }
@@ -366,8 +410,20 @@ export function renderSuperCmdLogoIcon(): React.ReactNode {
   );
 }
 
-export function getCommandDisplayTitle(command: CommandInfo): string {
+export function getCommandDisplayTitle(command: CommandInfo, t?: Translator): string {
   if (command.category === 'app' && isSuperCmdAppTitle(command.title)) return 'SuperCmd';
+  if (t) {
+    switch (String(command.id || '').trim()) {
+      case 'system-open-settings':
+        return t('settings.title');
+      case 'system-supercmd-whisper':
+        return t('whisper.title');
+      case 'system-supercmd-speak':
+        return t('read.title');
+      default:
+        break;
+    }
+  }
   return command.title;
 }
 
@@ -892,11 +948,12 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
 
   if (commandId === 'system-clipboard-manager') {
     return (
-      <div
-        className="w-5 h-5 rounded flex items-center justify-center"
-        style={{ background: 'var(--icon-clipboard-bg)', color: 'var(--icon-clipboard-fg)' }}
-      >
-        <Clipboard className="w-3 h-3" />
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconClipboard
+          size="16px"
+          aria-hidden="true"
+          style={buildCoreIconStyle('#fda4af', '#be123c', '#fff1f2cc', '#fecdd399')}
+        />
       </div>
     );
   }
@@ -908,11 +965,27 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
     commandId === 'system-export-snippets'
   ) {
     return (
-      <div
-        className="w-5 h-5 rounded flex items-center justify-center"
-        style={{ background: 'var(--icon-snippet-bg)', color: 'var(--icon-snippet-fg)' }}
-      >
-        <FileText className="w-3 h-3" />
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconCodeEditor
+          size="16px"
+          aria-hidden="true"
+          style={buildCoreIconStyle('#fcd34d', '#d97706', '#fef3c7b8', '#fcd34d90')}
+        />
+      </div>
+    );
+  }
+
+  if (
+    commandId === 'system-search-notes' ||
+    commandId === 'system-create-note'
+  ) {
+    return (
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconNotes
+          size="16px"
+          aria-hidden="true"
+          style={buildCoreIconStyle('#c4b5fd', '#7c3aed', '#ede9feb8', '#c4b5fd90')}
+        />
       </div>
     );
   }
@@ -923,11 +996,12 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
     commandId.startsWith('quicklink-')
   ) {
     return (
-      <div
-        className="w-5 h-5 rounded flex items-center justify-center"
-        style={{ background: 'var(--icon-search-bg)', color: 'var(--icon-search-fg)' }}
-      >
-        <Link2 className="w-3 h-3" />
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconLink
+          size="16px"
+          aria-hidden="true"
+          style={buildCoreIconStyle('#86efac', '#16a34a', '#dcfce7b8', '#86efac90')}
+        />
       </div>
     );
   }
@@ -948,19 +1022,31 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
 
   if (commandId === 'system-search-files') {
     return (
-      <div
-        className="w-5 h-5 rounded flex items-center justify-center"
-        style={{ background: 'var(--icon-search-bg)', color: 'var(--icon-search-fg)' }}
-      >
-        <Search className="w-3 h-3" />
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconMagnifier
+          size="16px"
+          aria-hidden="true"
+          style={buildCoreIconStyle('#86efac', '#16a34a', '#dcfce7b8', '#86efac90')}
+        />
       </div>
     );
   }
 
   if (commandId === 'system-my-schedule') {
     return (
-      <div className="w-5 h-5 rounded bg-rose-500/20 flex items-center justify-center">
-        <CalendarDays className="w-3 h-3 text-rose-200" />
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconCalendar
+          size="16px"
+          aria-hidden="true"
+          style={
+            {
+              '--nc-gradient-1-color-1': '#fecdd3',
+              '--nc-gradient-1-color-2': '#e11d48',
+              '--nc-gradient-2-color-1': '#fff1f2b8',
+              '--nc-gradient-2-color-2': '#fecdd390',
+            } as React.CSSProperties
+          }
+        />
       </div>
     );
   }
@@ -991,8 +1077,12 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
 
   if (commandId === 'system-camera') {
     return (
-      <div className="w-5 h-5 rounded bg-cyan-500/20 flex items-center justify-center">
-        <Camera className="w-3 h-3 text-cyan-200" />
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconCamera
+          size="16px"
+          aria-hidden="true"
+          style={buildCoreIconStyle('#a5f3fc', '#0891b2', '#cffafecc', '#a5f3fc99')}
+        />
       </div>
     );
   }

@@ -18,6 +18,7 @@ import type {
 import ExtensionView from './ExtensionView';
 import ClipboardManager from './ClipboardManager';
 import SnippetManager from './SnippetManager';
+import NotesSearchInline from './NotesSearchInline';
 import QuickLinkManager from './QuickLinkManager';
 import CameraExtension from './CameraExtension';
 import ScheduleExtension from './ScheduleExtension';
@@ -68,10 +69,14 @@ import ExtensionPreferenceSetupView from './views/ExtensionPreferenceSetupView';
 import AiChatView from './views/AiChatView';
 import CursorPromptView from './views/CursorPromptView';
 import InlineArgumentField, { InlineArgumentLeadingIcon, InlineArgumentOverflowBadge } from './components/InlineArgumentField';
+import { useI18n } from './i18n';
 
 const STALE_OVERLAY_RESET_MS = 60_000;
 const MAX_RECENT_SECTION_ITEMS = 5;
 const QUICK_LINK_COMMAND_PREFIX = 'quicklink-';
+const DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT = 25;
+const DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT = 45;
+const MAX_LAUNCHER_BACKGROUND_BLUR_PX = 20;
 
 function getQuickLinkIdFromCommandId(commandId: string): string | null {
   const normalized = String(commandId || '').trim();
@@ -215,6 +220,73 @@ function isEditableElement(element: Element | null): boolean {
   );
 }
 
+function toFileUrl(filePath: string): string {
+  const normalizedPath = String(filePath || '').trim();
+  if (!normalizedPath) return '';
+  return `file://${encodeURI(normalizedPath)}`;
+}
+
+function clampLauncherBackgroundPercent(value: number, fallback: number): number {
+  const parsedValue = Number(value);
+  if (!Number.isFinite(parsedValue)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(parsedValue)));
+}
+
+function launcherBackgroundBlurPercentToPx(value: number): number {
+  const clampedPercent = clampLauncherBackgroundPercent(
+    value,
+    DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT
+  );
+  return Number(((clampedPercent / 100) * MAX_LAUNCHER_BACKGROUND_BLUR_PX).toFixed(2));
+}
+
+type LauncherSurfaceProps = {
+  backgroundImageUrl: string;
+  showBackground: boolean;
+  backgroundBlurPercent: number;
+  backgroundOpacityPercent: number;
+  className?: string;
+  children: React.ReactNode;
+};
+
+const LauncherSurface: React.FC<LauncherSurfaceProps> = ({
+  backgroundImageUrl,
+  showBackground,
+  backgroundBlurPercent,
+  backgroundOpacityPercent,
+  className = '',
+  children,
+}) => {
+  const backgroundOpacity = clampLauncherBackgroundPercent(
+    backgroundOpacityPercent,
+    DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT
+  ) / 100;
+  const backgroundBlurPx = launcherBackgroundBlurPercentToPx(backgroundBlurPercent);
+
+  return (
+    <div className="w-full h-full">
+      <div className={`glass-effect overflow-hidden h-full flex flex-col relative ${className}`.trim()}>
+        {showBackground && backgroundImageUrl ? (
+          <div className="launcher-background-media" aria-hidden="true">
+            <div
+              className="launcher-background-image"
+              style={
+                {
+                  backgroundImage: `url("${backgroundImageUrl}")`,
+                  ['--launcher-background-opacity' as any]: String(backgroundOpacity),
+                  ['--launcher-background-blur' as any]: `${backgroundBlurPx}px`,
+                } as React.CSSProperties
+              }
+            />
+            <div className="launcher-background-tint" />
+          </div>
+        ) : null}
+        <div className="relative z-10 flex min-h-0 flex-1 flex-col">{children}</div>
+      </div>
+    </div>
+  );
+};
+
 function normalizeQuickLinkDynamicFields(fields: QuickLinkDynamicField[]): QuickLinkDynamicField[] {
   const map = new Map<string, QuickLinkDynamicField>();
   for (const field of fields || []) {
@@ -232,11 +304,20 @@ function normalizeQuickLinkDynamicFields(fields: QuickLinkDynamicField[]): Quick
 }
 
 const App: React.FC = () => {
+  const { t } = useI18n();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [commandAliases, setCommandAliases] = useState<Record<string, string>>({});
   const [pinnedCommands, setPinnedCommands] = useState<string[]>([]);
   const [recentCommands, setRecentCommands] = useState<string[]>([]);
   const [recentCommandLaunchCounts, setRecentCommandLaunchCounts] = useState<Record<string, number>>({});
+  const [launcherBackgroundImagePath, setLauncherBackgroundImagePath] = useState('');
+  const [launcherBackgroundImageEverywhere, setLauncherBackgroundImageEverywhere] = useState(false);
+  const [launcherBackgroundImageBlurPercent, setLauncherBackgroundImageBlurPercent] = useState(
+    DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT
+  );
+  const [launcherBackgroundImageOpacityPercent, setLauncherBackgroundImageOpacityPercent] = useState(
+    DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT
+  );
   const [searchQuery, setSearchQuery] = useState('');
   const [inlineExtensionArgumentValues, setInlineExtensionArgumentValues] = useState<
     Record<string, Record<string, string>>
@@ -255,12 +336,12 @@ const App: React.FC = () => {
   const homeDir = String((window.electron as any).homeDir || '');
   const {
     extensionView, extensionPreferenceSetup, scriptCommandSetup, scriptCommandOutput,
-    showClipboardManager, showSnippetManager, showQuickLinkManager, showFileSearch, showCursorPrompt,
+    showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showCursorPrompt,
     showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showWhisperOnboarding, showWhisperHint, showOnboarding, aiMode,
     openOnboarding, openWhisper, openClipboardManager,
-    openSnippetManager, openQuickLinkManager, openFileSearch, openCursorPrompt, openSpeak, openCamera, openSchedule, openWindowManager,
+    openSnippetManager, openNotesSearch, openQuickLinkManager, openFileSearch, openCursorPrompt, openSpeak, openCamera, openSchedule, openWindowManager,
     setExtensionView, setExtensionPreferenceSetup, setScriptCommandSetup, setScriptCommandOutput,
-    setShowClipboardManager, setShowSnippetManager, setShowQuickLinkManager, setShowFileSearch, setShowCursorPrompt,
+    setShowClipboardManager, setShowSnippetManager, setShowNotesSearch, setShowQuickLinkManager, setShowFileSearch, setShowCursorPrompt,
     setShowWhisper, setShowSpeak, setShowCamera, setShowSchedule, setShowWindowManager, setShowWhisperOnboarding, setShowWhisperHint,
     setShowOnboarding, setAiMode,
   } = useAppViewManager();
@@ -454,6 +535,20 @@ const App: React.FC = () => {
       setWhisperSpeakToggleLabel(formatShortcutLabel(speakToggleHotkey));
       setConfiguredEdgeTtsVoice(String(settings.ai?.edgeTtsVoice || 'en-US-EricNeural'));
       setConfiguredTtsModel(String(settings.ai?.textToSpeechModel || 'edge-tts'));
+      setLauncherBackgroundImagePath(String(settings.launcherBackgroundImagePath || ''));
+      setLauncherBackgroundImageEverywhere(Boolean(settings.launcherBackgroundImageEverywhere));
+      setLauncherBackgroundImageBlurPercent(
+        clampLauncherBackgroundPercent(
+          settings.launcherBackgroundImageBlurPercent,
+          DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT
+        )
+      );
+      setLauncherBackgroundImageOpacityPercent(
+        clampLauncherBackgroundPercent(
+          settings.launcherBackgroundImageOpacityPercent,
+          DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT
+        )
+      );
       applyAppFontSize(settings.fontSize);
       applyUiStyle(settings.uiStyle || 'default');
       applyBaseColor(settings.baseColor || '#101113');
@@ -469,6 +564,10 @@ const App: React.FC = () => {
       setLauncherShortcut('Alt+Space');
       setConfiguredEdgeTtsVoice('en-US-EricNeural');
       setConfiguredTtsModel('edge-tts');
+      setLauncherBackgroundImagePath('');
+      setLauncherBackgroundImageEverywhere(false);
+      setLauncherBackgroundImageBlurPercent(DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT);
+      setLauncherBackgroundImageOpacityPercent(DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT);
       applyAppFontSize(getDefaultAppFontSize());
       applyUiStyle('default');
       applyBaseColor('#101113');
@@ -625,6 +724,17 @@ const App: React.FC = () => {
           openSnippetManager('create');
           return;
         }
+        if (routedSystemCommandId === 'system-search-notes') {
+          setShowClipboardManager(false);
+          setShowSnippetManager(null);
+          setShowFileSearch(false);
+          openNotesSearch();
+          return;
+        }
+        if (routedSystemCommandId === 'system-create-note') {
+          window.electron.openNotesWindow('create');
+          return;
+        }
         if (routedSystemCommandId === 'system-search-quicklinks') {
           setShowClipboardManager(false);
           setShowFileSearch(false);
@@ -734,6 +844,20 @@ const App: React.FC = () => {
       applyAppFontSize(settings.fontSize);
       applyUiStyle(settings.uiStyle || 'default');
       applyBaseColor(settings.baseColor || '#101113');
+      setLauncherBackgroundImagePath(String(settings.launcherBackgroundImagePath || ''));
+      setLauncherBackgroundImageEverywhere(Boolean(settings.launcherBackgroundImageEverywhere));
+      setLauncherBackgroundImageBlurPercent(
+        clampLauncherBackgroundPercent(
+          settings.launcherBackgroundImageBlurPercent,
+          DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT
+        )
+      );
+      setLauncherBackgroundImageOpacityPercent(
+        clampLauncherBackgroundPercent(
+          settings.launcherBackgroundImageOpacityPercent,
+          DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT
+        )
+      );
       setLauncherShortcut(settings.globalShortcut || 'Alt+Space');
     });
     return cleanup;
@@ -1034,10 +1158,10 @@ const App: React.FC = () => {
   }, [contextMenu]);
 
   useEffect(() => {
-    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showQuickLinkManager && !showFileSearch && !showCursorPrompt && !showWhisper && !showSpeak && !showCamera && !showSchedule && !showWindowManager && !showOnboarding) {
+    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showNotesSearch && !showQuickLinkManager && !showFileSearch && !showCursorPrompt && !showWhisper && !showSpeak && !showCamera && !showSchedule && !showWindowManager && !showOnboarding) {
       restoreLauncherFocus();
     }
-  }, [showActions, contextMenu, quickLinkDynamicPrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showQuickLinkManager, showFileSearch, showCursorPrompt, showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showOnboarding, showWhisperOnboarding, restoreLauncherFocus]);
+  }, [showActions, contextMenu, quickLinkDynamicPrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showCursorPrompt, showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showOnboarding, showWhisperOnboarding, restoreLauncherFocus]);
 
   const isLauncherModeActive =
     !showActions &&
@@ -1047,6 +1171,7 @@ const App: React.FC = () => {
     !extensionView &&
     !showClipboardManager &&
     !showSnippetManager &&
+    !showNotesSearch &&
     !showQuickLinkManager &&
     !showFileSearch &&
     !showCursorPrompt &&
@@ -1214,7 +1339,7 @@ const App: React.FC = () => {
           if (calcRequestSeqRef.current !== requestSeq) return;
           setAsyncCalcResult(null);
         });
-    }, 120);
+    }, 200);
 
     return () => {
       window.clearTimeout(timer);
@@ -1224,8 +1349,8 @@ const App: React.FC = () => {
   const calcOffset = calcResult ? 1 : 0;
   const contextualCommands = commands;
   const filteredCommands = useMemo(
-    () => filterCommands(contextualCommands, searchQuery),
-    [contextualCommands, searchQuery]
+    () => filterCommands(contextualCommands, searchQuery, commandAliases),
+    [contextualCommands, searchQuery, commandAliases]
   );
 
   // When calculator is showing but no commands match, show unfiltered list below
@@ -1918,6 +2043,16 @@ const App: React.FC = () => {
       openSnippetManager('create');
       return true;
     }
+    if (commandId === 'system-search-notes') {
+      whisperSessionRef.current = false;
+      openNotesSearch();
+      return true;
+    }
+    if (commandId === 'system-create-note') {
+      whisperSessionRef.current = false;
+      window.electron.openNotesWindow('create');
+      return true;
+    }
     if (commandId === 'system-search-quicklinks') {
       whisperSessionRef.current = false;
       openQuickLinkManager('search');
@@ -2070,6 +2205,13 @@ const App: React.FC = () => {
       setOnboardingHotkeyPresses((prev) => prev + 1);
     });
     return cleanup;
+  }, []);
+
+  // Signal main process that the renderer is mounted and IPC listeners are
+  // registered.  Main waits for this before dispatching the initial
+  // window-shown / run-system-command messages so they are never lost.
+  useEffect(() => {
+    window.electron.rendererReady();
   }, []);
 
   const runScriptCommand = useCallback(
@@ -2426,25 +2568,25 @@ const App: React.FC = () => {
         return [
           {
             id: 'open-file',
-            title: 'Open File',
+            title: t('launcher.actions.openFile'),
             shortcut: 'Enter',
             execute: () => openFileResultByPath(filePath),
           },
           {
             id: 'show-file-details',
-            title: 'Show Details',
+            title: t('launcher.actions.showDetails'),
             shortcut: 'Cmd+D',
             execute: () => showFileResultDetailsByPath(filePath),
           },
           {
             id: 'reveal-file',
-            title: 'Reveal in Finder',
+            title: t('launcher.actions.revealInFinder'),
             shortcut: 'Cmd+Enter',
             execute: () => revealFileResultByPath(filePath),
           },
           {
             id: 'copy-file-path',
-            title: 'Copy Path',
+            title: t('launcher.actions.copyPath'),
             shortcut: 'Cmd+Shift+C',
             execute: () => copyFileResultPath(filePath),
           },
@@ -2456,23 +2598,23 @@ const App: React.FC = () => {
       return [
         {
           id: 'open',
-          title: 'Open Command',
+          title: t('launcher.actions.openCommand'),
           shortcut: 'Enter',
           execute: () => handleCommandExecute(command),
         },
         {
           id: 'pin',
           title: isPinned
-            ? 'Unpin Extension'
+            ? t(command.category === 'extension' ? 'launcher.actions.unpinExtension' : 'launcher.actions.unpinCommand')
             : command.category === 'extension'
-              ? 'Pin Extension'
-              : 'Pin Command',
+              ? t('launcher.actions.pinExtension')
+              : t('launcher.actions.pinCommand'),
           shortcut: 'Cmd+Shift+P',
           execute: () => pinToggleForCommand(command),
         },
         {
           id: 'disable',
-          title: 'Disable Command',
+          title: t('launcher.actions.disableCommand'),
           shortcut: 'Cmd+Shift+D',
           execute: () => disableCommand(command),
         },
@@ -2486,14 +2628,14 @@ const App: React.FC = () => {
         },
         {
           id: 'move-up',
-          title: 'Move Up',
+          title: t('launcher.actions.moveUp'),
           shortcut: 'Cmd+Alt+Up',
           enabled: isPinned && pinnedIndex > 0,
           execute: () => movePinnedCommand(command, 'up'),
         },
         {
           id: 'move-down',
-          title: 'Move Down',
+          title: t('launcher.actions.moveDown'),
           shortcut: 'Cmd+Alt+Down',
           enabled: isPinned && pinnedIndex >= 0 && pinnedIndex < pinnedCommands.length - 1,
           execute: () => movePinnedCommand(command, 'down'),
@@ -2511,6 +2653,7 @@ const App: React.FC = () => {
       showFileResultDetailsByPath,
       revealFileResultByPath,
       copyFileResultPath,
+      t,
     ]
   );
 
@@ -2668,7 +2811,7 @@ const App: React.FC = () => {
           onOnboardingTranscriptAppend={appendWhisperOnboardingPracticeText}
           coachmarkText={
             showWhisperHint && whisperSpeakToggleLabel
-              ? `Whisper sits here. Hold ${whisperSpeakToggleLabel} to talk, release to type.`
+              ? t('whisper.coachmark.holdToTalk', { shortcut: whisperSpeakToggleLabel })
               : undefined
           }
           onClose={() => {
@@ -2733,6 +2876,8 @@ const App: React.FC = () => {
       {detachedOverlayRunners}
     </>
   );
+  const launcherBackgroundImageUrl = toFileUrl(launcherBackgroundImagePath);
+  const shouldUseBackgroundEverywhere = Boolean(launcherBackgroundImageUrl) && launcherBackgroundImageEverywhere;
 
   // ─── Script Command Setup ───────────────────────────────────────
   if (scriptCommandSetup) {
@@ -2824,36 +2969,40 @@ const App: React.FC = () => {
     return (
       <>
         {alwaysMountedRunners}
-        <div className="w-full h-full">
-          <div className="glass-effect extension-runtime-shell overflow-hidden h-full flex flex-col">
-            <ExtensionView
-              code={extensionView.code}
-              title={extensionView.title}
-              mode={extensionView.mode}
-              error={(extensionView as any).error}
-              extensionName={(extensionView as any).extensionName || extensionView.extName}
-              extensionDisplayName={(extensionView as any).extensionDisplayName}
-              extensionIconDataUrl={(extensionView as any).extensionIconDataUrl}
-              commandName={(extensionView as any).commandName || extensionView.cmdName}
-              assetsPath={(extensionView as any).assetsPath}
-              supportPath={(extensionView as any).supportPath}
-              owner={(extensionView as any).owner}
-              preferences={(extensionView as any).preferences}
-              preferenceDefinitions={(extensionView as any).preferenceDefinitions}
-              launchArguments={(extensionView as any).launchArguments}
-              launchContext={(extensionView as any).launchContext}
-              fallbackText={(extensionView as any).fallbackText}
-              launchType={(extensionView as any).launchType}
-              onClose={() => {
-                setExtensionView(null);
-                localStorage.removeItem(LAST_EXT_KEY);
-                setSearchQuery('');
-                setSelectedIndex(0);
-                setTimeout(() => inputRef.current?.focus(), 50);
-              }}
-            />
-          </div>
-        </div>
+        <LauncherSurface
+          backgroundImageUrl={launcherBackgroundImageUrl}
+          showBackground={shouldUseBackgroundEverywhere}
+          backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+          backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+          className="extension-runtime-shell"
+        >
+          <ExtensionView
+            code={extensionView.code}
+            title={extensionView.title}
+            mode={extensionView.mode}
+            error={(extensionView as any).error}
+            extensionName={(extensionView as any).extensionName || extensionView.extName}
+            extensionDisplayName={(extensionView as any).extensionDisplayName}
+            extensionIconDataUrl={(extensionView as any).extensionIconDataUrl}
+            commandName={(extensionView as any).commandName || extensionView.cmdName}
+            assetsPath={(extensionView as any).assetsPath}
+            supportPath={(extensionView as any).supportPath}
+            owner={(extensionView as any).owner}
+            preferences={(extensionView as any).preferences}
+            preferenceDefinitions={(extensionView as any).preferenceDefinitions}
+            launchArguments={(extensionView as any).launchArguments}
+            launchContext={(extensionView as any).launchContext}
+            fallbackText={(extensionView as any).fallbackText}
+            launchType={(extensionView as any).launchType}
+            onClose={() => {
+              setExtensionView(null);
+              localStorage.removeItem(LAST_EXT_KEY);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+          />
+        </LauncherSurface>
       </>
     );
   }
@@ -2863,18 +3012,21 @@ const App: React.FC = () => {
     return (
       <>
         {alwaysMountedRunners}
-        <div className="w-full h-full">
-          <div className="glass-effect overflow-hidden h-full flex flex-col">
-            <ClipboardManager
-              onClose={() => {
-                setShowClipboardManager(false);
-                setSearchQuery('');
-                setSelectedIndex(0);
-                setTimeout(() => inputRef.current?.focus(), 50);
-              }}
-            />
-          </div>
-        </div>
+        <LauncherSurface
+          backgroundImageUrl={launcherBackgroundImageUrl}
+          showBackground={shouldUseBackgroundEverywhere}
+          backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+          backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+        >
+          <ClipboardManager
+            onClose={() => {
+              setShowClipboardManager(false);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+          />
+        </LauncherSurface>
       </>
     );
   }
@@ -2905,18 +3057,21 @@ const App: React.FC = () => {
     return (
       <>
         {alwaysMountedRunners}
-        <div className="w-full h-full">
-          <div className="glass-effect overflow-hidden h-full flex flex-col">
-            <ScheduleExtension
-              onClose={() => {
-                setShowSchedule(false);
-                setSearchQuery('');
-                setSelectedIndex(0);
-                setTimeout(() => inputRef.current?.focus(), 50);
-              }}
-            />
-          </div>
-        </div>
+        <LauncherSurface
+          backgroundImageUrl={launcherBackgroundImageUrl}
+          showBackground={shouldUseBackgroundEverywhere}
+          backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+          backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+        >
+          <ScheduleExtension
+            onClose={() => {
+              setShowSchedule(false);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+          />
+        </LauncherSurface>
       </>
     );
   }
@@ -2941,24 +3096,51 @@ const App: React.FC = () => {
     );
   }
 
+  // ─── Notes Search mode ───────────────────────────────────────────
+  if (showNotesSearch) {
+    return (
+      <>
+        {alwaysMountedRunners}
+        <LauncherSurface
+          backgroundImageUrl={launcherBackgroundImageUrl}
+          showBackground={shouldUseBackgroundEverywhere}
+          backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+          backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+        >
+          <NotesSearchInline
+            onClose={() => {
+              setShowNotesSearch(false);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+          />
+        </LauncherSurface>
+      </>
+    );
+  }
+
   // ─── Snippet Manager mode ─────────────────────────────────────────
   if (showSnippetManager) {
     return (
       <>
         {alwaysMountedRunners}
-        <div className="w-full h-full">
-          <div className="glass-effect overflow-hidden h-full flex flex-col">
-            <SnippetManager
-              initialView={showSnippetManager}
-              onClose={() => {
-                setShowSnippetManager(null);
-                setSearchQuery('');
-                setSelectedIndex(0);
-                setTimeout(() => inputRef.current?.focus(), 50);
-              }}
-            />
-          </div>
-        </div>
+        <LauncherSurface
+          backgroundImageUrl={launcherBackgroundImageUrl}
+          showBackground={shouldUseBackgroundEverywhere}
+          backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+          backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+        >
+          <SnippetManager
+            initialView={showSnippetManager}
+            onClose={() => {
+              setShowSnippetManager(null);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+          />
+        </LauncherSurface>
       </>
     );
   }
@@ -2968,19 +3150,22 @@ const App: React.FC = () => {
     return (
       <>
         {alwaysMountedRunners}
-        <div className="w-full h-full">
-          <div className="glass-effect overflow-hidden h-full flex flex-col">
-            <QuickLinkManager
-              initialView={showQuickLinkManager}
-              onClose={() => {
-                setShowQuickLinkManager(null);
-                setSearchQuery('');
-                setSelectedIndex(0);
-                setTimeout(() => inputRef.current?.focus(), 50);
-              }}
-            />
-          </div>
-        </div>
+        <LauncherSurface
+          backgroundImageUrl={launcherBackgroundImageUrl}
+          showBackground={shouldUseBackgroundEverywhere}
+          backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+          backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+        >
+          <QuickLinkManager
+            initialView={showQuickLinkManager}
+            onClose={() => {
+              setShowQuickLinkManager(null);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+          />
+        </LauncherSurface>
       </>
     );
   }
@@ -2990,20 +3175,23 @@ const App: React.FC = () => {
     return (
       <>
         {alwaysMountedRunners}
-        <div className="w-full h-full">
-          <div className="glass-effect overflow-hidden h-full flex flex-col">
-            <FileSearchExtension
-              initialDetailPath={fileSearchInitialDetailPath}
-              onClose={() => {
-                setShowFileSearch(false);
-                setFileSearchInitialDetailPath(null);
-                setSearchQuery('');
-                setSelectedIndex(0);
-                setTimeout(() => inputRef.current?.focus(), 50);
-              }}
-            />
-          </div>
-        </div>
+        <LauncherSurface
+          backgroundImageUrl={launcherBackgroundImageUrl}
+          showBackground={shouldUseBackgroundEverywhere}
+          backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+          backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+        >
+          <FileSearchExtension
+            initialDetailPath={fileSearchInitialDetailPath}
+            onClose={() => {
+              setShowFileSearch(false);
+              setFileSearchInitialDetailPath(null);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+          />
+        </LauncherSurface>
       </>
     );
   }
@@ -3037,8 +3225,12 @@ const App: React.FC = () => {
           onDictationPracticeTextChange={setWhisperOnboardingPracticeText}
           onboardingHotkeyPresses={onboardingHotkeyPresses}
           onClose={async () => {
-            await window.electron.setLauncherMode('onboarding');
-            setShowOnboarding(true);
+            await window.electron.setLauncherMode('default');
+            await window.electron.saveSettings({ hasSeenOnboarding: true, hasSeenWhisperOnboarding: true });
+            setShowOnboarding(false);
+            setShowWhisperOnboarding(false);
+            setOnboardingRequiresShortcutFix(false);
+            await window.electron.hideWindow();
           }}
           onComplete={async () => {
             await window.electron.setLauncherMode('default');
@@ -3046,9 +3238,7 @@ const App: React.FC = () => {
             setShowOnboarding(false);
             setShowWhisperOnboarding(false);
             setOnboardingRequiresShortcutFix(false);
-            setSearchQuery('');
-            setSelectedIndex(0);
-            setTimeout(() => inputRef.current?.focus(), 50);
+            await window.electron.hideWindow();
           }}
         />
       </>
@@ -3065,16 +3255,21 @@ const App: React.FC = () => {
   return (
     <>
     {alwaysMountedRunners}
-    <div className="w-full h-full">
-      <div className="glass-effect launcher-main-surface overflow-hidden h-full flex flex-col relative">
+    <LauncherSurface
+      backgroundImageUrl={launcherBackgroundImageUrl}
+      showBackground={Boolean(launcherBackgroundImageUrl)}
+      backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+      backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+      className="launcher-main-surface"
+    >
         {/* Search header - transparent background */}
-        <div className="flex h-[60px] items-center gap-2 px-4 border-b border-[var(--ui-divider)]">
+        <div className="drag-region flex h-[60px] items-center gap-2 px-4 border-b border-[var(--ui-divider)]">
           <div ref={inlineArgumentLaneRef} className="relative min-w-0 flex-1">
             <div className="flex h-full items-center">
               <input
                 ref={inputRef}
                 type="text"
-                placeholder="Search apps and settings..."
+                placeholder={aiMode ? t('launcher.aiMode.placeholder') : t('launcher.searchPlaceholder')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onBlur={handleLauncherSearchBlur}
@@ -3213,11 +3408,11 @@ const App: React.FC = () => {
         >
           {isLoading ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-              <p className="text-sm">Discovering apps...</p>
+              <p className="text-sm">{t('launcher.status.discoveringApps')}</p>
             </div>
           ) : displayCommands.length === 0 && !calcResult ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-              <p className="text-sm">No matching results</p>
+              <p className="text-sm">{t('launcher.status.noMatchingResults')}</p>
             </div>
           ) : (
             <div className="space-y-0.5">
@@ -3242,13 +3437,13 @@ const App: React.FC = () => {
                           {formatCalcKindLabel(calcResult.kind)}
                         </div>
                         <div className="text-[0.6875rem] text-[var(--text-muted)] leading-none">
-                          {selectedIndex === 0 ? 'Press Enter to copy' : 'Click to copy'}
+                          {selectedIndex === 0 ? t('launcher.calculator.pressEnterToCopy') : t('launcher.calculator.clickToCopy')}
                         </div>
                       </div>
 
                       <div className="hidden sm:flex items-center gap-1 text-[0.6875rem] text-[var(--text-subtle)] flex-shrink-0 pl-2">
                         <CornerDownLeft className="w-3.5 h-3.5" />
-                        <span>Copy</span>
+                        <span>{t('launcher.calculator.copy')}</span>
                       </div>
                     </div>
 
@@ -3300,11 +3495,11 @@ const App: React.FC = () => {
               )}
 
               {[
-                { title: 'Selected Text', items: groupedCommands.contextual },
-                { title: 'Pinned', items: groupedCommands.pinned },
-                { title: 'Recent', items: groupedCommands.recent },
-                { title: 'Other', items: groupedCommands.other },
-                { title: 'Files', items: groupedCommands.files },
+                { title: t('launcher.sections.selectedText'), items: groupedCommands.contextual },
+                { title: t('launcher.sections.pinned'), items: groupedCommands.pinned },
+                { title: t('launcher.categories.recent'), items: groupedCommands.recent },
+                { title: t('common.other'), items: groupedCommands.other },
+                { title: t('launcher.categories.files'), items: groupedCommands.files },
               ]
                 .filter((section) => section.items.length > 0)
                 .map((section) => section)
@@ -3322,8 +3517,8 @@ const App: React.FC = () => {
                     section.items.forEach((command, i) => {
                       const flatIndex = startIndex + i;
                       const accessoryLabel = getCommandAccessoryLabel(command);
-                      const typeBadgeLabel = getCommandTypeBadgeLabel(command);
-                      const fallbackCategory = getCategoryLabel(command.category);
+                      const typeBadgeLabel = getCommandTypeBadgeLabel(command, t);
+                      const fallbackCategory = getCategoryLabel(command.category, t);
                       const commandAlias = String(commandAliases[command.id] || '').trim();
                       const aliasMatchesSearch =
                         Boolean(commandAlias) &&
@@ -3357,7 +3552,7 @@ const App: React.FC = () => {
 
                             <div className="min-w-0 flex-1 flex items-center gap-2">
                               <div className="text-[var(--text-primary)] text-[0.8125rem] font-medium truncate tracking-[0.004em]">
-                                {getCommandDisplayTitle(command)}
+                                {getCommandDisplayTitle(command, t)}
                               </div>
                               {accessoryLabel ? (
                                 <div className="text-[var(--text-muted)] text-[0.75rem] font-medium truncate">
@@ -3406,10 +3601,10 @@ const App: React.FC = () => {
                     <span className="w-5 h-5 flex items-center justify-center flex-shrink-0 overflow-hidden">
                       {renderCommandIcon(selectedCommand)}
                     </span>
-                    <span className="truncate">{getCommandDisplayTitle(selectedCommand)}</span>
+                    <span className="truncate">{getCommandDisplayTitle(selectedCommand, t)}</span>
                   </>
                 )
-                : `${displayCommands.length} results`}
+                : t('launcher.status.results', { count: displayCommands.length })}
             </div>
             {selectedActions[0] && (
               <div className="flex items-center gap-2 mr-3">
@@ -3436,14 +3631,13 @@ const App: React.FC = () => {
               }}
               className="flex items-center gap-1.5 text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors"
             >
-              <span className="text-xs font-normal">Actions</span>
+              <span className="text-xs font-normal">{t('common.actions')}</span>
               <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[0.6875rem] text-[var(--text-subtle)] font-medium">⌘</kbd>
               <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[0.6875rem] text-[var(--text-subtle)] font-medium">K</kbd>
             </button>
           </div>
         )}
-      </div>
-    </div>
+    </LauncherSurface>
     {quickLinkDynamicPrompt && (
       <div
         className="fixed inset-0 z-50 flex items-center justify-center px-5"
@@ -3481,7 +3675,7 @@ const App: React.FC = () => {
             Fill Quick Link Arguments
           </div>
           <div className="px-4 pt-3 text-xs text-[var(--text-muted)]">
-            {getCommandDisplayTitle(quickLinkDynamicPrompt.command)}
+            {getCommandDisplayTitle(quickLinkDynamicPrompt.command, t)}
           </div>
           <div className="p-4 pt-3 space-y-3">
             {quickLinkDynamicPrompt.fields.map((field, idx) => (

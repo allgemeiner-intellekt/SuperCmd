@@ -36,8 +36,38 @@ export interface AISettings {
   openaiCompatibleModel: string;
 }
 
+export type HyperKeySourceKey =
+  | 'caps-lock'
+  | 'left-control'
+  | 'left-shift'
+  | 'left-option'
+  | 'left-command'
+  | 'right-control'
+  | 'right-shift'
+  | 'right-option'
+  | 'right-command';
+
+export type HyperKeyCapsLockTapBehavior = 'escape' | 'nothing' | 'toggle';
+
+export interface HyperKeySettings {
+  enabled: boolean;
+  sourceKey: HyperKeySourceKey;
+  capsLockTapBehavior: HyperKeyCapsLockTapBehavior;
+}
+
 export type AppFontSize = 'extra-small' | 'small' | 'medium' | 'large' | 'extra-large';
 export type AppUiStyle = 'default' | 'glassy';
+export type AppLanguage =
+  | 'system'
+  | 'en'
+  | 'zh-Hans'
+  | 'zh-Hant'
+  | 'ja'
+  | 'ko'
+  | 'fr'
+  | 'de'
+  | 'es'
+  | 'ru';
 
 export interface AppSettings {
   globalShortcut: string;
@@ -56,11 +86,23 @@ export interface AppSettings {
   ai: AISettings;
   commandMetadata?: Record<string, { subtitle?: string }>;
   debugMode: boolean;
+  appLanguage: AppLanguage;
   fontSize: AppFontSize;
   uiStyle: AppUiStyle;
   baseColor: string;
+  launcherBackgroundImagePath: string;
+  launcherBackgroundImageEverywhere: boolean;
+  launcherBackgroundImageBlurPercent: number;
+  launcherBackgroundImageOpacityPercent: number;
   appUpdaterLastCheckedAt: number;
+  hyperKey: HyperKeySettings;
 }
+
+const DEFAULT_HYPER_KEY_SETTINGS: HyperKeySettings = {
+  enabled: false,
+  sourceKey: 'caps-lock',
+  capsLockTapBehavior: 'nothing',
+};
 
 const DEFAULT_AI_SETTINGS: AISettings = {
   provider: 'openai',
@@ -75,7 +117,7 @@ const DEFAULT_AI_SETTINGS: AISettings = {
   ollamaBaseUrl: 'http://localhost:11434',
   defaultModel: '',
   speechCorrectionModel: '',
-  speechToTextModel: 'native',
+  speechToTextModel: 'whispercpp',
   speechLanguage: 'en-US',
   textToSpeechModel: 'edge-tts',
   edgeTtsVoice: 'en-US-EricNeural',
@@ -127,10 +169,16 @@ const DEFAULT_SETTINGS: AppSettings = {
   fileSearchProtectedRootsEnabled: false,
   ai: { ...DEFAULT_AI_SETTINGS },
   debugMode: false,
+  appLanguage: 'system',
   fontSize: 'medium',
   uiStyle: 'glassy',
   baseColor: '#101113',
+  launcherBackgroundImagePath: '',
+  launcherBackgroundImageEverywhere: false,
+  launcherBackgroundImageBlurPercent: 25,
+  launcherBackgroundImageOpacityPercent: 45,
   appUpdaterLastCheckedAt: 0,
+  hyperKey: { ...DEFAULT_HYPER_KEY_SETTINGS },
 };
 
 let settingsCache: AppSettings | null = null;
@@ -157,6 +205,37 @@ function normalizeUiStyle(value: any): AppUiStyle {
   return 'default';
 }
 
+function normalizeAppLanguage(value: any): AppLanguage {
+  const normalized = String(value || '').trim().toLowerCase().replace(/_/g, '-');
+  if (!normalized || normalized === 'system' || normalized === 'auto') return 'system';
+  if (normalized === 'en' || normalized.startsWith('en-')) return 'en';
+  if (
+    normalized === 'zh' ||
+    normalized === 'zh-cn' ||
+    normalized === 'zh-sg' ||
+    normalized === 'zh-hans' ||
+    normalized.startsWith('zh-hans-')
+  ) {
+    return 'zh-Hans';
+  }
+  if (
+    normalized === 'zh-tw' ||
+    normalized === 'zh-hk' ||
+    normalized === 'zh-mo' ||
+    normalized === 'zh-hant' ||
+    normalized.startsWith('zh-hant-')
+  ) {
+    return 'zh-Hant';
+  }
+  if (normalized === 'ja' || normalized === 'jp' || normalized.startsWith('ja-')) return 'ja';
+  if (normalized === 'ko' || normalized === 'kr' || normalized.startsWith('ko-')) return 'ko';
+  if (normalized === 'fr' || normalized.startsWith('fr-')) return 'fr';
+  if (normalized === 'de' || normalized.startsWith('de-')) return 'de';
+  if (normalized === 'es' || normalized.startsWith('es-')) return 'es';
+  if (normalized === 'ru' || normalized.startsWith('ru-')) return 'ru';
+  return DEFAULT_SETTINGS.appLanguage;
+}
+
 function normalizeBaseColor(value: any): string {
   const raw = String(value || '').trim();
   if (/^#[0-9a-fA-F]{6}$/.test(raw)) return raw.toLowerCase();
@@ -165,6 +244,23 @@ function normalizeBaseColor(value: any): string {
     return `#${short}`.toLowerCase();
   }
   return DEFAULT_SETTINGS.baseColor;
+}
+
+function normalizeLauncherBackgroundImagePath(value: any): string {
+  return String(value || '').trim();
+}
+
+function normalizePercentage(value: any, fallback: number): number {
+  const parsedValue = Number(value);
+  if (!Number.isFinite(parsedValue)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(parsedValue)));
+}
+
+function normalizeBoolean(value: any, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return fallback;
 }
 
 function normalizeRecentCommandLaunchCounts(value: any): Record<string, number> {
@@ -247,11 +343,26 @@ export function loadSettings(): AppSettings {
       fileSearchProtectedRootsEnabled:
         parsed.fileSearchProtectedRootsEnabled ?? DEFAULT_SETTINGS.fileSearchProtectedRootsEnabled,
       ai: { ...DEFAULT_AI_SETTINGS, ...parsed.ai },
+      hyperKey: { ...DEFAULT_HYPER_KEY_SETTINGS, ...parsed.hyperKey },
       commandMetadata: parsed.commandMetadata ?? {},
       debugMode: parsed.debugMode ?? DEFAULT_SETTINGS.debugMode,
+      appLanguage: normalizeAppLanguage(parsed.appLanguage),
       fontSize: normalizeFontSize(parsed.fontSize),
       uiStyle: normalizeUiStyle(parsed.uiStyle),
       baseColor: normalizeBaseColor(parsed.baseColor),
+      launcherBackgroundImagePath: normalizeLauncherBackgroundImagePath(parsed.launcherBackgroundImagePath),
+      launcherBackgroundImageEverywhere: normalizeBoolean(
+        parsed.launcherBackgroundImageEverywhere,
+        DEFAULT_SETTINGS.launcherBackgroundImageEverywhere
+      ),
+      launcherBackgroundImageBlurPercent: normalizePercentage(
+        parsed.launcherBackgroundImageBlurPercent,
+        DEFAULT_SETTINGS.launcherBackgroundImageBlurPercent
+      ),
+      launcherBackgroundImageOpacityPercent: normalizePercentage(
+        parsed.launcherBackgroundImageOpacityPercent,
+        DEFAULT_SETTINGS.launcherBackgroundImageOpacityPercent
+      ),
       appUpdaterLastCheckedAt: Number.isFinite(Number(parsed.appUpdaterLastCheckedAt))
         ? Math.max(0, Number(parsed.appUpdaterLastCheckedAt))
         : DEFAULT_SETTINGS.appUpdaterLastCheckedAt,
@@ -265,7 +376,26 @@ export function loadSettings(): AppSettings {
 
 export function saveSettings(patch: Partial<AppSettings>): AppSettings {
   const current = loadSettings();
-  const updated = { ...current, ...patch };
+  const updated = {
+    ...current,
+    ...patch,
+    appLanguage: normalizeAppLanguage(patch.appLanguage ?? current.appLanguage),
+    launcherBackgroundImagePath: normalizeLauncherBackgroundImagePath(
+      patch.launcherBackgroundImagePath ?? current.launcherBackgroundImagePath
+    ),
+    launcherBackgroundImageEverywhere: normalizeBoolean(
+      patch.launcherBackgroundImageEverywhere ?? current.launcherBackgroundImageEverywhere,
+      current.launcherBackgroundImageEverywhere
+    ),
+    launcherBackgroundImageBlurPercent: normalizePercentage(
+      patch.launcherBackgroundImageBlurPercent ?? current.launcherBackgroundImageBlurPercent,
+      current.launcherBackgroundImageBlurPercent
+    ),
+    launcherBackgroundImageOpacityPercent: normalizePercentage(
+      patch.launcherBackgroundImageOpacityPercent ?? current.launcherBackgroundImageOpacityPercent,
+      current.launcherBackgroundImageOpacityPercent
+    ),
+  };
 
   try {
     fs.writeFileSync(getSettingsPath(), JSON.stringify(updated, null, 2));

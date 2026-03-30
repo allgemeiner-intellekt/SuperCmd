@@ -174,7 +174,7 @@
   --border-primary: rgba(var(--on-surface-rgb), 0.08);
   --border-secondary: rgba(var(--on-surface-rgb), 0.18);
   --border-strong: rgba(var(--on-surface-rgb), 0.28);
-  --glass-outline: rgba(184, 190, 198, 0.11);
+  --glass-outline: rgba(184, 190, 198, 0.18);
   --ui-divider: rgba(255, 255, 255, 0.05);
   --ui-panel-border: rgba(255, 255, 255, 0.06);
   --ui-segment-border: rgba(255, 255, 255, 0.07);
@@ -274,12 +274,12 @@
 }
 
 .dark.sc-glassy {
-  --bg-secondary: rgba(22, 24, 30, 0.14);
-  --card-bg: rgba(22, 24, 30, 0.14);
-  --input-bg: rgba(22, 24, 30, 0.22);
-  --menu-overlay-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.05));
-  --settings-panel-bg: rgba(18, 20, 24, 0.2);
-  --settings-shell-bg: rgba(16, 18, 22, 0.12);
+  --bg-secondary: rgba(5, 5, 8, 0.45);
+  --card-bg: rgba(5, 5, 8, 0.45);
+  --input-bg: rgba(5, 5, 8, 0.52);
+  --menu-overlay-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  --settings-panel-bg: rgba(4, 4, 6, 0.50);
+  --settings-shell-bg: rgba(3, 3, 5, 0.40);
   --ui-divider: rgba(255, 255, 255, 0.16);
   --ui-panel-border: rgba(255, 255, 255, 0.2);
   --ui-segment-border: rgba(255, 255, 255, 0.22);
@@ -391,7 +391,7 @@ html {
   border-radius: var(--glass-radius);
   border: none;
   background-clip: padding-box;
-  box-shadow: none;
+  box-shadow: 0 0 0 1.5px var(--glass-outline), 0 8px 32px rgba(0, 0, 0, 0.12);
   overflow: hidden;
 }
 
@@ -403,6 +403,18 @@ html {
   border: 1px solid var(--glass-outline);
   pointer-events: none;
   z-index: 9999;
+}
+
+.launcher-main-surface {
+  background:
+    linear-gradient(180deg, rgba(var(--on-surface-rgb), 0.035), rgba(var(--on-surface-rgb), 0.015)),
+    rgba(var(--surface-base-rgb), 0.84);
+}
+
+.dark .launcher-main-surface {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
+    rgba(var(--surface-base-rgb), 0.68);
 }
 
 .sc-command-setup-shell::after {
@@ -426,8 +438,20 @@ html {
 
 .dark.sc-glassy .glass-effect {
   background:
-    linear-gradient(160deg, rgba(var(--on-surface-rgb), 0.08), rgba(var(--on-surface-rgb), 0.01)),
-    rgba(var(--surface-base-rgb), 0.5);
+    linear-gradient(160deg, rgba(var(--on-surface-rgb), 0.06), rgba(var(--on-surface-rgb), 0.01)),
+    rgba(var(--surface-base-rgb), 0.72);
+}
+
+.sc-glassy .launcher-main-surface {
+  background:
+    linear-gradient(160deg, rgba(var(--on-surface-rgb), 0.04), rgba(var(--on-surface-rgb), 0.01)),
+    rgba(var(--surface-base-rgb), 0.44);
+}
+
+.dark.sc-glassy .launcher-main-surface {
+  background:
+    linear-gradient(160deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.012)),
+    rgba(var(--surface-base-rgb), 0.55);
 }
 
 .sc-glassy .glass-effect::after {
@@ -508,8 +532,8 @@ html {
 
 .dark.sc-native-liquid-glass .glass-effect {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04)),
-    rgba(var(--surface-base-rgb), 0.3);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    rgba(var(--surface-base-rgb), 0.58);
 }
 
 /* Keep launcher readable in native liquid glass by giving it the same
@@ -520,8 +544,8 @@ html {
 
 .dark.sc-native-liquid-glass .launcher-main-surface {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.04)),
-    rgba(var(--surface-base-rgb), 0.3);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015)),
+    rgba(var(--surface-base-rgb), 0.58);
 }
 
 .sc-native-liquid-glass {
@@ -532,11 +556,13 @@ html {
 }
 
 .dark.sc-native-liquid-glass {
-  --glass-outline: rgba(255, 255, 255, 0.045);
+  --glass-outline: rgba(255, 255, 255, 0.22);
   --ui-divider: rgba(255, 255, 255, 0.05);
-  --ui-panel-border: rgba(255, 255, 255, 0.07);
+  --ui-panel-border: rgba(255, 255, 255, 0.12);
   --ui-segment-border: rgba(255, 255, 255, 0.08);
+  --settings-panel-bg: rgba(255, 255, 255, 0.06);
 }
+
 
 .sc-native-liquid-glass .glass-effect::after {
   border-color: var(--glass-outline);
@@ -650,6 +676,44 @@ html {
   box-shadow:
     0 12px 28px rgba(var(--backdrop-rgb), 0.36),
     inset 0 0 0 1px rgba(var(--on-surface-rgb), 0.12);
+}
+
+.launcher-background-media {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.launcher-background-image {
+  position: absolute;
+  inset: -8%;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  opacity: var(--launcher-background-opacity, 0.46);
+  transform: scale(1.015);
+  filter: blur(var(--launcher-background-blur, 9px)) saturate(1.24) brightness(1.02);
+}
+
+.launcher-background-tint {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at top, rgba(var(--surface-base-rgb), 0.035), transparent 58%),
+    linear-gradient(180deg, rgba(var(--surface-base-rgb), 0.015), rgba(var(--surface-base-rgb), 0.08));
+}
+
+.dark .launcher-background-image {
+  opacity: var(--launcher-background-opacity, 0.46);
+  filter: blur(var(--launcher-background-blur, 9px)) saturate(1.45) brightness(0.98);
+}
+
+.sc-glassy .launcher-background-image,
+.sc-native-liquid-glass .launcher-background-image {
+  opacity: var(--launcher-background-opacity, 0.46);
+  filter: blur(var(--launcher-background-blur, 9px)) saturate(1.32) brightness(1);
 }
 
 .sc-dropdown-divider {
@@ -1243,6 +1307,7 @@ kbd {
   left: 50%;
   bottom: calc(100% + 8px);
   transform: translateX(-50%);
+  max-width: min(420px, calc(100vw - 32px));
   padding: 7px 10px;
   border-radius: 10px;
   border: 1px solid rgba(196, 201, 206, 0.3);
@@ -1253,6 +1318,8 @@ kbd {
   letter-spacing: 0.01em;
   pointer-events: none;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42);
   backdrop-filter: blur(14px) saturate(120%);
   -webkit-backdrop-filter: blur(14px) saturate(120%);

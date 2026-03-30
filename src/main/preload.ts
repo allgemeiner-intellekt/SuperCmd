@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('electron', {
   homeDir: _homeDir,
   platform: _platform,
 
+  // ─── Lifecycle ──────────────────────────────────────────────────
+  /** Signal main process that the renderer React app has mounted. */
+  rendererReady: (): void => { ipcRenderer.send('renderer-ready'); },
+
   // ─── Launcher ───────────────────────────────────────────────────
   getCommands: (): Promise<any[]> => ipcRenderer.invoke('get-commands'),
   executeCommand: (commandId: string): Promise<boolean> =>
@@ -323,11 +327,27 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('install-extension', name),
   uninstallExtension: (name: string): Promise<boolean> =>
     ipcRenderer.invoke('uninstall-extension', name),
+  searchExtensions: (
+    query: string,
+    options?: { category?: string; limit?: number; offset?: number },
+  ): Promise<{ results: any[]; total: number }> =>
+    ipcRenderer.invoke('search-extensions', query, options),
+  getPopularExtensions: (limit?: number): Promise<any[]> =>
+    ipcRenderer.invoke('get-popular-extensions', limit),
+  getExtensionDetails: (name: string): Promise<any | null> =>
+    ipcRenderer.invoke('get-extension-details', name),
   onExtensionsChanged: (callback: () => void): (() => void) => {
     const listener = () => callback();
     ipcRenderer.on('extensions-updated', listener);
     return () => {
       ipcRenderer.removeListener('extensions-updated', listener);
+    };
+  },
+  onExtensionInstallStatus: (callback: (message: string) => void): (() => void) => {
+    const listener = (_event: any, message: string) => callback(message);
+    ipcRenderer.on('extension-install-status', listener);
+    return () => {
+      ipcRenderer.removeListener('extension-install-status', listener);
     };
   },
 
@@ -374,6 +394,8 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('spawn-process', file, args, options),
   killSpawnProcess: (pid: number, signal?: string | number): Promise<void> =>
     ipcRenderer.invoke('spawn-kill', pid, signal),
+  writeSpawnStdin: (pid: number, data: Uint8Array | string, end?: boolean): void =>
+    ipcRenderer.send('spawn-stdin', pid, data, end),
   onSpawnStdout: (callback: (pid: number, data: Uint8Array) => void): (() => void) => {
     const handler = (_e: any, pid: number, data: Uint8Array) => callback(pid, data);
     ipcRenderer.on('spawn-stdout', handler);
@@ -419,6 +441,8 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('run-applescript', script),
 
   // Calendar
+  ensureCalendarAccess: (options?: { prompt?: boolean }): Promise<any> =>
+    ipcRenderer.invoke('calendar-ensure-access', options),
   getCalendarEvents: (payload: { start: string; end: string }): Promise<any> =>
     ipcRenderer.invoke('calendar-get-events', payload),
 
@@ -559,6 +583,44 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('snippet-import'),
   snippetExport: (): Promise<boolean> =>
     ipcRenderer.invoke('snippet-export'),
+
+  // ─── Notes Manager ─────────────────────────────────────────────
+  noteGetAll: (): Promise<any[]> =>
+    ipcRenderer.invoke('note-get-all'),
+  noteSearch: (query: string): Promise<any[]> =>
+    ipcRenderer.invoke('note-search', query),
+  noteCreate: (data: any): Promise<any> =>
+    ipcRenderer.invoke('note-create', data),
+  noteUpdate: (id: string, data: any): Promise<any> =>
+    ipcRenderer.invoke('note-update', id, data),
+  noteDelete: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('note-delete', id),
+  noteDeleteAll: (): Promise<number> =>
+    ipcRenderer.invoke('note-delete-all'),
+  noteDuplicate: (id: string): Promise<any> =>
+    ipcRenderer.invoke('note-duplicate', id),
+  noteTogglePin: (id: string): Promise<any> =>
+    ipcRenderer.invoke('note-toggle-pin', id),
+  noteCopyToClipboard: (id: string, format: string): Promise<boolean> =>
+    ipcRenderer.invoke('note-copy-to-clipboard', id, format),
+  noteExportToFile: (id: string, format: string): Promise<boolean> =>
+    ipcRenderer.invoke('note-export-to-file', id, format),
+  noteExport: (): Promise<boolean> =>
+    ipcRenderer.invoke('note-export'),
+  noteImport: (): Promise<{ imported: number; skipped: number }> =>
+    ipcRenderer.invoke('note-import'),
+  openNotesWindow: (mode?: string, noteJson?: string): Promise<void> =>
+    ipcRenderer.invoke('open-notes-window', mode, noteJson),
+  notesGetPending: (): Promise<string | null> =>
+    ipcRenderer.invoke('notes-get-pending'),
+  onNotesMode: (callback: (payload: any) => void) => {
+    const listener = (_event: any, payload: any) => callback(payload);
+    ipcRenderer.on('notes-mode-changed', listener);
+    return () => {
+      ipcRenderer.removeListener('notes-mode-changed', listener);
+    };
+  },
+
   quickLinkGetAll: (): Promise<any[]> =>
     ipcRenderer.invoke('quicklink-get-all'),
   quickLinkSearch: (query: string): Promise<any[]> =>
@@ -600,6 +662,8 @@ contextBridge.exposeInMainWorld('electron', {
     showHiddenFiles?: boolean;
   }): Promise<string[]> =>
     ipcRenderer.invoke('pick-files', options),
+  pickLauncherBackgroundImage: (): Promise<string | null> =>
+    ipcRenderer.invoke('pick-launcher-background-image'),
 
   // ─── Menu Bar (Tray) Extensions ────────────────────────────────
   getMenuBarExtensions: (): Promise<any[]> =>
@@ -621,6 +685,36 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('ai-is-available'),
   whisperRefineTranscript: (transcript: string): Promise<{ correctedText: string; source: 'ai' | 'heuristic' | 'raw' }> =>
     ipcRenderer.invoke('whisper-refine-transcript', transcript),
+  whisperCppModelStatus: (): Promise<{
+    state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+    modelName: string;
+    path: string;
+    bytesDownloaded: number;
+    totalBytes: number | null;
+    error?: string;
+  }> =>
+    ipcRenderer.invoke('whispercpp-model-status'),
+  whisperCppDownloadModel: (): Promise<{
+    state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+    modelName: string;
+    path: string;
+    bytesDownloaded: number;
+    totalBytes: number | null;
+    error?: string;
+  }> =>
+    ipcRenderer.invoke('whispercpp-download-model'),
+  parakeetModelStatus: (): Promise<any> =>
+    ipcRenderer.invoke('parakeet-model-status'),
+  parakeetDownloadModel: (): Promise<any> =>
+    ipcRenderer.invoke('parakeet-download-model'),
+  parakeetWarmup: (): Promise<{ ready: boolean; error?: string }> =>
+    ipcRenderer.invoke('parakeet-warmup'),
+  qwen3ModelStatus: (): Promise<any> =>
+    ipcRenderer.invoke('qwen3-model-status'),
+  qwen3DownloadModel: (): Promise<any> =>
+    ipcRenderer.invoke('qwen3-download-model'),
+  qwen3Warmup: (): Promise<{ ready: boolean; error?: string }> =>
+    ipcRenderer.invoke('qwen3-warmup'),
   whisperDebugLog: (tag: string, message: string, data?: any): void =>
     ipcRenderer.send('whisper-debug-log', { tag, message, data }),
   whisperTranscribe: (audioBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }): Promise<string> =>
@@ -684,6 +778,15 @@ contextBridge.exposeInMainWorld('electron', {
   },
   onOllamaPullError: (callback: (data: { requestId: string; error: string }) => void) => {
     ipcRenderer.on('ollama-pull-error', (_event: any, data: any) => callback(data));
+  },
+
+  // ─── Hyper Key ──────────────────────────────────────────────────
+  onHyperKeyCombo: (callback: (key: string) => void) => {
+    const listener = (_event: any, key: string) => callback(key);
+    ipcRenderer.on('hyper-key-combo', listener);
+    return () => {
+      ipcRenderer.removeListener('hyper-key-combo', listener);
+    };
   },
 
   // ─── WindowManagement ────────────────────────────────────────────

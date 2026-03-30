@@ -77,6 +77,14 @@ export interface CalendarEventsResult {
   error?: string;
 }
 
+export interface CalendarPermissionResult {
+  granted: boolean;
+  accessStatus: CalendarAccessStatus;
+  requested: boolean;
+  canPrompt: boolean;
+  error?: string;
+}
+
 export interface ExtensionPreferenceSchema {
   scope: 'extension' | 'command';
   name: string;
@@ -191,6 +199,31 @@ export interface ElevenLabsVoice {
   previewUrl?: string;
 }
 
+export interface WhisperCppModelStatus {
+  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+  modelName: string;
+  path: string;
+  bytesDownloaded: number;
+  totalBytes: number | null;
+  error?: string;
+}
+
+export interface ParakeetModelStatus {
+  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+  modelName: string;
+  path: string;
+  progress: number;
+  error?: string;
+}
+
+export interface Qwen3ModelStatus {
+  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
+  modelName: string;
+  path: string;
+  progress: number;
+  error?: string;
+}
+
 export interface AppUpdaterStatus {
   state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
   supported: boolean;
@@ -203,6 +236,25 @@ export interface AppUpdaterStatus {
   totalBytes?: number;
   bytesPerSecond?: number;
   message?: string;
+}
+
+export type HyperKeySourceKey =
+  | 'caps-lock'
+  | 'left-control'
+  | 'left-shift'
+  | 'left-option'
+  | 'left-command'
+  | 'right-control'
+  | 'right-shift'
+  | 'right-option'
+  | 'right-command';
+
+export type HyperKeyCapsLockTapBehavior = 'escape' | 'nothing' | 'toggle';
+
+export interface HyperKeySettings {
+  enabled: boolean;
+  sourceKey: HyperKeySourceKey;
+  capsLockTapBehavior: HyperKeyCapsLockTapBehavior;
 }
 
 export interface AppSettings {
@@ -222,10 +274,16 @@ export interface AppSettings {
   ai: AISettings;
   commandMetadata?: Record<string, { subtitle?: string }>;
   debugMode: boolean;
+  appLanguage: 'system' | 'en' | 'zh-Hans' | 'zh-Hant' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'ru';
   fontSize: 'extra-small' | 'small' | 'medium' | 'large' | 'extra-large';
   uiStyle: 'default' | 'glassy';
   baseColor: string;
+  launcherBackgroundImagePath: string;
+  launcherBackgroundImageEverywhere: boolean;
+  launcherBackgroundImageBlurPercent: number;
+  launcherBackgroundImageOpacityPercent: number;
   appUpdaterLastCheckedAt: number;
+  hyperKey: HyperKeySettings;
 }
 
 export interface CatalogEntry {
@@ -240,6 +298,7 @@ export interface CatalogEntry {
   categories: string[];
   platforms: string[];
   commands: { name: string; title: string; description: string }[];
+  installCount?: number;
 }
 
 export interface ClipboardItem {
@@ -275,6 +334,31 @@ export interface SnippetDynamicField {
   defaultValue?: string;
 }
 
+export type NoteTheme =
+  | 'default'
+  | 'rose'
+  | 'orange'
+  | 'amber'
+  | 'emerald'
+  | 'cyan'
+  | 'blue'
+  | 'violet'
+  | 'fuchsia'
+  | 'slate';
+
+export type NoteExportFormat = 'markdown' | 'plaintext' | 'html';
+
+export interface Note {
+  id: string;
+  title: string;
+  icon: string;
+  content: string;
+  theme: NoteTheme;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export type QuickLinkIcon = string;
 
 export interface QuickLink {
@@ -305,6 +389,8 @@ export interface OllamaLocalModel {
 }
 
 export interface ElectronAPI {
+  // Lifecycle
+  rendererReady: () => void;
   // Launcher
   getCommands: () => Promise<CommandInfo[]>;
   executeCommand: (commandId: string) => Promise<boolean>;
@@ -459,7 +545,14 @@ export interface ElectronAPI {
   getInstalledExtensionNames: () => Promise<string[]>;
   installExtension: (name: string) => Promise<boolean>;
   uninstallExtension: (name: string) => Promise<boolean>;
+  searchExtensions: (
+    query: string,
+    options?: { category?: string; limit?: number; offset?: number },
+  ) => Promise<{ results: CatalogEntry[]; total: number }>;
+  getPopularExtensions: (limit?: number) => Promise<CatalogEntry[]>;
+  getExtensionDetails: (name: string) => Promise<CatalogEntry | null>;
   onExtensionsChanged: (callback: () => void) => (() => void);
+  onExtensionInstallStatus: (callback: (message: string) => void) => (() => void);
 
   // Extension APIs (for @raycast/api compatibility)
   httpRequest: (options: {
@@ -499,6 +592,7 @@ export interface ElectronAPI {
   getDefaultApplication: (filePath: string) => Promise<{ name: string; path: string; bundleId?: string }>;
   getFrontmostApplication: () => Promise<{ name: string; path: string; bundleId?: string } | null>;
   runAppleScript: (script: string) => Promise<string>;
+  ensureCalendarAccess: (options?: { prompt?: boolean }) => Promise<CalendarPermissionResult>;
   getCalendarEvents: (payload: { start: string; end: string }) => Promise<CalendarEventsResult>;
   moveToTrash: (paths: string[]) => Promise<void>;
   readFile: (filePath: string) => Promise<string>;
@@ -554,6 +648,23 @@ export interface ElectronAPI {
   snippetPasteResolved: (id: string, dynamicValues?: Record<string, string>) => Promise<boolean>;
   snippetImport: () => Promise<{ imported: number; skipped: number }>;
   snippetExport: () => Promise<boolean>;
+
+  // Notes Manager
+  noteGetAll: () => Promise<Note[]>;
+  noteSearch: (query: string) => Promise<Note[]>;
+  noteCreate: (data: { title: string; icon?: string; content?: string; theme?: NoteTheme }) => Promise<Note>;
+  noteUpdate: (id: string, data: { title?: string; icon?: string; content?: string; theme?: NoteTheme; pinned?: boolean }) => Promise<Note | null>;
+  noteDelete: (id: string) => Promise<boolean>;
+  noteDeleteAll: () => Promise<number>;
+  noteDuplicate: (id: string) => Promise<Note | null>;
+  noteTogglePin: (id: string) => Promise<Note | null>;
+  noteCopyToClipboard: (id: string, format: NoteExportFormat) => Promise<boolean>;
+  noteExportToFile: (id: string, format: NoteExportFormat) => Promise<boolean>;
+  noteExport: () => Promise<boolean>;
+  noteImport: () => Promise<{ imported: number; skipped: number }>;
+  openNotesWindow: (mode?: 'search' | 'create' | 'edit', noteJson?: string) => Promise<void>;
+  notesGetPending: () => Promise<string | null>;
+  onNotesMode: (callback: (payload: any) => void) => (() => void);
   quickLinkGetAll: () => Promise<QuickLink[]>;
   quickLinkSearch: (query: string) => Promise<QuickLink[]>;
   quickLinkGetDynamicFields: (id: string) => Promise<QuickLinkDynamicField[]>;
@@ -595,6 +706,7 @@ export interface ElectronAPI {
     canChooseFiles?: boolean;
     showHiddenFiles?: boolean;
   }) => Promise<string[]>;
+  pickLauncherBackgroundImage: () => Promise<string | null>;
   getMenuBarExtensions: () => Promise<any[]>;
   updateMenuBar: (data: any) => void;
   removeMenuBar: (extId: string) => void;
@@ -610,6 +722,14 @@ export interface ElectronAPI {
   whisperRefineTranscript: (
     transcript: string
   ) => Promise<{ correctedText: string; source: 'ai' | 'heuristic' | 'raw' }>;
+  whisperCppModelStatus: () => Promise<WhisperCppModelStatus>;
+  whisperCppDownloadModel: () => Promise<WhisperCppModelStatus>;
+  parakeetModelStatus: () => Promise<ParakeetModelStatus>;
+  parakeetDownloadModel: () => Promise<ParakeetModelStatus>;
+  parakeetWarmup: () => Promise<{ ready: boolean; error?: string }>;
+  qwen3ModelStatus: () => Promise<Qwen3ModelStatus>;
+  qwen3DownloadModel: () => Promise<Qwen3ModelStatus>;
+  qwen3Warmup: () => Promise<{ ready: boolean; error?: string }>;
   whisperDebugLog: (tag: string, message: string, data?: any) => void;
   whisperTranscribe: (audioBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }) => Promise<string>;
   whisperEnsureMicrophoneAccess: (
@@ -651,6 +771,9 @@ export interface ElectronAPI {
   onOllamaPullProgress: (callback: (data: { requestId: string; status: string; digest: string; total: number; completed: number }) => void) => void;
   onOllamaPullDone: (callback: (data: { requestId: string }) => void) => void;
   onOllamaPullError: (callback: (data: { requestId: string; error: string }) => void) => void;
+
+  // Hyper Key
+  onHyperKeyCombo: (callback: (key: string) => void) => (() => void);
 }
 
 declare global {

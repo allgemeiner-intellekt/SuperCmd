@@ -220,6 +220,7 @@ const ClipboardManager: React.FC<ClipboardManagerProps> = ({ onClose }) => {
     if (!filteredItems[selectedIndex]) return;
     try {
       await window.electron.clipboardCopyItem(filteredItems[selectedIndex].id);
+      window.electron.hideWindow();
     } catch (e) {
       console.error('Failed to copy item:', e);
     }
@@ -414,6 +415,7 @@ const ClipboardManager: React.FC<ClipboardManagerProps> = ({ onClose }) => {
         if (e.key === 'Escape') {
           e.preventDefault();
           setShowActions(false);
+          requestAnimationFrame(() => inputRef.current?.focus());
           return;
         }
         return;

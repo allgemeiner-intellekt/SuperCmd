@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { InternalActionPanelOverlay } from '../raycast-api';
 import type { ExtractedAction } from '../raycast-api/action-runtime-types';
+import { useI18n } from '../i18n';
 
 interface CatalogEntry {
   name: string;
@@ -27,14 +28,15 @@ interface CatalogEntry {
 
 type DetailTab = 'overview' | 'commands' | 'screenshots' | 'team';
 type InstallStatus =
-  | { kind: 'installing'; name: string; title: string }
+  | { kind: 'installing'; name: string; title: string; statusMessage?: string }
   | { kind: 'success'; name: string; title: string; message: string }
   | { kind: 'failure'; name: string; title: string; message: string };
 
-const SEARCH_TOKEN_SPLIT_REGEX = /[^a-z0-9]+/g;
+const SEARCH_TOKEN_SPLIT_REGEX = /[^\p{L}\p{N}]+/gu;
 
 function normalizeSearchText(value: string): string {
   return String(value || '')
+    .normalize('NFKD')
     .toLowerCase()
     .replace(SEARCH_TOKEN_SPLIT_REGEX, ' ')
     .trim();
@@ -222,7 +224,10 @@ const avatarUrlFor = (name: string) =>
 
 const initialFor = (name: string) => (name.trim()[0] || '?').toUpperCase();
 
+const RENDER_PAGE_SIZE = 100;
+
 const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
+  const { t } = useI18n();
   const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
   const [installedNames, setInstalledNames] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState('');
@@ -235,6 +240,7 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
   const [loadingScreenshotsFor, setLoadingScreenshotsFor] = useState<string | null>(null);
   const [showActions, setShowActions] = useState(false);
   const [installStatus, setInstallStatus] = useState<InstallStatus | null>(null);
+  const [renderLimit, setRenderLimit] = useState(RENDER_PAGE_SIZE);
   const listRef = useRef<HTMLDivElement>(null);
 
   const loadCatalog = useCallback(async (force = false) => {
@@ -271,6 +277,18 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
   }, []);
 
   useEffect(() => {
+    const dispose = window.electron.onExtensionInstallStatus((message: string) => {
+      setInstallStatus((current) => {
+        if (!current || current.kind !== 'installing') return current;
+        return { ...current, statusMessage: message };
+      });
+    });
+    return () => {
+      dispose?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!installStatus || installStatus.kind === 'installing') return;
     const timer = window.setTimeout(() => {
       setInstallStatus((current) => {
@@ -281,6 +299,11 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
     }, 4000);
     return () => window.clearTimeout(timer);
   }, [installStatus]);
+
+  // Reset render limit when search changes
+  useEffect(() => {
+    setRenderLimit(RENDER_PAGE_SIZE);
+  }, [searchQuery]);
 
   const filteredCatalog = useMemo(() => {
     const query = searchQuery.trim();
@@ -426,15 +449,19 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
       const next = sortedCatalog[nextIndex];
       if (next && next.name !== selectedName) {
         setSelectedName(next.name);
+        // Expand render limit if navigating near the end of rendered items
+        if (nextIndex >= renderLimit - 5) {
+          setRenderLimit((prev) => Math.min(prev + RENDER_PAGE_SIZE, sortedCatalog.length));
+        }
       }
     },
-    [selectedName, sortedCatalog]
+    [selectedName, sortedCatalog, renderLimit]
   );
 
   const storeActions = useMemo<ExtractedAction[]>(() => {
     const actions: ExtractedAction[] = [
       {
-        title: selectedInstalled ? 'Update Extension' : 'Install Extension',
+        title: selectedInstalled ? t('store.update') : t('store.install'),
         shortcut: { modifiers: ['cmd'], key: 'enter' },
         execute: () => void handlePrimaryAction(),
       },
@@ -494,6 +521,25 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
         return;
       }
 
+      // Match action shortcuts (Cmd+R, Cmd+O, Cmd+Shift+O, Cmd+Backspace, etc.)
+      if (event.metaKey || event.ctrlKey) {
+        const key = event.key.toLowerCase() === 'backspace' ? 'backspace' : event.key.toLowerCase();
+        for (const action of storeActions) {
+          if (!action.shortcut) continue;
+          const mods = action.shortcut.modifiers || [];
+          const needsMeta = mods.includes('cmd') || mods.includes('ctrl');
+          const needsShift = mods.includes('shift');
+          const hasMeta = event.metaKey || event.ctrlKey;
+          const hasShift = event.shiftKey;
+          if (needsMeta === hasMeta && needsShift === hasShift && action.shortcut.key.toLowerCase() === key) {
+            event.preventDefault();
+            setShowActions(false);
+            action.execute();
+            return;
+          }
+        }
+      }
+
       if (showActions) {
         return;
       }
@@ -513,7 +559,7 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handlePrimaryAction, moveSelection, showActions]);
+  }, [handlePrimaryAction, moveSelection, showActions, storeActions]);
 
   useEffect(() => {
     if (!selectedName) return;
@@ -550,7 +596,7 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
         </span>
         <span className="text-[0.8125rem] font-medium text-[var(--text-primary)]/90 truncate">
           {installStatus.kind === 'installing'
-            ? `• ${installStatus.title}`
+            ? `• ${installStatus.statusMessage || installStatus.title}`
             : `• ${installStatus.message}`}
         </span>
       </span>
@@ -646,8 +692,17 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
           {sortedCatalog.length > 0 && (
             <div className="grid grid-cols-12 flex-1 min-h-0">
               <div className="col-span-5 border-r border-[var(--ui-divider)] min-h-0">
-                <div ref={listRef} className="space-y-1 h-full overflow-y-auto custom-scrollbar px-2 py-2">
-                  {sortedCatalog.map((ext) => {
+                <div
+                  ref={listRef}
+                  className="space-y-1 h-full overflow-y-auto custom-scrollbar px-2 py-2"
+                  onScroll={(e) => {
+                    const el = e.currentTarget;
+                    if (renderLimit < sortedCatalog.length && el.scrollHeight - el.scrollTop - el.clientHeight < 200) {
+                      setRenderLimit((prev) => Math.min(prev + RENDER_PAGE_SIZE, sortedCatalog.length));
+                    }
+                  }}
+                >
+                  {sortedCatalog.slice(0, renderLimit).map((ext) => {
                     const selected = selectedName === ext.name;
                     const installed = installedNames.has(ext.name);
                     return (
@@ -668,6 +723,7 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
                             src={ext.iconUrl}
                             alt=""
                             className="w-9 h-9 object-contain"
+                            loading="lazy"
                             draggable={false}
                             onError={(e) => {
                               const target = e.currentTarget;
@@ -751,7 +807,7 @@ const StoreTab: React.FC<{ embedded?: boolean }> = ({ embedded = false }) => {
                     disabled={isSelectedBusy}
                     className="text-[var(--text-primary)] text-xs font-semibold hover:text-[var(--text-secondary)] disabled:text-[var(--text-subtle)] transition-colors"
                   >
-                    {selectedInstalled ? 'Update Extension' : 'Install Extension'}
+                    {selectedInstalled ? t('store.update') : t('store.install')}
                   </button>
                   <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--ui-segment-hover-bg)] text-[11px] text-[var(--text-subtle)] font-medium">
                     ⌘
@@ -839,6 +895,7 @@ const CommunityDetails: React.FC<{
   installed: boolean;
   busy: boolean;
 }> = ({ ext, screenshots, screenshotsLoading, detailTab, onTabChange, installed, busy }) => {
+  const { t } = useI18n();
   const team = ext.contributors?.length ? ext.contributors : ext.author ? [ext.author] : [];
   const visibleCommands = ext.commands.slice(0, 7);
 
@@ -865,7 +922,7 @@ const CommunityDetails: React.FC<{
           active={detailTab === 'commands'}
           onClick={() => onTabChange('commands')}
           icon={<List className="w-3 h-3" />}
-          label="Commands"
+          label={t('store.tabs.commands')}
         />
         <DetailTabButton
           active={detailTab === 'screenshots'}
@@ -909,7 +966,7 @@ const CommunityDetails: React.FC<{
               )}
             </div>
             <div>
-              <div className="text-[var(--text-subtle)] uppercase tracking-wider text-xs mb-1">Top Commands</div>
+              <div className="text-[var(--text-subtle)] uppercase tracking-wider text-xs mb-1">{t('store.sections.topCommands')}</div>
               <div className="space-y-1.5">
                 {ext.commands.slice(0, 4).map((cmd) => (
                   <div key={cmd.name || cmd.title} className="flex items-start gap-2">
@@ -971,7 +1028,7 @@ const CommunityDetails: React.FC<{
             )}
             {ext.commands.length > visibleCommands.length && (
               <div className="text-xs text-[var(--text-subtle)]">
-                +{ext.commands.length - visibleCommands.length} more commands
+                +{ext.commands.length - visibleCommands.length} {t('store.sections.moreCommands')}
               </div>
             )}
           </div>

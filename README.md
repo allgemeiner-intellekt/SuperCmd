@@ -259,6 +259,16 @@ Important fields inside `settings.json`:
 - `SUPERMEMORY_BASE_URL`
 - `SUPERMEMORY_LOCAL`
 
+## Privacy & Security
+
+SuperCmd is open-source, so you can audit exactly what it does. The short version:
+
+- **Telemetry**: one anonymous `app_started` event via [Aptabase](https://aptabase.com/).
+- **AI prompts**: sent directly from your device to your configured provider (OpenAI / Anthropic / Gemini / Ollama).
+- **Extension install/uninstall**: reports extension name + an anonymous random machine ID to `api.supercmd.sh` for download counts.
+
+See **[SECURITY.md](./SECURITY.md)** for the full breakdown: what data leaves your device, what stays local, how to disable telemetry, API key storage details, extension security model, and how to report vulnerabilities.
+
 ## Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidelines on development setup, code architecture, PR conventions, and more.

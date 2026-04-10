@@ -108,6 +108,26 @@ import {
   exportNotesToFile,
   importNotesFromFile,
 } from './notes-store';
+import {
+  initCanvasStore,
+  getAllCanvases,
+  searchCanvases,
+  getCanvasById,
+  createCanvas,
+  updateCanvas,
+  deleteCanvas,
+  duplicateCanvas,
+  togglePinCanvas,
+  getScene,
+  saveScene,
+  saveThumbnail,
+  getThumbnail,
+  exportCanvas,
+  isCanvasLibInstalled,
+  getCanvasLibDir,
+} from './canvas-store';
+
+import { initialize as initAptabase, trackEvent } from "@aptabase/electron/main";
 
 const electron = require('electron');
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, shell, Menu, Tray, nativeImage, protocol, net, dialog, systemPreferences, clipboard: systemClipboard } = electron;
@@ -2005,8 +2025,11 @@ let settingsWindow: InstanceType<typeof BrowserWindow> | null = null;
 let extensionStoreWindow: InstanceType<typeof BrowserWindow> | null = null;
 let notesWindow: InstanceType<typeof BrowserWindow> | null = null;
 let pendingNoteJson: string | null = null;
+let canvasWindow: InstanceType<typeof BrowserWindow> | null = null;
+let pendingCanvasJson: string | null = null;
 let isVisible = false;
 let suppressBlurHide = false; // When true, blur won't hide the window (used during file dialogs)
+let showWindowBlurGraceUntil = 0; // Timestamp until which blur-to-hide is suppressed after show (prevents flash-close)
 let oauthBlurHideSuppressionDepth = 0; // Keep launcher alive while OAuth browser flow is in progress
 let oauthBlurHideSuppressionTimer: NodeJS.Timeout | null = null;
 const OAUTH_BLUR_SUPPRESSION_TIMEOUT_MS = 3 * 60 * 1000;
@@ -6102,6 +6125,7 @@ app.on('open-url', (event: any, url: string) => {
   console.log('[open-url] event received:', url);
 
   // Handle note deeplinks: supercmd://notes/<note-id>
+  // Handle canvas deeplinks: supercmd://canvas/<canvas-id>
   try {
     const parsed = new URL(url);
     if (parsed.protocol === 'supercmd:' && parsed.hostname === 'notes') {
@@ -6113,6 +6137,14 @@ app.on('open-url', (event: any, url: string) => {
           openNotesWindow('search');
           return;
         }
+      }
+    }
+    if (parsed.protocol === 'supercmd:' && parsed.hostname === 'canvas') {
+      const canvasId = parsed.pathname.replace(/^\//, '');
+      if (canvasId) {
+        pendingCanvasJson = JSON.stringify({ id: canvasId });
+        openCanvasWindow('edit');
+        return;
       }
     }
   } catch {
@@ -6762,6 +6794,10 @@ function createWindow(): void {
   });
 
   mainWindow.on('blur', () => {
+    // Grace period after show: AeroSpace / tiling WMs and macOS Space
+    // transitions can fire blur immediately after the window is shown,
+    // causing a visible flash-then-close.
+    if (Date.now() < showWindowBlurGraceUntil) return;
     if (
       isVisible &&
       !suppressBlurHide &&
@@ -7432,7 +7468,27 @@ function captureFrontmostAppContext(): void {
 
 async function showWindow(options?: { systemCommandId?: string }): Promise<void> {
   if (!mainWindow) return;
+
+  // Suppress blur-to-hide for a brief grace period after showing.
+  // AeroSpace, tiling WMs, and macOS Space transitions can fire blur
+  // immediately after show, causing the window to flash then close.
+  showWindowBlurGraceUntil = Date.now() + 400;
+
   setLauncherOverlayTopmost(true);
+
+  // On macOS, setLauncherOverlayTopmost just set visibleOnAllWorkspaces(false),
+  // which pins the window to whatever Space it was last on.  Override that
+  // temporarily so the window appears on the user's CURRENT Space/workspace.
+  // We'll confine it back after the window is visible.
+  if (process.platform === 'darwin' && launcherMode !== 'onboarding') {
+    try {
+      mainWindow.setVisibleOnAllWorkspaces(true, {
+        visibleOnFullScreen: true,
+        skipTransformProcessType: true,
+      });
+    } catch {}
+  }
+
   const shouldActivateLauncherWindow = process.platform !== 'darwin' || launcherMode === 'onboarding';
   let selectionSnapshotPromise: Promise<string> | null = null;
 
@@ -7453,8 +7509,7 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
     launcherEntryWindowManagementTargetWorkArea = null;
   }
 
-  // Move window to the current AeroSpace workspace (if AeroSpace is active)
-  // so the launcher opens where the user is, not on a stale workspace.
+  // Best-effort AeroSpace move before show (may fail if window is hidden).
   moveWindowToCurrentAerospaceWorkspace();
 
   applyLauncherBounds(launcherMode);
@@ -7494,6 +7549,22 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
   }
   mainWindow.moveTop();
   isVisible = true;
+
+  // Now that the window is visible on the current Space, confine it here
+  // and re-sync AeroSpace (the pre-show move may have been a no-op for
+  // hidden windows).
+  if (process.platform === 'darwin' && launcherMode !== 'onboarding') {
+    setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed() || !isVisible) return;
+      try {
+        mainWindow.setVisibleOnAllWorkspaces(false, {
+          visibleOnFullScreen: true,
+          skipTransformProcessType: true,
+        } as any);
+      } catch {}
+      moveWindowToCurrentAerospaceWorkspace();
+    }, 80);
+  }
 
   // First launch after app reopen can race with macOS activation; retry once.
   setTimeout(() => {
@@ -8260,11 +8331,17 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     if (source === 'launcher') hideWindow();
     return true;
   }
+  if (commandId === 'system-create-canvas') {
+    openCanvasWindow('create');
+    if (source === 'launcher') hideWindow();
+    return true;
+  }
   if (
     commandId === 'system-clipboard-manager' ||
     commandId === 'system-search-snippets' ||
     commandId === 'system-create-snippet' ||
     commandId === 'system-search-notes' ||
+    commandId === 'system-search-canvases' ||
     commandId === 'system-search-quicklinks' ||
     commandId === 'system-create-quicklink' ||
     commandId === 'system-search-files' ||
@@ -9164,23 +9241,25 @@ async function refineWhisperTranscript(input: string): Promise<{ correctedText: 
     try {
       let corrected = '';
       const systemPrompt = [
-        'You are a transcript post-processor for dictated user text.',
-        'Your job is to rewrite noisy speech-to-text into one clean final sentence while preserving the user intent.',
+        'You are a transcript cleaner for speech-to-text output.',
+        'Your ONLY job is to clean up the raw transcript text — do NOT answer or respond to it.',
+        'The input is always text to be cleaned, never a question directed at you.',
         'Rules:',
-        '1) Preserve original meaning and tense; do not add new facts.',
+        '1) Never change the meaning or intent of the text. Only clean it up.',
         '2) Apply explicit self-corrections in the utterance. Example: "3am no 5am" => "5am".',
         '3) Remove filler/disfluencies: uh, um, uhh, er, like (when filler), you know, i mean (if filler), repeated stutters.',
         '4) Resolve immediate restarts/repetitions and keep the latest valid phrase.',
-        '5) Keep wording natural and concise; fix basic grammar/punctuation only when needed for readability.',
+        '5) Keep wording natural; fix basic grammar/punctuation only when needed for readability.',
         '6) Keep first-person voice if present.',
-        '7) Output exactly one cleaned sentence only.',
-        '8) Output plain text only. No quotes, no markdown, no labels, no explanations.',
+        '7) IMPORTANT: Always write numbers as digits, not words. Examples: "seven pm" => "7 pm", "eight am" => "8 am", "three thirty" => "3:30", "twenty five" => "25".',
+        '8) Output exactly one cleaned version of the input only. No answers, no commentary.',
+        '9) Output plain text only. No quotes, no markdown, no labels, no explanations.',
       ].join(' ');
       const prompt = [
-        'Raw transcript:',
+        'Clean up this raw speech-to-text transcript. Do not answer it — just clean it up:',
         normalized,
         '',
-        'Return exactly one cleaned sentence.',
+        'Return exactly one cleaned version of the above text.',
       ].join('\n');
       const gen = streamAI(settings.ai, {
         prompt,
@@ -9462,10 +9541,257 @@ function openNotesWindow(mode?: 'search' | 'create'): void {
 
   notesWindow.on('closed', () => {
     notesWindow = null;
-    if (process.platform === 'darwin' && !settingsWindow && !extensionStoreWindow) {
+    if (process.platform === 'darwin' && !settingsWindow && !extensionStoreWindow && !canvasWindow) {
       app.dock.hide();
     }
   });
+}
+
+// ─── Canvas Window ────────────────────────────────────────────────
+
+function openCanvasWindow(mode?: 'create' | 'edit'): void {
+  if (canvasWindow) {
+    canvasWindow.webContents.send('canvas-mode-changed', { mode: mode || 'create', canvasJson: pendingCanvasJson });
+    pendingCanvasJson = null;
+    canvasWindow.show();
+    canvasWindow.focus();
+    return;
+  }
+
+  if (process.platform === 'darwin') {
+    app.dock.show();
+  }
+
+  const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = (() => {
+    if (mainWindow) {
+      const b = mainWindow.getBounds();
+      const center = {
+        x: b.x + Math.floor(b.width / 2),
+        y: b.y + Math.floor(b.height / 2),
+      };
+      return screen.getDisplayNearestPoint(center).workArea;
+    }
+    return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+  })();
+  const canvasWidth = Math.max(800, Math.min(1200, displayWidth - 200));
+  const canvasHeight = Math.max(600, Math.min(900, displayHeight - 200));
+  const canvasX = displayX + Math.floor((displayWidth - canvasWidth) / 2);
+  const canvasY = displayY + Math.floor((displayHeight - canvasHeight) / 2);
+  const useNativeLiquidGlass = shouldUseNativeLiquidGlass();
+
+  canvasWindow = new BrowserWindow({
+    width: canvasWidth,
+    height: canvasHeight,
+    x: canvasX,
+    y: canvasY,
+    minWidth: 640,
+    minHeight: 480,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 16, y: 16 },
+    transparent: true,
+    backgroundColor: '#00000000',
+    vibrancy: useNativeLiquidGlass ? false : 'hud',
+    visualEffectState: 'active',
+    hasShadow: false,
+    alwaysOnTop: false,  // Normal window, not always-on-top (design review decision)
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+    },
+  });
+  applyLiquidGlassToWindow(canvasWindow, {
+    cornerRadius: 14,
+    fallbackVibrancy: 'hud',
+  });
+
+  registerCloseWindowShortcut(canvasWindow);
+
+  // Include canvas ID in URL if available from pendingCanvasJson
+  let canvasIdParam = '';
+  if (pendingCanvasJson) {
+    try {
+      const parsed = JSON.parse(pendingCanvasJson);
+      if (parsed.id) canvasIdParam = `&id=${parsed.id}`;
+    } catch {}
+    pendingCanvasJson = null;
+  }
+  const hash = mode ? `/canvas?mode=${mode}${canvasIdParam}` : '/canvas';
+  loadWindowUrl(canvasWindow, hash);
+
+  // Handle window.open() from Excalidraw (library browser + other external links)
+  // Handle window.open() calls from Excalidraw for the library browser.
+  // We intercept and rewrite the URL before opening so that:
+  //   1. referrer=https://excalidraw.com  — gives the library site a known HTTPS origin
+  //      to target; our canvas is file:// or localhost, whose origin is opaque/mismatched
+  //      so postMessage and opener.location both fail silently in production.
+  //   2. useHash=false  — forces the library site to navigate ITSELF (the popup) to
+  //      excalidraw.com?addLibrary=... instead of trying to navigate window.opener
+  //      (which would clobber our React hash router).
+  // With those two changes the popup does a plain will-navigate to
+  // https://excalidraw.com?addLibrary=... which we cleanly intercept.
+  canvasWindow.webContents.setWindowOpenHandler(({ url }: { url: string }) => {
+    if (url.includes('libraries.excalidraw.com') || url.includes('libs.excalidraw.com')) {
+      setImmediate(() => {
+        if (!canvasWindow || canvasWindow.isDestroyed()) return;
+
+        // Rewrite the URL the library site receives
+        let libBrowserUrl = url;
+        try {
+          const parsed = new URL(url);
+          parsed.searchParams.set('referrer', 'https://excalidraw.com');
+          parsed.searchParams.delete('useHash'); // default is false
+          libBrowserUrl = parsed.toString();
+        } catch { /* keep original url */ }
+
+        const libWin = new BrowserWindow({
+          width: 1200,
+          height: 800,
+          title: 'Excalidraw Libraries',
+          autoHideMenuBar: true,
+          webPreferences: { contextIsolation: true, nodeIntegration: false },
+        });
+        libWin.loadURL(libBrowserUrl);
+
+        const maybeImport = (navUrl: string, event?: { preventDefault?: () => void }): boolean => {
+          const libraryUrl = extractCanvasLibraryUrl(navUrl);
+          if (!libraryUrl) return false;
+          event?.preventDefault?.();
+          void loadAndSendCanvasLibrary(libraryUrl);
+          if (!libWin.isDestroyed()) libWin.close();
+          return true;
+        };
+
+        // The library site navigates itself to excalidraw.com?addLibrary=... on click
+        libWin.webContents.on('will-navigate', (event: any, navUrl: string) => { maybeImport(navUrl, event); });
+        libWin.webContents.on('will-redirect', (event: any, navUrl: string) => { maybeImport(navUrl, event); });
+        libWin.webContents.on('did-navigate-in-page', (_e: any, navUrl: string) => { maybeImport(navUrl); });
+
+        // In case the site uses window.open() for the callback
+        libWin.webContents.setWindowOpenHandler(({ url: popupUrl }: { url: string }) => {
+          if (maybeImport(popupUrl)) return { action: 'deny' as const };
+          shell.openExternal(popupUrl).catch(() => {});
+          return { action: 'deny' as const };
+        });
+      });
+      return { action: 'deny' as const };
+    }
+    // All other external links → system browser
+    shell.openExternal(url).catch(() => {});
+    return { action: 'deny' as const };
+  });
+
+  canvasWindow.once('ready-to-show', () => {
+    canvasWindow?.show();
+  });
+
+  let savingBeforeClose = false;
+  canvasWindow.on('close', (event: any) => {
+    if (savingBeforeClose) return;
+    event.preventDefault();
+    savingBeforeClose = true;
+    canvasWindow?.webContents.send('canvas-save-before-close');
+    // Fallback: force close after 3 s if renderer doesn't respond
+    setTimeout(() => {
+      if (canvasWindow && !canvasWindow.isDestroyed()) canvasWindow.destroy();
+    }, 3000);
+  });
+
+  canvasWindow.on('closed', () => {
+    canvasWindow = null;
+    if (process.platform === 'darwin' && !settingsWindow && !extensionStoreWindow && !notesWindow) {
+      app.dock.hide();
+    }
+  });
+}
+
+function extractCanvasLibraryUrl(rawUrl: string): string | null {
+  let parsed: URL;
+  try { parsed = new URL(rawUrl); } catch { return null; }
+  // Check query string first (?addLibrary=...)
+  const queryValue = parsed.searchParams.get('addLibrary');
+  if (queryValue) return decodeURIComponent(queryValue);
+  // Excalidraw's real callback uses hash (#addLibrary=...&token=...)
+  const hash = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash;
+  if (!hash) return null;
+  const hashParams = new URLSearchParams(hash);
+  const hashValue = hashParams.get('addLibrary');
+  return hashValue ? decodeURIComponent(hashValue) : null;
+}
+
+async function loadAndSendCanvasLibrary(libraryUrl: string): Promise<void> {
+  try {
+    const response = await net.fetch(libraryUrl);
+    const data = await response.json() as any;
+    const items: any[] = data?.libraryItems ?? data?.library ?? [];
+    if (canvasWindow && !canvasWindow.isDestroyed()) {
+      canvasWindow.webContents.send('canvas-add-library', { libraryItems: items });
+    }
+  } catch (e) {
+    console.error('[Canvas] Failed to load library:', e);
+  }
+}
+
+// ─── Canvas Lib Install ──────────────────────────────────────────
+
+async function installCanvasLib(sender: any): Promise<void> {
+  const libDir = getCanvasLibDir();
+  const fsp = fs.promises;
+
+  if (!fs.existsSync(libDir)) {
+    fs.mkdirSync(libDir, { recursive: true });
+  }
+
+  sender.send('canvas-install-status', { status: 'downloading', progress: 0 });
+
+  try {
+    // In development: copy from local canvas-app/dist/ if present (avoids broken S3 bundle)
+    const localDist = path.join(__dirname, '..', '..', 'canvas-app', 'dist');
+    const localJs = path.join(localDist, 'excalidraw-bundle.js');
+    const localCss = path.join(localDist, 'excalidraw-bundle.css');
+
+    if (fs.existsSync(localJs)) {
+      console.log('[Canvas] Dev mode: copying bundle from canvas-app/dist/');
+      sender.send('canvas-install-status', { status: 'extracting', progress: 80 });
+      await fsp.copyFile(localJs, path.join(libDir, 'excalidraw-bundle.js'));
+      if (fs.existsSync(localCss)) {
+        await fsp.copyFile(localCss, path.join(libDir, 'excalidraw-bundle.css'));
+      }
+      sender.send('canvas-install-status', { status: 'done', progress: 100 });
+      console.log('[Canvas] Bundle installed from local dist');
+      return;
+    }
+
+    // Production: download the pre-built bundle from S3
+    const bundleUrl = 'https://supercmd-extensions.s3.amazonaws.com/canvas/excalidraw-bundle.tgz';
+    const response = await net.fetch(bundleUrl);
+
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    sender.send('canvas-install-status', { status: 'extracting', progress: 80 });
+
+    // Write tarball to temp file and extract
+    const tmpPath = path.join(libDir, 'excalidraw-bundle.tgz');
+    fs.writeFileSync(tmpPath, buffer);
+
+    // Extract using system tar (available on macOS)
+    const { execSync } = require('child_process');
+    execSync(`tar -xzf "${tmpPath}" -C "${libDir}"`, { timeout: 30000 });
+
+    // Cleanup temp file
+    fs.unlinkSync(tmpPath);
+
+    sender.send('canvas-install-status', { status: 'done', progress: 100 });
+    console.log('[Canvas] Excalidraw bundle installed successfully');
+  } catch (e: any) {
+    console.error('[Canvas] Failed to install canvas lib:', e);
+    sender.send('canvas-install-status', { status: 'error', error: e.message || 'Download failed' });
+    throw e;
+  }
 }
 
 function openExtensionStoreWindow(): void {
@@ -10218,13 +10544,26 @@ async function rebuildExtensions() {
   }
 }
 
+initAptabase("A-US-7660732429");
+
 // Register custom protocol for serving extension assets (images etc.)
 // Must be called before app.whenReady()
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'sc-asset', privileges: { bypassCSP: true, supportFetchAPI: true, stream: true } }
+  {
+    scheme: 'sc-asset',
+    privileges: {
+      standard: true,
+      secure: true,
+      corsEnabled: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      stream: true,
+    },
+  },
 ]);
 
 app.whenReady().then(async () => {
+  trackEvent("app_started");
   app.setAsDefaultProtocolClient('supercmd');
   scrubInternalClipboardProbe('app startup');
   // Warm the worker so the first window-management action does not race spawn.
@@ -10235,6 +10574,34 @@ app.whenReady().then(async () => {
     // URL format: sc-asset://ext-asset/path/to/file
     try {
       const url = new URL(request.url);
+      // canvas-lib: serve files from the canvas-lib directory
+      if (url.hostname === 'canvas-lib') {
+        let relPath = decodeURIComponent(url.pathname || '').replace(/^\//, '');
+        if (!relPath) return new Response('Bad Request', { status: 400 });
+        const canvasLibPath = path.join(app.getPath('userData'), 'canvas-lib');
+        const fullPath = path.join(canvasLibPath, relPath);
+        console.log('[sc-asset:canvas-lib] Serving:', fullPath);
+        try {
+          const data = fs.readFileSync(fullPath);
+          const ext = path.extname(fullPath).toLowerCase();
+          const mimeTypes: Record<string, string> = {
+            '.js': 'application/javascript',
+            '.css': 'text/css',
+            '.svg': 'image/svg+xml',
+            '.woff2': 'font/woff2',
+            '.woff': 'font/woff',
+            '.ttf': 'font/ttf',
+            '.png': 'image/png',
+          };
+          return new Response(data, {
+            headers: { 'Content-Type': mimeTypes[ext] || 'application/octet-stream' },
+          });
+        } catch (e) {
+          console.error('[sc-asset:canvas-lib] File not found:', fullPath);
+          return new Response('Not Found', { status: 404 });
+        }
+      }
+
       if (url.hostname !== 'ext-asset') {
         return new Response('Not Found', { status: 404 });
       }
@@ -10316,6 +10683,7 @@ app.whenReady().then(async () => {
   // Initialize snippet store
   initSnippetStore();
   initNoteStore();
+  initCanvasStore();
   try { refreshSnippetExpander(); } catch (e) {
     console.warn('[SnippetExpander] Failed to start:', e);
   }
@@ -12748,6 +13116,95 @@ if let tiff = image?.tiffRepresentation {
     // Don't clear immediately — React StrictMode double-mounts in dev
     if (json) setTimeout(() => { if (pendingNoteJson === json) pendingNoteJson = null; }, 3000);
     return json;
+  });
+
+  // ─── IPC: Canvas Manager ─────────────────────────────────────────
+
+  ipcMain.handle('canvas-get-all', () => {
+    return getAllCanvases();
+  });
+
+  ipcMain.handle('canvas-search', (_event: any, query: string) => {
+    return searchCanvases(query);
+  });
+
+  ipcMain.handle('canvas-create', (_event: any, data: { title?: string; icon?: string }) => {
+    return createCanvas(data);
+  });
+
+  ipcMain.handle('canvas-update', (_event: any, id: string, data: any) => {
+    return updateCanvas(id, data);
+  });
+
+  ipcMain.handle('canvas-delete', (_event: any, id: string) => {
+    return deleteCanvas(id);
+  });
+
+  ipcMain.handle('canvas-duplicate', (_event: any, id: string) => {
+    return duplicateCanvas(id);
+  });
+
+  ipcMain.handle('canvas-toggle-pin', (_event: any, id: string) => {
+    return togglePinCanvas(id);
+  });
+
+  ipcMain.handle('canvas-get-scene', (_event: any, id: string) => {
+    return getScene(id);
+  });
+
+  ipcMain.handle('canvas-save-scene', async (_event: any, id: string, scene: any) => {
+    await saveScene(id, scene);
+    mainWindow?.webContents.send('canvas-list-updated');
+  });
+
+  ipcMain.handle('canvas-export', async (event: any, id: string, format: string) => {
+    suppressBlurHide = true;
+    try {
+      return await exportCanvas(id, format as 'json', getDialogParentWindow(event));
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
+  ipcMain.handle('canvas-save-thumbnail', async (_event: any, id: string, svgString: string) => {
+    await saveThumbnail(id, svgString);
+    mainWindow?.webContents.send('canvas-thumbnail-updated', id);
+  });
+
+  ipcMain.handle('canvas-get-thumbnail', (_event: any, id: string) => {
+    return getThumbnail(id);
+  });
+
+  ipcMain.handle('open-canvas-window', (_event: any, mode?: string, canvasJson?: string) => {
+    if (canvasJson) pendingCanvasJson = canvasJson;
+    openCanvasWindow(mode as 'create' | 'edit' | undefined);
+  });
+
+  ipcMain.on('canvas-save-complete', () => {
+    if (canvasWindow && !canvasWindow.isDestroyed()) canvasWindow.destroy();
+  });
+
+  ipcMain.handle('canvas-check-installed', () => {
+    return isCanvasLibInstalled();
+  });
+
+  ipcMain.handle('canvas-install', async (event: any) => {
+    await installCanvasLib(event.sender);
+  });
+
+  ipcMain.handle('canvas-save-library', async (_event: any, items: any[]) => {
+    const libPath = path.join(app.getPath('userData'), 'canvas-library.json');
+    await fs.promises.writeFile(libPath, JSON.stringify(items));
+  });
+
+  ipcMain.handle('canvas-load-library', async () => {
+    const libPath = path.join(app.getPath('userData'), 'canvas-library.json');
+    try {
+      const content = await fs.promises.readFile(libPath, 'utf8');
+      return JSON.parse(content);
+    } catch {
+      return [];
+    }
   });
 
   // ─── IPC: Quick Link Manager ───────────────────────────────────

@@ -205,6 +205,7 @@ const NotesSearchInline: React.FC<NotesSearchInlineProps> = ({ onClose }) => {
       if (confirmDelete) return; // Let confirm modal handle keys
       if (showActions) return; // Let actions overlay handle keys
       if (e.key === 'Escape') { e.preventDefault(); onClose(); return; }
+      if (e.key === 'Backspace' && !searchQuery) { e.preventDefault(); onClose(); return; }
       if (e.key === 'k' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setShowActions(true); return; }
       if (e.key === 'n' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleNewNote(); return; }
       if (e.key === 'x' && e.ctrlKey && selectedNote) { e.preventDefault(); handleDelete(); return; }
@@ -214,12 +215,12 @@ const NotesSearchInline: React.FC<NotesSearchInlineProps> = ({ onClose }) => {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [notes, selectedIndex, selectedNote, showActions, confirmDelete, onClose, handleNewNote, handleOpenNote, handleDelete]);
+  }, [notes, selectedIndex, selectedNote, showActions, confirmDelete, onClose, handleNewNote, handleOpenNote, handleDelete, searchQuery]);
 
   return (
     <div className="snippet-view flex flex-col h-full">
       {/* ─── Header (matches snippet-header) ─── */}
-      <div className="snippet-header flex h-16 items-center gap-2 px-4">
+      <div className="snippet-header drag-region flex h-16 items-center gap-2 px-4">
         <button
           onClick={onClose}
           className="text-white/40 hover:text-white/70 transition-colors flex-shrink-0"
@@ -569,7 +570,12 @@ const ConfirmDeleteModal: React.FC<{
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)' }}>
       <div className="w-[320px] rounded-xl shadow-2xl overflow-hidden"
-        style={{ background: 'var(--card-bg)', backdropFilter: 'blur(40px)', border: '1px solid var(--border-primary)' }}>
+        style={{
+          // Paint the translucent card color over an opaque surface so the
+          // scrim behind the dialog can't bleed through and dim the card.
+          background: 'linear-gradient(var(--card-bg), var(--card-bg)), var(--bg-primary)',
+          border: '1px solid var(--border-primary)',
+        }}>
         <div className="px-5 pt-5 pb-3">
           <h3 className="text-[14px] font-semibold text-[var(--text-primary)] mb-1.5">Delete Note</h3>
           <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">

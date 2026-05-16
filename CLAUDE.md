@@ -219,6 +219,24 @@ When implementing a new Raycast API:
 2. **Report Incompatibilities**: Document any extensions that don't work and identify missing APIs
 3. **Progressive Enhancement**: Prioritize APIs used by popular extensions
 
+### Internationalization (i18n)
+
+Locales live in `src/renderer/src/i18n/locales/` — `en.json` is the source of truth, plus `zh-Hans`, `zh-Hant`, `ja`, `ko`, `fr`, `de`, `es`, `ru`.
+
+**Rule: whenever you add, rename, or remove a user-facing string, update every locale file in the same change.** Missing keys fall back to English (or a derived label from the last path segment), which looks broken for non-English users. Keys are only "done" when all locales have them.
+
+Checklist when touching `en.json`:
+
+1. Add the new key(s) to `en.json` with the English copy.
+2. Mirror the exact same key path into every other locale file with a proper translation — don't leave English values in a non-English locale, and don't machine-translate blindly for user-facing product names / brand terms (e.g. "SuperCmd", "Whisper", model names).
+3. If you remove a key from `en.json`, remove it from every other locale too.
+4. Preserve interpolation variables verbatim (`{count}`, `{name}`, `{version}`, `{plural}`, etc.) — translations must keep the same placeholders.
+5. Verify structural parity after edits — all locales must have the same set of keys as `en.json`. A quick node check:
+   ```bash
+   node -e "const fs=require('fs');function k(o,p=''){const r=[];for(const x of Object.keys(o)){const v=o[x],q=p?p+'.'+x:x;v&&typeof v==='object'?r.push(...k(v,q)):r.push(q)}return r}const en=new Set(k(JSON.parse(fs.readFileSync('src/renderer/src/i18n/locales/en.json','utf8'))));for(const l of ['zh-Hans','zh-Hant','ja','ko','fr','de','es','ru']){const s=new Set(k(JSON.parse(fs.readFileSync('src/renderer/src/i18n/locales/'+l+'.json','utf8'))));console.log(l,'missing:',[...en].filter(x=>!s.has(x)).length,'extra:',[...s].filter(x=>!en.has(x)).length)}"
+   ```
+6. Never copy a locale file wholesale from another language as a starting point — past incidents have left one locale filled with another language's text (e.g. `ja.json` was Chinese). Always translate each value.
+
 ### Code Organization
 
 - **API Shim**: All Raycast API implementations go in `src/renderer/src/raycast-api/index.tsx`
@@ -274,6 +292,32 @@ AI availability is checked via `environment.canAccess(AI)` and cached for perfor
 - **Main Process**: Handles system operations, extension management, IPC
 - **Renderer Process**: UI rendering, extension execution, API shim
 - **Preload Script**: Secure IPC bridge between main and renderer
+
+### Memory Status Bar (System Status Badge)
+
+A floating 340×60 px `BrowserWindow` anchored at the bottom-right of the screen used to surface transient system status to the user without opening the launcher.
+
+**Main-process API** (`src/main/main.ts`):
+```typescript
+showMemoryStatusBar(variant: 'processing' | 'success' | 'error', text: string)
+```
+- `processing` — never auto-hides; use while an async operation is in flight
+- `success` / `error` — auto-hide after 3 000 ms
+
+**Renderer → main bridge** (`window.electron.reportNoViewStatus`):
+```typescript
+window.electron.reportNoViewStatus(variant, text)
+// IPC channel: 'no-view-status' → showMemoryStatusBar(variant, text)
+```
+
+**No-view hotkey execution flow:**
+1. `runCommandById` in `main.ts` shows `'processing'` badge immediately (skips `showWindow()`)
+2. Renderer's `NoViewRunner` sets `window.__scNoViewStatusTracking = true` before running the extension fn
+3. `Toast.show()` in `raycast-api/index.tsx` checks `__scNoViewStatusTracking`; if set, it calls `reportNoViewStatus` and sets `__scNoViewStatusReported = true`
+4. `showHUD` internally calls `showToast` which flows through `Toast.show()`, so it is automatically bridged
+5. After the fn resolves/rejects, `NoViewRunner` calls `reportNoViewStatus('success', 'Done')` only if `__scNoViewStatusReported` is still `false` (prevents duplicate messages), then clears both flags
+
+**Rule:** Whenever you want to surface progress/completion of a background or hotkey-triggered operation, use `showMemoryStatusBar` from the main process or `window.electron.reportNoViewStatus` from the renderer. Do not show the launcher window for silent no-view commands.
 
 ## Testing Strategy
 
@@ -509,3 +553,23 @@ Use this map when working in the Raycast compatibility layer:
 - `src/renderer/src/raycast-api/raycast-icon-enum.ts`
   Purpose: Canonical Raycast icon enum/value mapping used by icon resolution (auto-generated).
   Use for: adding/fixing icon names and legacy icon token compatibility.
+
+## Skill routing
+
+When the user's request matches an available skill, ALWAYS invoke it using the Skill
+tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
+The skill has specialized workflows that produce better results than ad-hoc answers.
+
+Key routing rules:
+- Product ideas, "is this worth building", brainstorming → invoke office-hours
+- Bugs, errors, "why is this broken", 500 errors → invoke investigate
+- Ship, deploy, push, create PR → invoke ship
+- QA, test the site, find bugs → invoke qa
+- Code review, check my diff → invoke review
+- Update docs after shipping → invoke document-release
+- Weekly retro → invoke retro
+- Design system, brand → invoke design-consultation
+- Visual audit, design polish → invoke design-review
+- Architecture review → invoke plan-eng-review
+- Save progress, checkpoint, resume → invoke checkpoint
+- Code quality, health check → invoke health

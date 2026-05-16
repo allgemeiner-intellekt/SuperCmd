@@ -1,6 +1,6 @@
 {
   "name": "supercmd",
-  "version": "1.0.14",
+  "version": "1.0.23",
   "description": "SuperCmd — Productivity supercharged",
   "author": "Shobhit Bhosure - (https://x.com/nullbytes00)",
   "homepage": "https://supercmd.sh",
@@ -12,9 +12,10 @@
     "dev:renderer": "vite",
     "start:electron": "wait-on dist/main/main.js && cross-env NODE_ENV=development SUPERCMD_OPEN_DEVTOOLS_ON_STARTUP=1 electron .",
     "build": "npm run build:main && npm run build:renderer && npm run build:native",
-    "build:main": "tsc -p tsconfig.main.json",
+    "build:main": "tsc -p tsconfig.main.json && cp src/main/emoji-data.json dist/main/emoji-data.json",
     "build:renderer": "vite build",
-    "build:native": "mkdir -p dist/native && swiftc -O -o dist/native/color-picker src/native/color-picker.swift -framework AppKit && swiftc -O -o dist/native/snippet-expander src/native/snippet-expander.swift -framework AppKit && swiftc -O -o dist/native/hotkey-hold-monitor src/native/hotkey-hold-monitor.swift -framework CoreGraphics -framework AppKit -framework Carbon && swiftc -O -o dist/native/speech-recognizer src/native/speech-recognizer.swift -framework Speech -framework AVFoundation && swiftc -O -o dist/native/microphone-access src/native/microphone-access.swift -framework AVFoundation && swiftc -O -o dist/native/input-monitoring-request src/native/input-monitoring-request.swift -framework CoreGraphics && swiftc -O -o dist/native/window-adjust src/native/window-adjust.swift -framework ApplicationServices -framework AppKit && swiftc -O -o dist/native/calendar-events src/native/calendar-events.swift -framework EventKit && node scripts/build-whispercpp.mjs && node scripts/build-parakeet.mjs",
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "build:native": "node scripts/build-native.mjs",
     "postinstall": "electron-builder install-app-deps",
     "start": "electron .",
     "package": "cross-env NODE_ENV=production npm run build && electron-builder",
@@ -29,7 +30,7 @@
     "autoprefixer": "^10.4.17",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
-    "electron": "^40.0.0",
+    "electron": "^41.2.1",
     "electron-builder": "^24.13.3",
     "postcss": "^8.4.33",
     "tailwindcss": "^3.4.1",
@@ -41,7 +42,6 @@
     "@aptabase/electron": "^0.3.1",
     "@phosphor-icons/react": "^2.1.10",
     "@raycast/api": "^1.104.5",
-    "@supercmd/calculator": "^1.0.6",
     "electron-builder-notarize": "^1.5.2",
     "electron-liquid-glass": "^1.1.1",
     "electron-updater": "^6.7.3",
@@ -50,7 +50,8 @@
     "node-edge-tts": "^1.2.10",
     "node-window-manager": "^2.2.4",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "transliteration": "^2.6.1"
   },
   "build": {
     "appId": "com.supercmd.app",
@@ -64,10 +65,6 @@
       }
     ],
     "icon": "supercmd.icns",
-    "files": [
-      "dist/**/*",
-      "package.json"
-    ],
     "asarUnpack": [
       "dist/native/**",
       "dist/main/window-manager-worker.js",
@@ -76,6 +73,12 @@
       "node_modules/node-edge-tts/**",
       "node_modules/node-window-manager/**",
       "node_modules/electron-liquid-glass/**"
+    ],
+    "files": [
+      "dist/**/*",
+      "!dist/native/**/*.dSYM",
+      "!dist/native/**/*.dSYM/**",
+      "package.json"
     ],
     "directories": {
       "output": "out"

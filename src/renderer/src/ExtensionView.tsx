@@ -72,6 +72,8 @@ interface ExtensionViewProps {
   launchContext?: Record<string, any>;
   fallbackText?: string | null;
   launchType?: 'userInitiated' | 'background';
+  /** Mirror execution status to the system status-bar badge (for hotkey-triggered silent runs). */
+  reportStatus?: boolean;
 }
 
 function getDefaultExtensionPreferenceValue(def: NonNullable<ExtensionViewProps['preferenceDefinitions']>[number]): any {
@@ -2346,6 +2348,10 @@ const processStub: Record<string, any> = {
   off: function() { return processStub; },
   once: function() { return processStub; },
   emit: () => false,
+  // fs-extra (and other libs) call process.emitWarning at module init
+  // to warn about deprecated APIs. Stub it out so requiring fs-extra in
+  // the renderer doesn't throw.
+  emitWarning: noop,
   addListener: function() { return processStub; },
   removeListener: function() { return processStub; },
   removeAllListeners: function() { return processStub; },
@@ -2983,6 +2989,234 @@ for (const [key, val] of Object.entries({ ...nodeBuiltinStubs })) {
   }
 }
 
+// ─── Real Node built-in bridge ──────────────────────────────────────
+// The launcher window runs with `sandbox: false` + `nodeIntegration: true`
+// + `contextIsolation: false`. In that mode Node's `require`, `process`,
+// `Buffer` etc. are available directly on the main-world globalThis. We
+// want extensions to reach **real built-ins** (so classes like EventEmitter
+// and Buffer have correct prototypes), but we do NOT want them to bypass
+// our allowlist by reaching for electron internals or arbitrary file paths.
+//
+// So we do two things at module init:
+//   1. Capture real `require` / `process` / `Buffer` into module-private
+//      references nothing outside this file can see.
+//   2. Delete them from globalThis so `globalThis.require('electron')` /
+//      `globalThis.require('/abs/path')` no longer resolves.
+//
+// Extensions then only see Node built-ins we explicitly allow through
+// `fakeRequire` + `isNodeBuiltinRequest` + the captured real require.
+//
+// Flip `USE_REAL_NODE_BUILTINS = false` to fall back to the pure-stub
+// implementation (preserves rollback).
+const USE_REAL_NODE_BUILTINS = true;
+
+/** Names we believe real Node can resolve. Kept as the union of stub keys
+ *  plus a few well-known names extensions sometimes import without being in
+ *  the stub table (e.g. `worker_threads`, `vm`). Real require naturally
+ *  accepts deep paths like `fs/promises` and `stream/web`. */
+const KNOWN_NODE_BUILTINS = new Set<string>([
+  'fs', 'fs/promises', 'path', 'path/posix', 'path/win32', 'os', 'crypto',
+  'child_process', 'events', 'stream', 'stream/web', 'stream/promises',
+  'stream/consumers', 'util', 'util/types', 'buffer', 'http', 'https',
+  'net', 'tls', 'dns', 'dns/promises', 'url', 'querystring', 'zlib',
+  'assert', 'assert/strict', 'timers', 'timers/promises', 'module',
+  'readline', 'readline/promises', 'perf_hooks', 'string_decoder',
+  'process', 'constants', 'punycode', 'async_hooks', 'diagnostics_channel',
+  'worker_threads', 'vm', 'v8', 'inspector', 'tty', 'dgram', 'cluster',
+  'trace_events', 'wasi',
+]);
+
+function isNodeBuiltinRequest(name: string): boolean {
+  if (name.startsWith('node:')) return true;
+  if (KNOWN_NODE_BUILTINS.has(name)) return true;
+  const slash = name.indexOf('/');
+  if (slash > 0) {
+    const base = name.slice(0, slash);
+    if (KNOWN_NODE_BUILTINS.has(base)) return true;
+  }
+  return false;
+}
+
+// Capture real Node globals once, then remove them from globalThis so
+// extensions can't reach around fakeRequire. Runs at module load, before
+// any extension code executes.
+//
+// The preload's `__scNodeRequire` is kept as a fallback path for sandboxed
+// windows (where Node lives only in the preload context).
+const {
+  _realNodeRequire,
+  _realNodeProcess,
+  _realNodeBuffer,
+} = (() => {
+  const g = globalThis as any;
+  const capturedRequire: ((id: string) => any) | undefined =
+    typeof g.require === 'function' ? g.require : undefined;
+  const capturedProcess = g.process && typeof g.process.version === 'string' ? g.process : undefined;
+  const capturedBuffer = g.Buffer && typeof g.Buffer.isBuffer === 'function' ? g.Buffer : undefined;
+
+  if (USE_REAL_NODE_BUILTINS && capturedRequire) {
+    // Remove Node-loader globals from the main world. Extensions that try
+    // `globalThis.require('electron')` or `require('/abs/path/to/anything')`
+    // now get `undefined is not a function`.
+    //
+    // We can't prevent every conceivable bypass (a determined extension
+    // could still `Function(...)` its way somewhere), but deleting the
+    // obvious handles is a meaningful barrier for curated code.
+    for (const key of ['require', 'module', 'exports', '__filename', '__dirname']) {
+      try { delete g[key]; } catch {}
+    }
+  }
+
+  return {
+    _realNodeRequire: capturedRequire,
+    _realNodeProcess: capturedProcess,
+    _realNodeBuffer: capturedBuffer,
+  };
+})();
+
+/**
+ * Patch Node's `Readable.fromWeb` (and the corresponding helper on
+ * `node:stream/promises` if present) to accept cross-realm ReadableStreams.
+ *
+ * In the renderer, `globalThis.ReadableStream` is the Blink-realm class; the
+ * `ReadableStream` exported from Node's `stream/web` is a different class with
+ * the same name. Extensions that do `Readable.fromWeb(fetchResponse.body)`
+ * fail Node's internal `stream instanceof ReadableStream` check — the
+ * confusing "must be an instance of ReadableStream. Received an instance of
+ * ReadableStream" error. We re-wrap foreign-realm streams in a Node-realm
+ * ReadableStream before delegating, by pumping the foreign `getReader()` into
+ * a fresh Node ReadableStream, which is what fromWeb actually wants.
+ */
+function patchReadableFromWebOnce(mod: any, getNodeReadableStream: () => any): void {
+  if (!mod || !mod.Readable || mod.Readable.__scFromWebPatched) return;
+  const Readable = mod.Readable;
+  const original = Readable.fromWeb;
+  if (typeof original !== 'function') return;
+
+  Readable.fromWeb = function patchedFromWeb(stream: any, options?: any) {
+    try {
+      return original.call(this, stream, options);
+    } catch (err: any) {
+      const NodeReadableStream = getNodeReadableStream();
+      if (!NodeReadableStream || !stream || typeof stream.getReader !== 'function') {
+        throw err;
+      }
+      const reader = stream.getReader();
+      const wrapped = new NodeReadableStream({
+        async pull(controller: any) {
+          try {
+            const { done, value } = await reader.read();
+            if (done) controller.close();
+            else controller.enqueue(value);
+          } catch (pumpErr: any) {
+            controller.error(pumpErr);
+          }
+        },
+        cancel(reason: any) {
+          try { reader.cancel(reason); } catch {}
+        },
+      });
+      return original.call(this, wrapped, options);
+    }
+  };
+  Readable.__scFromWebPatched = true;
+}
+
+function isStreamRequest(name: string): boolean {
+  return (
+    name === 'stream' ||
+    name === 'node:stream' ||
+    name === 'stream/promises' ||
+    name === 'node:stream/promises'
+  );
+}
+
+function tryRealNodeRequire(name: string): any | undefined {
+  if (!USE_REAL_NODE_BUILTINS) return undefined;
+  if (!isNodeBuiltinRequest(name)) return undefined;
+  // Preferred path: the captured main-world require (contextIsolation: false
+  // on the launcher window). Classes, prototypes, and process/Buffer identity
+  // all work naturally because there's no cross-context serialization.
+  //
+  // Fallback: the preload exposes `__scNodeRequire` for windows that keep
+  // contextIsolation on. Classes won't survive the bridge cleanly there,
+  // but simple modules still work — better than returning a stub.
+  const bridgeRequire =
+    typeof window !== 'undefined' ? ((window as any).__scNodeRequire as ((id: string) => any) | undefined) : undefined;
+  const realRequire = _realNodeRequire || bridgeRequire;
+  if (!realRequire) return undefined;
+  try {
+    const mod = realRequire(name);
+    if (isStreamRequest(name) && mod) {
+      patchReadableFromWebOnce(mod, () => {
+        try {
+          return realRequire('node:stream/web')?.ReadableStream;
+        } catch {
+          try { return realRequire('stream/web')?.ReadableStream; } catch { return undefined; }
+        }
+      });
+    }
+    return mod;
+  } catch (e) {
+    // Fall through to the stub path — don't let a missing-in-Node import
+    // break the extension. Log once at debug level.
+    if (typeof console !== 'undefined') {
+      console.debug(`[fakeRequire] real require("${name}") failed, falling back to stub:`, e);
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Build a `process` object for a single extension execution.
+ *
+ * We want the extension to see:
+ *   - real process properties (version, platform, nextTick, setMaxListeners,
+ *     emitWarning, ...) so classes extending EventEmitter and libraries like
+ *     signal-exit / fs-extra work
+ *   - an `env` that has the extension's node_modules/.bin and bin directories
+ *     prepended to PATH, and HOME set to the user's home, so `spawn('git')` /
+ *     `spawn('tree-sitter')` find the extension-bundled binaries
+ *
+ * Critically, we do NOT mutate the host renderer's `process.env`. Previously
+ * loadExtensionExport did `globalThis.process.env.PATH = ...` which leaked
+ * across extensions and into the host. Now each extension gets its own env
+ * copy via a prototype wrapper; the real process is untouched.
+ */
+function buildBundleProcess(extensionPath?: string): any {
+  // Fallback — real process not available (sandboxed window, tests, etc.).
+  if (!_realNodeProcess) return processStub;
+
+  const baseEnv = { ..._realNodeProcess.env };
+  if (extensionPath) {
+    const systemPath = baseEnv.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+    const extBins = [
+      `${extensionPath}/node_modules/.bin`,
+      `${extensionPath}/bin`,
+      extensionPath,
+    ].join(':');
+    baseEnv.PATH = `${extBins}:${systemPath}`;
+    const homeDir =
+      (typeof window !== 'undefined' && (window as any).electron?.homeDir) ||
+      baseEnv.HOME ||
+      '~';
+    baseEnv.HOME = homeDir;
+  }
+
+  // Shallow wrapper so mutations to .env stay local to this extension, but
+  // reads of other process properties (stdout, nextTick, etc.) go to the real
+  // process. We intentionally keep the prototype link so class checks like
+  // `emitter instanceof EventEmitter` involving `process` still work.
+  return Object.create(_realNodeProcess, {
+    env: {
+      value: baseEnv,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+  });
+}
+
 // ─── Inject globals that extensions expect ──────────────────────────
 
 function ensureGlobals() {
@@ -3129,6 +3363,204 @@ function ensureGlobals() {
 }
 
 /**
+ * Per-ExtensionView registry of timer handles created by the extension's
+ * sandboxed setInterval/setTimeout/requestAnimationFrame. Cleared on unmount
+ * so a buggy extension (e.g. raycast/timers) cannot leak timers + retained
+ * fibers into the host renderer.
+ */
+export interface TimerRegistry {
+  intervals: Set<number>;
+  timeouts: Set<number>;
+  rafs: Set<number>;
+}
+
+export function createTimerRegistry(): TimerRegistry {
+  return { intervals: new Set(), timeouts: new Set(), rafs: new Set() };
+}
+
+export function clearTimerRegistry(registry: TimerRegistry): void {
+  registry.intervals.forEach((id) => window.clearInterval(id));
+  registry.timeouts.forEach((id) => window.clearTimeout(id));
+  registry.rafs.forEach((id) => window.cancelAnimationFrame(id));
+  registry.intervals.clear();
+  registry.timeouts.clear();
+  registry.rafs.clear();
+}
+
+/**
+ * JS shim for the `swift:AppleReminders` native module that the
+ * raycast/apple-reminders extension imports. Backs operations with
+ * AppleScript through our existing runAppleScript IPC, so users can
+ * create / list / toggle reminders without a compiled Swift binary.
+ *
+ * Only the operations the extension actually calls are implemented end-to-end;
+ * the rest are no-ops returning empty/optimistic results so the extension's
+ * UI doesn't crash on missing exports.
+ */
+function createAppleRemindersBridge(): Record<string, any> {
+  const electron = (window as any).electron;
+  const escapeAS = (s: any) =>
+    String(s ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const runScript = async (script: string): Promise<string> => {
+    if (!electron?.runAppleScript) throw new Error('AppleScript bridge unavailable');
+    return String((await electron.runAppleScript(script)) || '');
+  };
+
+  const splitTabbedLines = (raw: string) =>
+    raw
+      .split('\n')
+      .map((line) => line.replace(/\r$/, ''))
+      .filter((line) => line.length > 0);
+
+  return {
+    // Account / permission probe — Reminders.app is reachable iff we got past
+    // System Events permission. Treat any non-error response as "granted".
+    requestAccess: async () => true,
+    hasAccess: async () => true,
+
+    getAccounts: async () => [{ id: 'default', name: 'iCloud' }],
+
+    getLists: async () => {
+      const script = `
+tell application "Reminders"
+  set output to ""
+  repeat with l in lists
+    set output to output & (id of l) & "\\t" & (name of l) & "\\n"
+  end repeat
+  return output
+end tell`.trim();
+      try {
+        const raw = await runScript(script);
+        return splitTabbedLines(raw).map((line) => {
+          const [id, title] = line.split('\t');
+          return { id, title, name: title };
+        });
+      } catch (err) {
+        console.error('[AppleReminders.getLists]', err);
+        return [];
+      }
+    },
+
+    getReminders: async (_opts?: { listId?: string }) => {
+      const listClause = _opts?.listId
+        ? `tell (first list whose id is "${escapeAS(_opts.listId)}")`
+        : `tell application "Reminders"`;
+      const script = `
+${listClause}
+  set output to ""
+  repeat with r in reminders
+    set rid to id of r
+    set rname to name of r
+    set rdone to completed of r
+    set output to output & rid & "\\t" & rname & "\\t" & (rdone as text) & "\\n"
+  end repeat
+  return output
+end tell`.trim();
+      try {
+        const raw = await runScript(script);
+        return splitTabbedLines(raw).map((line) => {
+          const [id, title, done] = line.split('\t');
+          return { id, title, isCompleted: done === 'true', completed: done === 'true' };
+        });
+      } catch (err) {
+        console.error('[AppleReminders.getReminders]', err);
+        return [];
+      }
+    },
+
+    createReminder: async (opts: any) => {
+      const title = opts?.title ?? opts?.name ?? 'New Reminder';
+      const notes = opts?.notes ?? opts?.body ?? '';
+      const listId = opts?.listId || opts?.list?.id || '';
+      const dueDateRaw = opts?.dueDate || opts?.date;
+
+      const props: string[] = [`name:"${escapeAS(title)}"`];
+      if (notes) props.push(`body:"${escapeAS(notes)}"`);
+
+      const targetList = listId
+        ? `set targetList to first list whose id is "${escapeAS(listId)}"`
+        : `set targetList to default list`;
+
+      // Optional due date — use AppleScript's "current date" + offset to avoid
+      // locale-dependent date string parsing. Caller passes ISO; we compute
+      // the delta in seconds at call time.
+      let dueClause = '';
+      if (dueDateRaw) {
+        const due = new Date(dueDateRaw);
+        if (!Number.isNaN(due.getTime())) {
+          const deltaSeconds = Math.round((due.getTime() - Date.now()) / 1000);
+          dueClause = `\n  set due date of newReminder to (current date) + (${deltaSeconds})`;
+        }
+      }
+
+      const script = `
+tell application "Reminders"
+  ${targetList}
+  set newReminder to make new reminder at end of reminders of targetList with properties {${props.join(', ')}}${dueClause}
+  return id of newReminder
+end tell`.trim();
+
+      try {
+        const id = (await runScript(script)).trim();
+        return { id, title, notes, isCompleted: false };
+      } catch (err: any) {
+        console.error('[AppleReminders.createReminder]', err);
+        throw new Error(`Could not create reminder: ${err?.message || err}`);
+      }
+    },
+
+    updateReminder: async (id: string, opts: any) => {
+      const setters: string[] = [];
+      if (opts?.title != null) setters.push(`set name of r to "${escapeAS(opts.title)}"`);
+      if (opts?.notes != null) setters.push(`set body of r to "${escapeAS(opts.notes)}"`);
+      if (opts?.isCompleted != null) setters.push(`set completed of r to ${opts.isCompleted ? 'true' : 'false'}`);
+      if (setters.length === 0) return { id };
+      const script = `
+tell application "Reminders"
+  set r to first reminder whose id is "${escapeAS(id)}"
+  ${setters.join('\n  ')}
+end tell`.trim();
+      try {
+        await runScript(script);
+        return { id };
+      } catch (err) {
+        console.error('[AppleReminders.updateReminder]', err);
+        throw err;
+      }
+    },
+
+    deleteReminder: async (id: string) => {
+      const script = `
+tell application "Reminders"
+  delete (first reminder whose id is "${escapeAS(id)}")
+end tell`.trim();
+      try { await runScript(script); } catch (err) {
+        console.error('[AppleReminders.deleteReminder]', err);
+      }
+    },
+
+    setCompleted: async (id: string, completed: boolean) => {
+      const script = `
+tell application "Reminders"
+  set completed of (first reminder whose id is "${escapeAS(id)}") to ${completed ? 'true' : 'false'}
+end tell`.trim();
+      try { await runScript(script); } catch (err) {
+        console.error('[AppleReminders.setCompleted]', err);
+      }
+    },
+
+    // No-op stubs for less common exports that may exist in the Swift module.
+    // Returning sensible defaults keeps the extension UI functional even if
+    // it iterates these results.
+    getReminder: async () => null,
+    searchReminders: async () => [],
+    createList: async () => ({ id: '', title: '' }),
+    updateList: async () => ({}),
+    deleteList: async () => {},
+  };
+}
+
+/**
  * Execute extension code and extract the default export.
  * Returns either a React component or a raw function (for no-view commands).
  *
@@ -3138,7 +3570,8 @@ function ensureGlobals() {
  */
 function loadExtensionExport(
   code: string,
-  extensionPath?: string
+  extensionPath?: string,
+  timerRegistry?: TimerRegistry
 ): Function | null {
   const patchSchemeDynamicImports = (sourceCode: string): string => {
     // Extension bundles may emit dynamic imports for native Raycast bridges
@@ -3151,31 +3584,19 @@ function loadExtensionExport(
     );
   };
 
-  // Make sure Node globals (process, Buffer, global) are available
+  // Make sure Node globals (process, Buffer, global) are available for any
+  // code that references them without importing (e.g. `process.nextTick`).
   ensureGlobals();
 
-  // Update PATH to include extension binaries
-  if (extensionPath && (globalThis as any).process) {
-    const systemPath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
-    const nodeBinPath = `${extensionPath}/node_modules/.bin`;
-    const extBinPath = `${extensionPath}/bin`;
-    const homeDir = (window as any).electron?.homeDir || '~';
-
-    // Build PATH with:
-    // 1. Extension's node_modules/.bin (for npm-installed binaries)
-    // 2. Extension's bin directory (for custom binaries)
-    // 3. Extension root (some binaries are in the root)
-    // 4. System PATH
-    (globalThis as any).process.env.PATH = [
-      nodeBinPath,
-      extBinPath,
-      extensionPath,
-      systemPath
-    ].join(':');
-
-    // Also set HOME for binaries that need it
-    (globalThis as any).process.env.HOME = homeDir;
-  }
+  // Build a per-extension `process` with extension-scoped PATH/HOME.
+  // We deliberately do NOT mutate the host renderer's globalThis.process.env
+  // here — that would leak extension PATH changes into every subsequent
+  // extension and into host code.
+  const bundleProcess = buildBundleProcess(extensionPath);
+  // Prefer the real Node Buffer so identity checks like
+  // `Buffer.isBuffer(require('crypto').randomBytes(1))` work. Fall back to
+  // the polyfill only when Node isn't available in this window.
+  const bundleBuffer = _realNodeBuffer || BufferPolyfill;
 
   try {
     const moduleExports: any = {};
@@ -3323,6 +3744,13 @@ function loadExtensionExport(
       }
 
       // ── Node.js built-in modules ─────────────────────────────
+      // Prefer real Node (via the preload bridge) when the hosting window
+      // has Node enabled. Falls back to the stub if the module isn't a
+      // recognised built-in, or if real require throws.
+      const realModule = tryRealNodeRequire(name);
+      if (realModule !== undefined) {
+        return realModule;
+      }
       if (name in nodeBuiltinStubs) {
         return nodeBuiltinStubs[name];
       }
@@ -3340,6 +3768,59 @@ function loadExtensionExport(
                 console.error('Native color picker failed:', e);
                 return undefined;
               }
+            },
+          };
+        }
+        if (name.includes('AppleReminders')) {
+          return createAppleRemindersBridge();
+        }
+        // clean-keyboard extension uses `swift:.../MyExecutable` for the
+        // CGEventTap-based keyboard lock. Bridge to our native helper.
+        if (name.includes('MyExecutable') || name.includes('keyboard')) {
+          return {
+            handler: async (duration: number) => {
+              const result = await window.electron.keyboardLockStart(Number(duration) || 15);
+              if (!result?.ok) {
+                throw new Error(result?.error || 'Failed to lock keyboard');
+              }
+            },
+            stopHandler: async () => {
+              await window.electron.keyboardLockStop();
+            },
+          };
+        }
+        // screenocr extension imports from `swift:../swift` and exposes
+        // `recognizeText(...)` and `detectBarcode(...)`. Bridge to our
+        // native screen-ocr helper which wraps Vision framework + screencapture.
+        if (name.includes('ScreenOCR') || name.endsWith('/swift') || name.includes('screenocr')) {
+          return {
+            recognizeText: async (
+              fullscreen: boolean,
+              keepImage: boolean,
+              fast: boolean,
+              languageCorrection: boolean,
+              ignoreLineBreaks: boolean,
+              customWords: string[],
+              languages: string[],
+              playSound: boolean,
+            ) => {
+              const result = await window.electron.screenOcrRun('recognize', {
+                fullscreen, keepImage, fast, languageCorrection, ignoreLineBreaks,
+                customWords, languages, playSound,
+              });
+              if (!result?.ok) {
+                throw new Error(result?.error || 'OCR failed');
+              }
+              return result.text || '';
+            },
+            detectBarcode: async (keepImage: boolean, playSound: boolean) => {
+              const result = await window.electron.screenOcrRun('barcode', {
+                keepImage, playSound,
+              });
+              if (!result?.ok) {
+                throw new Error(result?.error || 'Barcode detection failed');
+              }
+              return result.text || '';
             },
           };
         }
@@ -3361,6 +3842,19 @@ function loadExtensionExport(
                 console.error('Native color picker (rust bridge) failed:', e);
                 return undefined;
               }
+            },
+          };
+        }
+        if (name.includes('clean-keyboard') || name.includes('keyboard')) {
+          return {
+            handler: async (duration: number) => {
+              const result = await window.electron.keyboardLockStart(Number(duration) || 15);
+              if (!result?.ok) {
+                throw new Error(result?.error || 'Failed to lock keyboard');
+              }
+            },
+            stop_handler: async () => {
+              await window.electron.keyboardLockStop();
             },
           };
         }
@@ -3415,10 +3909,59 @@ function loadExtensionExport(
       throw new Error(`Unsupported dynamic import in extension runtime: ${id}`);
     };
 
+    // Sandboxed timer APIs — passed as named parameters so the extension's
+    // bundle resolves bare `setInterval`/`setTimeout`/`requestAnimationFrame`
+    // references against this scope instead of the host `window`. Handles are
+    // tracked in `timerRegistry` so the consumer (ExtensionView) can clear
+    // anything still pending on unmount, defending against extensions that
+    // forget their own cleanup (e.g. raycast/timers).
+    const trackInterval = (cb: any, ms?: any, ...rest: any[]) => {
+      const id = window.setInterval(cb as any, ms as any, ...rest);
+      timerRegistry?.intervals.add(id);
+      return id;
+    };
+    const trackClearInterval = (id: any) => {
+      if (typeof id === 'number') timerRegistry?.intervals.delete(id);
+      window.clearInterval(id);
+    };
+    const trackTimeout = (cb: any, ms?: any, ...rest: any[]) => {
+      const id = window.setTimeout(cb as any, ms as any, ...rest);
+      timerRegistry?.timeouts.add(id);
+      return id;
+    };
+    const trackClearTimeout = (id: any) => {
+      if (typeof id === 'number') timerRegistry?.timeouts.delete(id);
+      window.clearTimeout(id);
+    };
+    const trackRaf = (cb: FrameRequestCallback) => {
+      const id = window.requestAnimationFrame(cb);
+      timerRegistry?.rafs.add(id);
+      return id;
+    };
+    const trackCancelRaf = (id: any) => {
+      if (typeof id === 'number') timerRegistry?.rafs.delete(id);
+      window.cancelAnimationFrame(id);
+    };
+    // setImmediate / clearImmediate are Node-isms not on `window` — polyfill
+    // via setTimeout(0) and route through the same registry.
+    const trackSetImmediate = (cb: Function, ...args: any[]) =>
+      trackTimeout(() => cb(...args), 0);
+    const trackClearImmediate = (id: any) => trackClearTimeout(id);
+
     // Execute the CJS bundle in a function scope.
     // We pass all the standard CJS arguments plus `process`, `Buffer`,
     // and `global` to ensure they are always in scope even when the
     // extension code references them without importing.
+    // Browser-detection bypass — the OpenAI v4 SDK (and several other
+    // "isomorphic" SDKs) refuse to start unless the caller passes
+    // `dangerouslyAllowBrowser: true`. The check is
+    //   typeof window !== 'undefined' && typeof window.document !== 'undefined' && typeof navigator !== 'undefined'
+    // Shadowing `navigator` with `undefined` in the bundle's lexical scope
+    // makes the third clause false, the SDK loads, and the extension's calls
+    // still go through our fetch proxy (which keeps the API key server-side
+    // anyway because requests are routed through the main process). Code
+    // that genuinely needs navigator can still reach it via
+    // `globalThis.navigator` or `window.navigator`.
     const fn = new Function(
       'exports',
       'require',
@@ -3431,6 +3974,13 @@ function loadExtensionExport(
       'globalThis',
       'setImmediate',
       'clearImmediate',
+      'setInterval',
+      'clearInterval',
+      'setTimeout',
+      'clearTimeout',
+      'requestAnimationFrame',
+      'cancelAnimationFrame',
+      'navigator',
       '__scDynamicImport',
       executableCode
     );
@@ -3441,12 +3991,19 @@ function loadExtensionExport(
       fakeModule,
       '/extension/index.js',
       '/extension',
-      processStub,
-      BufferPolyfill,
+      bundleProcess,
+      bundleBuffer,
       globalThis,
       globalThis,
-      (cb: Function, ...args: any[]) => setTimeout(() => cb(...args), 0),
-      clearTimeout,
+      trackSetImmediate,
+      trackClearImmediate,
+      trackInterval,
+      trackClearInterval,
+      trackTimeout,
+      trackClearTimeout,
+      trackRaf,
+      trackCancelRaf,
+      undefined, // navigator — see comment above
       scDynamicImport,
     );
 
@@ -3490,6 +4047,7 @@ const NoViewRunner: React.FC<{
   launchContext?: Record<string, any>;
   fallbackText?: string | null;
   launchType?: 'userInitiated' | 'background';
+  reportStatus?: boolean;
 }> = ({
   fn,
   title,
@@ -3498,6 +4056,7 @@ const NoViewRunner: React.FC<{
   launchContext,
   fallbackText,
   launchType = 'userInitiated',
+  reportStatus = false,
 }) => {
   const [status, setStatus] = useState<'running' | 'done' | 'error'>('running');
   const [errorMsg, setErrorMsg] = useState('');
@@ -3517,6 +4076,13 @@ const NoViewRunner: React.FC<{
 
     (async () => {
       try {
+        // Enable badge bridging so showHUD / showToast calls from the extension
+        // are mirrored to the system status badge. No automatic "Running…" or
+        // "Done" messages are shown — the extension owns its own status.
+        if (reportStatus) {
+          (window as any).__scNoViewStatusTracking = true;
+          (window as any).__scNoViewStatusReported = false;
+        }
         await fn({
           arguments: launchArguments,
           launchType,
@@ -3524,13 +4090,25 @@ const NoViewRunner: React.FC<{
           fallbackText,
         });
         if (!cancelled) {
+          if (reportStatus) {
+            (window as any).__scNoViewStatusTracking = false;
+            (window as any).__scNoViewStatusReported = false;
+          }
           setStatus('done');
           closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 600);
         }
       } catch (e: any) {
         if (!cancelled) {
+          if (reportStatus) {
+            (window as any).__scNoViewStatusTracking = false;
+            (window as any).__scNoViewStatusReported = false;
+          }
           setStatus('error');
           setErrorMsg(e?.message || 'Command failed');
+          // Mirror the success path — a thrown no-view command must still
+          // dismiss itself, otherwise the bundle + React subtree stay in
+          // backgroundNoViewRuns forever and accumulate on every interval tick.
+          closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 1500);
         }
       }
     })();
@@ -3629,6 +4207,7 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
   launchContext,
   fallbackText,
   launchType = 'userInitiated',
+  reportStatus = false,
 }) => {
   const [error, setError] = useState<string | null>(buildError || null);
   const [navStack, setNavStack] = useState<React.ReactElement[]>([]);
@@ -3665,13 +4244,30 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
     setExtensionContext(extensionCtx);
   }, [extensionCtx]);
 
+  // Per-instance timer registry: any setInterval/setTimeout/requestAnimationFrame
+  // created by the extension's bundle is recorded here. On unmount we force-clear
+  // anything still pending so a buggy extension cannot leak DOMTimers + retained
+  // React fibers into the host renderer.
+  const timerRegistryRef = useRef<TimerRegistry>();
+  if (!timerRegistryRef.current) timerRegistryRef.current = createTimerRegistry();
+  useEffect(() => {
+    return () => {
+      if (timerRegistryRef.current) clearTimerRegistry(timerRegistryRef.current);
+    };
+  }, []);
+
   // Load the extension's default export (skip if there was a build error)
   const ExtExport = useMemo(() => {
     if (buildError || !code) return null;
+    // If the bundle is being re-evaluated (deps changed), drop any timers from
+    // the prior evaluation before the new one starts producing more.
+    if (timerRegistryRef.current) clearTimerRegistry(timerRegistryRef.current);
     // Module scope code can call getPreferenceValues() immediately.
     // Load under the extension's scoped context so other async extension work
     // cannot leak a different context into this bundle.
-    return withExtensionContext(extensionCtx, () => loadExtensionExport(code, extensionPath));
+    return withExtensionContext(extensionCtx, () =>
+      loadExtensionExport(code, extensionPath, timerRegistryRef.current)
+    );
   }, [code, buildError, extensionCtx, extensionPath]);
 
   // Is this a no-view command? Trust the mode from package.json.
@@ -3682,7 +4278,14 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
 
   // Navigation context
   const push = useCallback((element: React.ReactElement) => {
-    setNavStack((prev) => [...prev, element]);
+    setNavStack((prev) => {
+      // Force a fresh mount on each push — otherwise React reconciles
+      // same-type pushes (e.g. <Directory> → <Directory>) and preserves the
+      // previous view's useState, so new props (like a new path) never take
+      // effect. Keying on the stack position gives each push its own instance.
+      const keyed = React.cloneElement(element, { key: `__sc_nav_${prev.length}` });
+      return [...prev, keyed];
+    });
   }, []);
 
   const pop = useCallback(() => {
@@ -3712,12 +4315,26 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
 
   // Handle Escape globally for all extensions:
   // pop when nested, otherwise close extension view.
+  // Backspace behaves the same when the focused search input is empty.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      if (navStack.length > 0) pop();
-      else onClose();
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        if (navStack.length > 0) pop();
+        else onClose();
+        return;
+      }
+      if (e.key === 'Backspace') {
+        const target = e.target as HTMLElement | null;
+        const isEmptySearchInput =
+          target instanceof HTMLInputElement &&
+          target.dataset.supercmdSearchInput === 'true' &&
+          target.value === '';
+        if (!isEmptySearchInput) return;
+        e.preventDefault();
+        if (navStack.length > 0) pop();
+        else onClose();
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -3743,7 +4360,7 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
       || (code ? `Failed to load extension module for ${extensionName}/${commandName}.` : 'Failed to load extension. No valid export found.');
     return (
       <div className="flex flex-col h-full">
-        <div className="flex items-center gap-2 px-5 py-3.5 border-b border-white/[0.06]">
+        <div className="drag-region flex items-center gap-2 px-5 py-3.5 border-b border-white/[0.06]">
           <button
             onClick={onClose}
             className="text-white/40 hover:text-white/70 transition-colors"
@@ -3775,6 +4392,7 @@ const ExtensionView: React.FC<ExtensionViewProps> = ({
             launchContext={launchContext}
             fallbackText={fallbackText}
             launchType={launchType}
+            reportStatus={reportStatus}
           />
         </ScopedExtensionContext>
       </div>

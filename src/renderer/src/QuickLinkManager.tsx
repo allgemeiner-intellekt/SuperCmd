@@ -35,7 +35,12 @@ import {
 interface QuickLinkManagerProps {
   onClose: () => void;
   initialView: 'search' | 'create';
+  commandAliases?: Record<string, string>;
+  /** If set, immediately open the edit form for this quick link ID. */
+  initialEditId?: string;
 }
+
+const QUICK_LINK_COMMAND_PREFIX = 'quicklink-';
 
 interface ApplicationOption {
   name: string;
@@ -117,17 +122,6 @@ function getApplicationSortKey(app: ApplicationOption): string {
   return String(app.name || '').trim().toLowerCase();
 }
 
-function pickDefaultApplication(apps: ApplicationOption[]): ApplicationOption | null {
-  if (!apps.length) return null;
-
-  const browserHints = ['chrome', 'safari', 'firefox', 'arc', 'edge', 'brave', 'opera', 'vivaldi'];
-  const browser = apps.find((app) => {
-    const key = `${app.name} ${app.bundleId || ''}`.toLowerCase();
-    return browserHints.some((hint) => key.includes(hint));
-  });
-  return browser || apps[0] || null;
-}
-
 function pickFinderApplication(apps: ApplicationOption[]): ApplicationOption | null {
   return apps.find((app) => {
     const bundleId = String(app.bundleId || '').toLowerCase();
@@ -177,6 +171,21 @@ function buildApplicationMatchTokens(app: ApplicationOption): string[] {
   return Array.from(set);
 }
 
+const BROWSER_PROTOCOLS = new Set(['http', 'https', 'file']);
+
+function isBrowserProtocolTemplate(urlTemplate: string): boolean {
+  const normalized = String(urlTemplate || '').trim();
+  if (!normalized) return false;
+  const candidate = normalized.replace(/\{[^}]+\}/g, 'placeholder');
+  try {
+    const parsed = new URL(candidate);
+    const protocol = String(parsed.protocol || '').replace(':', '').trim().toLowerCase();
+    return BROWSER_PROTOCOLS.has(protocol);
+  } catch {
+    return false;
+  }
+}
+
 function extractQuickLinkTemplateTokens(urlTemplate: string): string[] {
   const normalized = String(urlTemplate || '').trim();
   if (!normalized) return [];
@@ -184,10 +193,14 @@ function extractQuickLinkTemplateTokens(urlTemplate: string): string[] {
   const candidate = normalized.replace(/\{[^}]+\}/g, 'placeholder');
   try {
     const parsed = new URL(candidate);
-    const tokens = new Set<string>();
-
     const protocol = String(parsed.protocol || '').replace(':', '').trim().toLowerCase();
-    if (protocol && !['http', 'https', 'file'].includes(protocol)) {
+
+    if (BROWSER_PROTOCOLS.has(protocol)) {
+      return [];
+    }
+
+    const tokens = new Set<string>();
+    if (protocol) {
       tokens.add(protocol);
     }
 
@@ -344,12 +357,6 @@ const QuickLinkForm: React.FC<QuickLinkFormProps> = ({ quickLink, onSave, onCanc
         }
         return changed ? next : prev;
       });
-      if (!selectedAppPath && !quickLink?.applicationPath) {
-        const fallbackApp = pickDefaultApplication(apps);
-        if (fallbackApp) {
-          setSelectedAppPath(fallbackApp.path);
-        }
-      }
     } catch (error) {
       console.error('Failed to load quick link setup data:', error);
     }
@@ -689,9 +696,13 @@ const QuickLinkForm: React.FC<QuickLinkFormProps> = ({ quickLink, onSave, onCanc
     if (!shouldAutoSelectAppFromPaste) return;
     if (!applications.length) return;
 
-    const matchedApplication = findBestApplicationForPastedQuickLink(urlTemplate, applications);
-    if (matchedApplication?.path) {
-      setSelectedAppPath(matchedApplication.path);
+    if (isBrowserProtocolTemplate(urlTemplate)) {
+      setSelectedAppPath('');
+    } else {
+      const matchedApplication = findBestApplicationForPastedQuickLink(urlTemplate, applications);
+      if (matchedApplication?.path) {
+        setSelectedAppPath(matchedApplication.path);
+      }
     }
     setShouldAutoSelectAppFromPaste(false);
   }, [applications, shouldAutoSelectAppFromPaste, urlTemplate]);
@@ -934,7 +945,7 @@ const QuickLinkForm: React.FC<QuickLinkFormProps> = ({ quickLink, onSave, onCanc
 
   return (
     <div className="snippet-view w-full h-full flex flex-col" onKeyDown={handleKeyDown}>
-      <div className="snippet-header flex items-center gap-3 px-5 py-3.5">
+      <div className="snippet-header drag-region flex items-center gap-3 px-5 py-3.5">
         <button
           onClick={onCancel}
           className="text-white/40 hover:text-white/70 transition-colors flex-shrink-0"
@@ -1252,7 +1263,7 @@ const QuickLinkForm: React.FC<QuickLinkFormProps> = ({ quickLink, onSave, onCanc
   );
 };
 
-const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialView }) => {
+const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialView, commandAliases = {}, initialEditId }) => {
   const [view, setView] = useState<'search' | 'create' | 'edit'>(initialView);
   const [quickLinks, setQuickLinks] = useState<QuickLink[]>([]);
   const [filteredQuickLinks, setFilteredQuickLinks] = useState<QuickLink[]>([]);
@@ -1308,6 +1319,17 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
     }
   }, [loadQuickLinks, view]);
 
+  // If opened with an initialEditId, switch to edit mode once quick links have loaded.
+  useEffect(() => {
+    if (!initialEditId || quickLinks.length === 0) return;
+    const target = quickLinks.find((ql) => ql.id === initialEditId);
+    if (!target) return;
+    setEditingQuickLink(target);
+    setView('edit');
+  // Only run when quickLinks first loads (or initialEditId changes).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [quickLinks, initialEditId]);
+
   useEffect(() => {
     const normalized = searchQuery.trim().toLowerCase();
     if (!normalized) {
@@ -1316,16 +1338,27 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
       return;
     }
 
-    const filtered = quickLinks.filter((quickLink) => {
-      return (
-        quickLink.name.toLowerCase().includes(normalized) ||
-        quickLink.urlTemplate.toLowerCase().includes(normalized) ||
-        String(quickLink.applicationName || '').toLowerCase().includes(normalized)
-      );
-    });
+    const filtered = quickLinks
+      .filter((quickLink) => {
+        const alias = String(commandAliases[`${QUICK_LINK_COMMAND_PREFIX}${quickLink.id}`] || '').trim().toLowerCase();
+        return (
+          quickLink.name.toLowerCase().includes(normalized) ||
+          quickLink.urlTemplate.toLowerCase().includes(normalized) ||
+          String(quickLink.applicationName || '').toLowerCase().includes(normalized) ||
+          (alias && alias.includes(normalized))
+        );
+      })
+      .sort((a, b) => {
+        const aAlias = String(commandAliases[`${QUICK_LINK_COMMAND_PREFIX}${a.id}`] || '').trim().toLowerCase();
+        const bAlias = String(commandAliases[`${QUICK_LINK_COMMAND_PREFIX}${b.id}`] || '').trim().toLowerCase();
+        const aAliasMatch = Boolean(aAlias && aAlias.includes(normalized));
+        const bAliasMatch = Boolean(bAlias && bAlias.includes(normalized));
+        if (aAliasMatch !== bAliasMatch) return aAliasMatch ? -1 : 1;
+        return 0;
+      });
     setFilteredQuickLinks(filtered);
     setSelectedIndex(0);
-  }, [quickLinks, searchQuery]);
+  }, [quickLinks, searchQuery, commandAliases]);
 
   useEffect(() => {
     itemRefs.current = itemRefs.current.slice(0, filteredQuickLinks.length);
@@ -1397,6 +1430,7 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
     laneRef: inlineArgumentLaneRef,
     inlineRef: inlineArgumentClusterRef,
     minStartRatio: 0.3,
+    revisionKey: view,
   });
 
   const getDynamicFieldsForQuickLink = useCallback(
@@ -1502,6 +1536,12 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
         if (fields.length <= MAX_INLINE_QUICK_LINK_ARGUMENTS) {
           const opened = await window.electron.quickLinkOpen(target.id, resolvedValues);
           if (opened) {
+            setInlineDynamicValuesByQuickLinkId((prev) => {
+              if (!prev[target.id]) return prev;
+              const next = { ...prev };
+              delete next[target.id];
+              return next;
+            });
             await window.electron.hideWindow();
           }
           return;
@@ -1559,13 +1599,18 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
       }
       await loadQuickLinks();
       setEditingQuickLink(undefined);
+      // If we jumped directly to edit via initialEditId, close the manager after saving.
+      if (view === 'edit' && initialEditId) {
+        onClose();
+        return;
+      }
       setView('search');
       setTimeout(() => inputRef.current?.focus(), 40);
     } catch (error: any) {
       console.error('Failed to save quick link:', error);
       throw error;
     }
-  }, [editingQuickLink, loadQuickLinks, view]);
+  }, [editingQuickLink, initialEditId, loadQuickLinks, onClose, view]);
 
   const actions = useMemo(() => {
     const list: Array<{
@@ -1727,8 +1772,14 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
         event.preventDefault();
         onClose();
         break;
+      case 'Backspace':
+        if (!searchQuery) {
+          event.preventDefault();
+          onClose();
+        }
+        break;
     }
-  }, [actions, dynamicPrompt, filteredQuickLinks.length, handleConfirmDynamicPrompt, handleDelete, handleDuplicate, handleEdit, handleOpen, onClose, selectedActionIndex, showActions]);
+  }, [actions, dynamicPrompt, filteredQuickLinks.length, handleConfirmDynamicPrompt, handleDelete, handleDuplicate, handleEdit, handleOpen, onClose, selectedActionIndex, showActions, searchQuery]);
 
   if (view === 'create' || view === 'edit') {
     return (
@@ -1737,6 +1788,12 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
         onSave={handleSave}
         onCancel={() => {
           setEditingQuickLink(undefined);
+          // If we jumped directly to edit via initialEditId (no search view to go back to),
+          // close the manager entirely so Escape returns to the main launcher.
+          if (view === 'edit' && initialEditId) {
+            onClose();
+            return;
+          }
           setView('search');
           setTimeout(() => inputRef.current?.focus(), 40);
         }}
@@ -1746,7 +1803,7 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
 
   return (
     <div className="snippet-view snippet-search-view w-full h-full flex flex-col" onKeyDown={handleKeyDown} tabIndex={-1}>
-      <div className="snippet-header flex h-16 items-center gap-2 px-4">
+      <div className="snippet-header drag-region flex h-16 items-center gap-2 px-4">
         <button
           onClick={onClose}
           className="text-white/40 hover:text-white/70 transition-colors flex-shrink-0"
@@ -1778,7 +1835,10 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
               <div
                 ref={inlineArgumentClusterRef}
                 className="pointer-events-auto inline-flex min-w-0 items-center gap-1"
-                style={{ marginLeft: inlineArgumentStartPx != null ? `${inlineArgumentStartPx}px` : '30%' }}
+                style={{
+                  marginLeft: inlineArgumentStartPx != null ? `${inlineArgumentStartPx}px` : '30%',
+                  visibility: inlineArgumentStartPx != null ? 'visible' : 'hidden',
+                }}
               >
                 {selectedInlineLeadingIcon ? (
                   <InlineArgumentLeadingIcon>{selectedInlineLeadingIcon}</InlineArgumentLeadingIcon>
@@ -1896,7 +1956,13 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
             </div>
           ) : (
             <div className="p-2 space-y-1">
-              {filteredQuickLinks.map((quickLink, index) => (
+              {filteredQuickLinks.map((quickLink, index) => {
+                const alias = String(commandAliases[`${QUICK_LINK_COMMAND_PREFIX}${quickLink.id}`] || '').trim();
+                const aliasMatchesSearch =
+                  Boolean(alias) &&
+                  Boolean(searchQuery.trim()) &&
+                  alias.toLowerCase().includes(searchQuery.trim().toLowerCase());
+                return (
                 <div
                   key={quickLink.id}
                   ref={(el) => {
@@ -1915,14 +1981,22 @@ const QuickLinkManager: React.FC<QuickLinkManagerProps> = ({ onClose, initialVie
                       <QuickLinkIconPreview icon={quickLink.icon} appIconDataUrl={quickLink.appIconDataUrl} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-white/80 text-[13px] truncate font-medium leading-tight">{quickLink.name}</div>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <div className="text-white/80 text-[13px] truncate font-medium leading-tight">{quickLink.name}</div>
+                        {aliasMatchesSearch ? (
+                          <div className="inline-flex items-center h-5 rounded-md border border-[var(--launcher-chip-border)] bg-[var(--launcher-chip-bg)] px-1.5 text-[0.625rem] font-mono text-[var(--text-subtle)] leading-none flex-shrink-0">
+                            {alias}
+                          </div>
+                        ) : null}
+                      </div>
                       <div className="text-white/35 text-[11px] truncate mt-0.5 leading-tight">
                         {quickLink.applicationName || 'Default Browser'}
                       </div>
                     </div>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

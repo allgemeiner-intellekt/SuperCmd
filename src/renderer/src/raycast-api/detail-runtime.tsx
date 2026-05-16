@@ -6,6 +6,7 @@
 import React, { useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { normalizeScAssetUrl, resolveReadableTintColor, resolveTintColor, toScAssetUrl } from './icon-runtime-assets';
 import { renderSimpleMarkdown } from './detail-markdown';
+import { useI18n } from '../i18n';
 
 type ExtractedActionLike = {
   title: string;
@@ -67,6 +68,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
   };
 
   function DetailComponent({ markdown, isLoading, children, actions, metadata, navigationTitle }: DetailProps) {
+    const { t } = useI18n();
     const extInfo = useContext(deps.ExtensionInfoReactContext);
     const [showActions, setShowActions] = useState(false);
     const { pop } = deps.useNavigation();
@@ -109,7 +111,6 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
 
     useEffect(() => {
       const handler = (event: KeyboardEvent) => {
-        if (event.key === 'Escape') { event.preventDefault(); pop(); return; }
         if (deps.isMetaK(event)) { event.preventDefault(); setShowActions((prev) => !prev); return; }
         if (event.key === 'Enter' && event.metaKey && !event.repeat && primaryAction) { event.preventDefault(); primaryAction.execute(); return; }
         if (!event.repeat) {
@@ -124,7 +125,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
       };
       window.addEventListener('keydown', handler);
       return () => window.removeEventListener('keydown', handler);
-    }, [detailActions, pop, primaryAction]);
+    }, [detailActions, primaryAction]);
 
     const handleActionExecute = useCallback((action: ExtractedActionLike) => {
       setShowActions(false);
@@ -148,7 +149,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
           </div>
         )}
 
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--ui-divider)]">
+        <div className="drag-region flex items-center gap-2 px-4 py-3 border-b border-[var(--ui-divider)]">
           <button onClick={pop} className="sc-back-button text-[var(--text-subtle)] hover:text-[var(--text-muted)] transition-colors flex-shrink-0 p-0.5">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
           </button>
@@ -187,7 +188,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
           <div className="sc-glass-footer flex items-center px-4 py-2.5">
             <div className="flex items-center gap-2 text-[var(--text-secondary)] text-sm">
               <div className="w-4 h-4 border-2 border-[var(--surface-tint-6)] border-t-[var(--text-secondary)] rounded-full animate-spin" />
-              <span>{navigationTitle || 'Loading…'}</span>
+              <span>{navigationTitle || t('common.loading')}</span>
             </div>
           </div>
         ) : detailActions.length > 0 ? (
@@ -203,7 +204,7 @@ export function createDetailRuntime(deps: CreateDetailRuntimeDeps) {
               </button>
             ) : null}
             <button onClick={() => setShowActions(true)} className="flex items-center gap-1.5 text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors">
-              <span className="text-xs font-normal">Actions</span>
+              <span className="text-xs font-normal">{t('common.actions')}</span>
               <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[11px] text-[var(--text-subtle)] font-medium">⌘</kbd>
               <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[11px] text-[var(--text-subtle)] font-medium">K</kbd>
             </button>

@@ -5,6 +5,7 @@
     "noResults": "没有结果",
     "search": "搜索...",
     "save": "保存",
+    "saving": "保存中...",
     "cancel": "取消",
     "close": "关闭",
     "continue": "继续",
@@ -107,7 +108,8 @@
         "fr": "Français",
         "de": "Deutsch",
         "es": "Español",
-        "ru": "俄语"
+        "ru": "俄语",
+        "it": "意大利语"
       },
       "fontSize": {
         "title": "字体大小",
@@ -168,6 +170,19 @@
         "title": "关于",
         "description": "版本信息。",
         "version": "SuperCmd v{version}"
+      },
+      "launcherMode": {
+        "title": "启动器模式",
+        "description": "选择打开启动器时的显示方式。",
+        "expanded": "展开",
+        "compact": "紧凑"
+      },
+      "autoQuit": {
+        "title": "自动退出",
+        "timeout": "默认超时",
+        "description": "启用自动退出的应用将在此时间段不活动后退出",
+        "minute": "分钟",
+        "minutes": "分钟"
       }
     },
     "ai": {
@@ -252,6 +267,7 @@
           "anthropic": "Claude",
           "gemini": "Gemini",
           "ollama": "Ollama",
+          "lmStudio": "LM Studio",
           "openaiCompatible": "自定义 (OpenAI 兼容)"
         },
         "providerDescriptions": {
@@ -259,7 +275,8 @@
           "anthropic": "Anthropic Claude 模型",
           "gemini": "Google Gemini 模型",
           "ollama": "本地模型",
-          "openaiCompatible": "任意 OpenAI 兼容 API（OpenRouter、Together 等）"
+          "openaiCompatible": "任意 OpenAI 兼容 API（OpenRouter、Together 等）",
+          "lmStudio": "通过 LM Studio 使用本地模型"
         },
         "ollama": {
           "serverUrl": {
@@ -297,7 +314,8 @@
           "baseUrl": {
             "label": "基础 URL",
             "placeholder": "https://api.openrouter.ai/v1",
-            "hint": "如果你的提供商使用 /v1，请包含它（例如 https://api.openai.com/v1）"
+            "hint": "如果你的提供商使用 /v1，请包含它（例如 https://api.openai.com/v1）",
+            "appendV1": "自动在基础 URL 后追加 /v1"
           },
           "apiKey": {
             "label": "API 密钥",
@@ -312,6 +330,17 @@
         "defaultModel": {
           "label": "默认模型",
           "auto": "自动（提供商默认）"
+        },
+        "lmStudio": {
+          "baseUrl": {
+            "label": "服务器地址",
+            "hint": "LM Studio 本地服务器地址（默认：http://127.0.0.1:1234/v1）"
+          },
+          "apiKey": {
+            "toggle": "可选 API 密钥",
+            "placeholder": "如不需要，请留空",
+            "hint": "仅当您在 LM Studio 中配置了身份验证时才需要。"
+          }
         }
       },
       "whisper": {
@@ -394,6 +423,10 @@
             "downloading": "正在下载 SuperCmd Whisper",
             "notDownloaded": "模型尚未下载。现在下载后即可使用 SuperCmd Whisper 听写。"
           }
+        },
+        "autoClose": {
+          "title": "听写后自动关闭",
+          "description": "听写完成后自动关闭 Whisper 条。"
         }
       },
       "speak": {
@@ -489,7 +522,10 @@
       "search": {
         "placeholder": "搜索...",
         "all": "全部",
-        "commands": "命令"
+        "commands": "命令",
+        "statusAll": "全部",
+        "enabled": "已启用",
+        "disabled": "已禁用"
       },
       "install": {
         "button": "安装扩展",
@@ -521,7 +557,8 @@
         "extension": "扩展",
         "application": "应用程序",
         "command": "命令",
-        "menuBarCommand": "菜单栏命令"
+        "menuBarCommand": "菜单栏命令",
+        "quickLink": "快速链接"
       },
       "alias": {
         "add": "添加别名",
@@ -540,6 +577,16 @@
       "extensionPreferences": "扩展偏好设置",
       "commandPreferences": "命令偏好设置",
       "noPreferences": "没有偏好设置",
+      "clipboardBlacklist": {
+        "title": "忽略的应用",
+        "description": "当以下应用在前台时，复制的内容不会保存到 SuperCmd 的剪贴板历史。",
+        "add": "添加应用",
+        "remove": "移除",
+        "empty": "未屏蔽任何应用。所有应用的复制都会保存到剪贴板历史。",
+        "searchPlaceholder": "搜索应用…",
+        "loading": "正在加载应用…",
+        "noApps": "未找到应用"
+      },
       "enabled": "已启用",
       "logout": "退出登录",
       "loggedIn": "已登录 {name}",
@@ -562,15 +609,128 @@
         "opened": "已打开包含示例脚本的自定义脚本文件夹。",
         "openedExisting": "已打开自定义脚本文件夹。",
         "failed": "打开自定义脚本文件夹失败。"
+      },
+      "emojiPicker": {
+        "enabled": "启用表情符号选择器",
+        "enabledDesc": "在输入触发前缀后显示表情符号建议。",
+        "triggerPrefix": "触发前缀",
+        "triggerPrefixDesc": "开始表情符号搜索的字符，例如 :fire。",
+        "triggerPrefixPlaceholder": "例如 :",
+        "excludedApps": {
+          "title": "排除的应用",
+          "description": "在这些应用中不会弹出表情符号选择器。适用于自带选择器的应用（Slack、Telegram 等）。",
+          "add": "添加应用",
+          "remove": "移除",
+          "empty": "未排除任何应用。选择器会在所有应用中触发。",
+          "searchPlaceholder": "搜索应用…",
+          "loading": "正在加载应用…",
+          "noApps": "未找到应用"
+        }
       }
     },
     "advanced": {
       "title": "高级",
       "loading": "正在加载高级设置...",
+      "settingsFolder": {
+        "title": "设置文件夹",
+        "description": "通过 iCloud Drive、Dropbox 或任何文件夹在多台 Mac 之间同步设置和扩展。",
+        "defaultLabel": "默认位置",
+        "chooseButton": "选择文件夹…",
+        "changeButton": "更改文件夹…",
+        "resetButton": "恢复默认",
+        "conflict": {
+          "title": "此文件夹中已存在设置",
+          "body": "{folder} 中已经有一个 settings.json。您要使用哪个版本？",
+          "useExisting": "使用现有设置",
+          "useExistingHint": "用同步的副本替换此 Mac 上的设置。",
+          "replace": "替换为当前设置",
+          "replaceHint": "用此 Mac 上的设置覆盖同步的副本。",
+          "cancel": "取消"
+        },
+        "resetConfirm": {
+          "title": "将设置移回默认位置？",
+          "body": "您的设置将仅存储在此 Mac 上。所选文件夹中同步的副本不会被删除。",
+          "confirm": "恢复默认",
+          "cancel": "取消"
+        },
+        "status": {
+          "moved": "设置文件夹已更新。",
+          "adopted": "已采用同步的设置。",
+          "reset": "设置已移回默认位置。",
+          "failed": "无法更新设置文件夹。"
+        }
+      },
+      "disableFileSearch": {
+        "title": "禁用文件和文件夹搜索",
+        "description": "从主启动器搜索中隐藏文件和文件夹结果。",
+        "label": "禁用文件和文件夹搜索结果"
+      },
+      "navigationStyle": {
+        "title": "导航样式",
+        "description": "选择在启动器中上下左右导航的键盘快捷键。",
+        "option": {
+          "vim": "Vim 样式 (^J, ^K, ^H, ^L)",
+          "macos": "macOS 样式 (^N, ^P, ^B, ^F)"
+        }
+      },
+      "popToRootSearch": {
+        "title": "返回根搜索",
+        "description": "重新打开 SuperCmd 时,经过此延迟后返回根搜索;否则保留之前打开的扩展或视图。",
+        "option": {
+          "immediately": "立即",
+          "5s": "5 秒后",
+          "15s": "15 秒后",
+          "30s": "30 秒后",
+          "60s": "60 秒后",
+          "90s": "90 秒后",
+          "120s": "120 秒后"
+        }
+      },
+      "clipboardRetention": {
+        "title": "剪贴板历史保留期限",
+        "description": "自动删除超过所选时长的剪贴板条目。已固定的条目始终保留。",
+        "option": {
+          "1day": "1 天",
+          "7days": "7 天",
+          "1month": "1 个月",
+          "3months": "3 个月",
+          "6months": "6 个月",
+          "1year": "1 年",
+          "never": "永不"
+        }
+      },
       "debugMode": {
         "title": "调试模式",
         "description": "当扩展加载或构建失败时显示详细日志。",
         "label": "启用调试模式"
+      },
+      "browserSearch": {
+        "title": "浏览器搜索",
+        "description": "输入内容后按回车即可在默认浏览器中打开。内联自动补全会根据历史记录提示网站。",
+        "enableLabel": "启用浏览器搜索",
+        "retention": {
+          "label": "历史记录保留时间",
+          "option": {
+            "7d": "7 天",
+            "30d": "30 天",
+            "90d": "90 天",
+            "180d": "180 天",
+            "365d": "1 年",
+            "forever": "永久"
+          }
+        },
+        "clearButton": "清除浏览器搜索历史",
+        "importLabel": "从浏览器导入历史记录",
+        "import": {
+          "action": "导入",
+          "running": "正在导入…",
+          "noneFound": "未检测到支持的浏览器"
+        },
+        "status": {
+          "cleared": "浏览器搜索历史已清除。",
+          "imported": "已导入 {count} / {total} 条。",
+          "failed": "操作失败。"
+        }
       }
     }
   },
@@ -609,14 +769,19 @@
       "run": "运行",
       "copy": "复制",
       "copyPath": "复制路径",
+      "copyDeeplink": "复制深层链接",
       "copyToClipboard": "复制到剪贴板",
       "paste": "粘贴",
       "showDetails": "显示详情",
       "showInFinder": "在 Finder 中显示",
       "revealInFinder": "在 Finder 中定位",
       "getInfo": "显示简介",
-      "quit": "退出",
-      "forceQuit": "强制退出",
+      "quit": "退出应用程序",
+      "forceQuit": "强制退出应用程序",
+      "quitApp": "退出{appName}",
+      "forceQuitApp": "强制退出{appName}",
+      "failedQuitting": "退出{appName}失败",
+      "forceQuitConfirm": "强制退出\"{appName}\"？未保存的更改将会丢失。",
       "hide": "隐藏",
       "show": "显示",
       "preferences": "偏好设置",
@@ -627,7 +792,11 @@
       "unpinExtension": "取消固定扩展",
       "disableCommand": "禁用命令",
       "moveUp": "上移",
-      "moveDown": "下移"
+      "moveDown": "下移",
+      "uninstallApplication": "卸载应用程序",
+      "enableAutoQuit": "启用自动退出",
+      "disableAutoQuit": "禁用自动退出",
+      "disableApplication": "禁用应用程序"
     },
     "empty": {
       "noResults": "未找到结果",
@@ -641,7 +810,8 @@
     },
     "sections": {
       "selectedText": "选中文本",
-      "pinned": "已固定"
+      "pinned": "已固定",
+      "results": "结果"
     },
     "calculator": {
       "pressEnterToCopy": "按回车复制",
@@ -654,6 +824,17 @@
       "script": "脚本",
       "settings": "设置",
       "quickLink": "快速链接"
+    },
+    "compact": {
+      "showMore": "显示更多"
+    },
+    "browserSearch": {
+      "openUrl": "打开 {url}",
+      "searchFor": "搜索 “{query}”",
+      "subtitle": {
+        "openUrl": "默认浏览器",
+        "search": "网络搜索"
+      }
     }
   },
   "scriptCommand": {
@@ -729,10 +910,11 @@
       "noContributors": "没有声明贡献者。"
     },
     "actions": {
-      "title": "操作",
-      "install": "安装扩展",
-      "update": "更新扩展",
-      "uninstall": "卸载扩展"
+      "title": "操作"
+    },
+    "errorBoundary": {
+      "title": "加载扩展商店时出错。",
+      "retry": "重试"
     }
   },
   "clipboard": {
@@ -764,11 +946,39 @@
     "create": "创建快速链接",
     "edit": "编辑快速链接",
     "delete": "删除快速链接",
+    "confirmDelete": "再次点击以确认",
     "searchPlaceholder": "搜索快速链接...",
     "name": "名称",
     "url": "网址",
+    "urlHint": "使用 {placeholder} 添加剪贴板内容或参数等动态值。",
+    "openWith": "打开方式",
+    "defaultBrowser": "默认浏览器",
     "icon": "图标",
-    "save": "保存快速链接"
+    "save": "保存快速链接",
+    "saved": "已保存",
+    "saveFailed": "保存快速链接失败。",
+    "deleteFailed": "删除快速链接失败。",
+    "notFound": "未找到快速链接。",
+    "nameRequired": "请输入名称。",
+    "urlRequired": "请输入网址。"
+  },
+  "appUninstall": {
+    "title": "卸载 {appName}",
+    "filesCount": "{count} 个文件",
+    "uninstallButton": "卸载应用程序",
+    "scanning": "正在扫描相关文件...",
+    "noRemnants": "未找到相关文件",
+    "confirmMessage": "将 {count} 个文件 ({size}) 移到废纸篓？",
+    "filterPlaceholder": "按名称过滤文件和文件夹...",
+    "sortByPath": "按路径排序",
+    "sortBySize": "按大小排序",
+    "markKeep": "标记保留文件",
+    "markRemove": "标记移除文件",
+    "actions": "操作",
+    "showInfo": "在访达中显示简介",
+    "trashErrors": "部分文件无法移至废纸篓：\n{errors}",
+    "uninstallSuccess": "{appName} 已卸载",
+    "uninstallError": "卸载 {appName} 失败"
   },
   "fileSearch": {
     "placeholder": "搜索文件...",
@@ -1000,5 +1210,43 @@
     "duration": "时长",
     "reminder": "提醒",
     "save": "保存事件"
+  },
+  "canvas": {
+    "searchPlaceholder": "搜索画布...",
+    "untitled": "未命名画布",
+    "modified": "修改时间",
+    "count": "{count} 个画布{plural}",
+    "time": {
+      "justNow": "刚刚"
+    },
+    "actions": {
+      "new": "新建画布",
+      "open": "打开画布",
+      "rename": "重命名",
+      "duplicate": "复制",
+      "copyDeeplink": "复制深层链接",
+      "exportJson": "导出为 JSON",
+      "pin": "置顶",
+      "unpin": "取消置顶",
+      "delete": "删除画布"
+    },
+    "empty": {
+      "title": "还没有画布",
+      "description": "创建你的第一个画布开始使用",
+      "noSearchResults": "没有找到画布",
+      "shortcutHint": "或按 ⌘N"
+    },
+    "preview": {
+      "empty": "暂无预览 — 保存画布以生成预览",
+      "selectPrompt": "选择一个画布以预览"
+    },
+    "rename": {
+      "title": "重命名画布",
+      "placeholder": "画布名称..."
+    },
+    "delete": {
+      "title": "删除 \"{title}\" ?",
+      "description": "此操作无法撤销。"
+    }
   }
 }

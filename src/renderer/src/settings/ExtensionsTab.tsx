@@ -20,6 +20,10 @@ import {
   Sparkles,
   LayoutGrid,
   Link2,
+  ListFilter,
+  Check,
+  Plus,
+  X,
 } from 'lucide-react';
 import supercmdLogo from '../../../../supercmd.svg';
 import HotkeyRecorder from './HotkeyRecorder';
@@ -27,39 +31,28 @@ import type {
   AppSettings,
   CommandInfo,
   ExtensionCommandSettingsSchema,
+  ExtensionPreferencesSnapshot,
   ExtensionPreferenceSchema,
   InstalledExtensionSettingsSchema,
 } from '../../types/electron';
 import { useI18n } from '../i18n';
+import {
+  getExtPrefsKey,
+  getCmdPrefsKey,
+  readJsonObject,
+  writeJsonObject,
+} from '../utils/extension-preferences';
 
 type SelectedTarget = { extName: string; cmdName?: string };
 type SettingsFocusTarget = { extensionName?: string; commandName?: string };
 
-const EXT_PREFS_KEY_PREFIX = 'sc-ext-prefs:';
-const CMD_PREFS_KEY_PREFIX = 'sc-ext-cmd-prefs:';
-
-function getExtPrefsKey(extName: string): string {
-  return `${EXT_PREFS_KEY_PREFIX}${extName}`;
+function mergePreferenceSources(
+  primary: Record<string, any>,
+  fallback: Record<string, any>
+): Record<string, any> {
+  return { ...fallback, ...primary };
 }
 
-function getCmdPrefsKey(extName: string, cmdName: string): string {
-  return `${CMD_PREFS_KEY_PREFIX}${extName}/${cmdName}`;
-}
-
-function readJsonObject(key: string): Record<string, any> {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeJsonObject(key: string, value: Record<string, any>) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
 
 function getDefaultValue(pref: ExtensionPreferenceSchema): any {
   if (pref.default !== undefined) return pref.default;
@@ -107,8 +100,16 @@ const ExtensionsTab: React.FC<{
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [schemas, setSchemas] = useState<InstalledExtensionSettingsSchema[]>([]);
   const [installedExtensionNames, setInstalledExtensionNames] = useState<Set<string>>(new Set());
+  const [extensionPreferencesSnapshot, setExtensionPreferencesSnapshot] = useState<ExtensionPreferencesSnapshot>({
+    version: 1,
+    extensions: {},
+    commands: {},
+  });
   const [search, setSearch] = useState('');
   const [activeScope, setActiveScope] = useState<'all' | 'commands'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+  const [statusFilterMenuOpen, setStatusFilterMenuOpen] = useState(false);
+  const statusFilterMenuRef = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [selected, setSelected] = useState<SelectedTarget | null>(null);
   const [expandedExtensions, setExpandedExtensions] = useState<Record<string, boolean>>({});
@@ -142,20 +143,48 @@ const ExtensionsTab: React.FC<{
   const [folderBusy, setFolderBusy] = useState(false);
   const [showTopActionsMenu, setShowTopActionsMenu] = useState(false);
   const [oauthTokens, setOauthTokens] = useState<Record<string, { accessToken: string; provider: string } | null>>({});
+  const [compactToolbar, setCompactToolbar] = useState(false);
   const topActionsMenuRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const toolbarRowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isCmdF = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f';
+      if (!isCmdF) return;
+      const target = event.target as HTMLElement | null;
+      if (target === searchInputRef.current) return;
+      // Don't steal focus while a HotkeyRecorder is capturing input
+      if (target?.closest('[data-hotkey-recorder]')) return;
+      event.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, []);
+
+  useEffect(() => {
+    const check = () => setCompactToolbar(window.innerWidth < 1000);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
     try {
-      const [cmds, sett, extSchemas, installedNames] = await Promise.all([
+      const [cmds, sett, extSchemas, installedNames, preferenceSnapshot] = await Promise.all([
         window.electron.getAllCommands(),
         window.electron.getSettings(),
         window.electron.getInstalledExtensionsSettingsSchema(),
         window.electron.getInstalledExtensionNames(),
+        window.electron.getExtensionPreferencesSnapshot(),
       ]);
       setCommands(cmds);
       setSettings(sett);
       setSchemas(extSchemas);
+      setExtensionPreferencesSnapshot(preferenceSnapshot);
       setInstalledExtensionNames(
         new Set(
           (installedNames || [])
@@ -186,6 +215,24 @@ const ExtensionsTab: React.FC<{
       dispose?.();
     };
   }, [loadData]);
+
+  // Refresh settings when window regains focus (e.g. after disabling an app from the launcher)
+  useEffect(() => {
+    const handleFocus = () => {
+      window.electron.getSettings().then((sett: AppSettings) => {
+        setSettings(sett);
+      }).catch(() => {});
+    };
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, []);
+
+  useEffect(() => {
+    return window.electron.onExtensionPreferencesUpdated(async () => {
+      const snapshot = await window.electron.getExtensionPreferencesSnapshot();
+      setExtensionPreferencesSnapshot(snapshot);
+    });
+  }, []);
 
   const commandBySchemaKey = useMemo(() => {
     const map = new Map<string, CommandInfo>();
@@ -417,31 +464,45 @@ const ExtensionsTab: React.FC<{
 
   const filteredSchemas = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return displaySchemas;
+    const hasSearch = q.length > 0;
+    const hasStatus = statusFilter !== 'all';
+    if (!hasSearch && !hasStatus) return displaySchemas;
+
+    const commandEnabled = (command: CommandInfo | undefined): boolean => {
+      if (!command || !settings) return true;
+      if (settings.disabledCommands.includes(command.id)) return false;
+      if (command.disabledByDefault) return settings.enabledCommands.includes(command.id);
+      return true;
+    };
+    const matchesStatus = (command: CommandInfo | undefined): boolean => {
+      if (!hasStatus) return true;
+      return statusFilter === 'enabled' ? commandEnabled(command) : !commandEnabled(command);
+    };
+
     return displaySchemas
       .map((schema) => {
-        const matchesExtension =
+        const matchesExtensionText =
+          !hasSearch ||
           schema.title.toLowerCase().includes(q) ||
           schema.extName.toLowerCase().includes(q) ||
           schema.description.toLowerCase().includes(q);
-        const commandsMatched = schema.commands.filter(
-          (cmd) => {
-            const commandInfo = resolveCommandInfo(schema.extName, cmd.name);
-            const commandAlias = commandInfo ? String(settings?.commandAliases?.[commandInfo.id] || '').toLowerCase() : '';
-            return (
-              cmd.title.toLowerCase().includes(q) ||
-              cmd.name.toLowerCase().includes(q) ||
-              cmd.description.toLowerCase().includes(q) ||
-              commandAlias.includes(q)
-            );
-          }
-        );
-        if (matchesExtension) return schema;
-        if (commandsMatched.length > 0) return { ...schema, commands: commandsMatched };
-        return null;
+        const commandsMatched = schema.commands.filter((cmd) => {
+          const commandInfo = resolveCommandInfo(schema.extName, cmd.name);
+          const commandAlias = commandInfo ? String(settings?.commandAliases?.[commandInfo.id] || '').toLowerCase() : '';
+          const textMatch =
+            !hasSearch ||
+            cmd.title.toLowerCase().includes(q) ||
+            cmd.name.toLowerCase().includes(q) ||
+            cmd.description.toLowerCase().includes(q) ||
+            commandAlias.includes(q);
+          return textMatch && matchesStatus(commandInfo);
+        });
+        if (commandsMatched.length === 0) return null;
+        if (matchesExtensionText && commandsMatched.length === schema.commands.length) return schema;
+        return { ...schema, commands: commandsMatched };
       })
       .filter(Boolean) as InstalledExtensionSettingsSchema[];
-  }, [displaySchemas, search, settings]);
+  }, [displaySchemas, search, statusFilter, settings]);
 
   useEffect(() => {
     if (displaySchemas.length === 0) {
@@ -490,6 +551,7 @@ const ExtensionsTab: React.FC<{
 
     setSearch('');
     setActiveScope('all');
+    setStatusFilter('all');
     setExpandedExtensions((prev) => ({ ...prev, [matchedSchema.extName]: true }));
 
     if (requestedCommand) {
@@ -610,8 +672,13 @@ const ExtensionsTab: React.FC<{
   );
 
   const getPreferenceValues = (extName: string, cmdName?: string): Record<string, any> => {
-    if (!cmdName) return readJsonObject(getExtPrefsKey(extName));
-    return readJsonObject(getCmdPrefsKey(extName, cmdName));
+    const primary = !cmdName
+      ? (extensionPreferencesSnapshot.extensions[extName] || {})
+      : (extensionPreferencesSnapshot.commands[`${extName}/${cmdName}`] || {});
+    const fallback = !cmdName
+      ? readJsonObject(getExtPrefsKey(extName))
+      : readJsonObject(getCmdPrefsKey(extName, cmdName));
+    return mergePreferenceSources(primary, fallback);
   };
 
   const setPreferenceValue = (extName: string, pref: ExtensionPreferenceSchema, value: any, cmdName?: string) => {
@@ -619,6 +686,32 @@ const ExtensionsTab: React.FC<{
     const current = readJsonObject(storageKey);
     current[pref.name] = value;
     writeJsonObject(storageKey, current);
+    setExtensionPreferencesSnapshot((prev) => {
+      if (cmdName) {
+        const commandKey = `${extName}/${cmdName}`;
+        return {
+          ...prev,
+          commands: {
+            ...prev.commands,
+            [commandKey]: {
+              ...(prev.commands[commandKey] || {}),
+              [pref.name]: value,
+            },
+          },
+        };
+      }
+      return {
+        ...prev,
+        extensions: {
+          ...prev.extensions,
+          [extName]: {
+            ...(prev.extensions[extName] || {}),
+            [pref.name]: value,
+          },
+        },
+      };
+    });
+    void window.electron.setExtensionPreference(extName, pref.name, value, cmdName);
     window.dispatchEvent(new CustomEvent('sc-extension-storage-changed', { detail: { extensionName: extName } }));
     // force rerender to reflect required/filled indicators
     setSelected((prev) => (prev ? { ...prev } : prev));
@@ -653,6 +746,7 @@ const ExtensionsTab: React.FC<{
   };
 
   const getModeTypeLabel = (mode: string, command?: CommandInfo): string => {
+    if (command?.id?.startsWith('quicklink-')) return t('settings.extensions.types.quickLink');
     if (command?.category === 'app') return t('settings.extensions.types.application');
     if (command?.category === 'settings') return t('settings.extensions.types.settings');
     if (mode === 'menu-bar') return t('settings.extensions.types.menuBarCommand');
@@ -824,6 +918,23 @@ const ExtensionsTab: React.FC<{
   }, [showTopActionsMenu]);
 
   useEffect(() => {
+    if (!statusFilterMenuOpen) return;
+    const onMouseDown = (event: MouseEvent) => {
+      if (statusFilterMenuRef.current?.contains(event.target as Node)) return;
+      setStatusFilterMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setStatusFilterMenuOpen(false);
+    };
+    window.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [statusFilterMenuOpen]);
+
+  useEffect(() => {
     if (!extensionContextMenu && !uninstallDialog) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -855,14 +966,15 @@ const ExtensionsTab: React.FC<{
       <div className="flex flex-1 min-h-0 bg-[var(--settings-panel-bg)]">
         <div className="flex-[0_0_66%] min-w-[600px] h-full border-r border-[var(--ui-divider)] flex flex-col">
           <div className="px-3 py-2 border-b border-[var(--ui-divider)]">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2" ref={toolbarRowRef}>
               <div className="relative w-[360px] max-w-full shrink-0">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--text-subtle)]" />
                 <input
+                  ref={searchInputRef}
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder={t('common.search')}
-                  className="w-full bg-[var(--ui-segment-bg)] border border-[var(--ui-divider)] rounded-lg pl-9 pr-4 py-1.5 text-[13px] text-[var(--text-secondary)] placeholder:text-[color:var(--text-subtle)] outline-none focus:border-[var(--ui-segment-border)] transition-colors"
+                  className="sc-input sc-input--sm !pl-9 pr-4"
                 />
               </div>
               <div className="flex items-center gap-1">
@@ -886,11 +998,12 @@ const ExtensionsTab: React.FC<{
               <div className="relative" ref={topActionsMenuRef}>
                 <button
                   onClick={() => setShowTopActionsMenu((prev) => !prev)}
+                  title={compactToolbar ? t('settings.extensions.installExtension') : undefined}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-[var(--accent-soft)] border border-[var(--accent)] text-[var(--accent)] hover:brightness-95 transition-colors whitespace-nowrap"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>{t('settings.extensions.installExtension')}</span>
-                  <ChevronDown className="w-3.5 h-3.5" />
+                  {!compactToolbar && <span>{t('settings.extensions.installExtension')}</span>}
+                  {!compactToolbar && <ChevronDown className="w-3.5 h-3.5" />}
                 </button>
                 {showTopActionsMenu ? (
                   <div
@@ -983,7 +1096,59 @@ const ExtensionsTab: React.FC<{
             <div className="px-2 border-r border-[var(--ui-divider)]">{t('settings.extensions.columns.type')}</div>
             <div className="px-2 border-r border-[var(--ui-divider)]">{t('settings.extensions.columns.alias')}</div>
             <div className="px-2 border-r border-[var(--ui-divider)]">{t('settings.extensions.columns.hotkey')}</div>
-            <div className="pl-2">{t('settings.extensions.columns.enabled')}</div>
+            <div className="pl-2 flex items-center justify-between gap-1.5" ref={statusFilterMenuRef}>
+              <span>{t('settings.extensions.columns.enabled')}</span>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setStatusFilterMenuOpen((prev) => !prev)}
+                  title={t('settings.extensions.search.statusAll')}
+                  aria-label={t('settings.extensions.search.statusAll')}
+                  className={`p-0.5 rounded hover:bg-[var(--ui-segment-hover-bg)] transition-colors ${
+                    statusFilter === 'all'
+                      ? 'text-[var(--text-subtle)]'
+                      : 'text-[var(--accent)]'
+                  }`}
+                >
+                  <ListFilter className="w-3.5 h-3.5" />
+                </button>
+                {statusFilterMenuOpen ? (
+                  <div
+                    className="absolute right-0 top-full mt-1 w-40 rounded-lg border border-[var(--ui-panel-border)] shadow-2xl overflow-hidden z-20"
+                    style={{
+                      background:
+                        'linear-gradient(160deg, rgba(var(--on-surface-rgb), 0.08), rgba(var(--on-surface-rgb), 0.01)), rgba(var(--surface-base-rgb), 0.42)',
+                      backdropFilter: 'blur(96px) saturate(190%)',
+                      WebkitBackdropFilter: 'blur(96px) saturate(190%)',
+                      borderColor: 'rgba(var(--on-surface-rgb), 0.05)',
+                    }}
+                  >
+                    {(['all', 'enabled', 'disabled'] as const).map((option) => (
+                      <button
+                        key={option}
+                        type="button"
+                        onClick={() => {
+                          setStatusFilter(option);
+                          setStatusFilterMenuOpen(false);
+                        }}
+                        className="w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-[12px] text-left text-[var(--text-secondary)] hover:bg-[var(--ui-segment-hover-bg)] normal-case tracking-normal"
+                      >
+                        <span>
+                          {option === 'all'
+                            ? t('settings.extensions.search.statusAll')
+                            : option === 'enabled'
+                              ? t('settings.extensions.search.enabled')
+                              : t('settings.extensions.search.disabled')}
+                        </span>
+                        {statusFilter === option ? (
+                          <Check className="w-3.5 h-3.5 text-[var(--accent)]" />
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
           </div>
 
           <div className="flex-1 min-h-0 overflow-y-scroll custom-scrollbar" style={{ scrollbarGutter: 'stable' }}>
@@ -1283,26 +1448,62 @@ const ExtensionsTab: React.FC<{
                   </div>
                 ) : null}
 
-                <PreferenceSection
-                  title={t('settings.extensions.extensionPreferences')}
-                  extName={selectedSchema.extName}
-                  preferences={selectedSchema.preferences}
-                  values={getPreferenceValues(selectedSchema.extName)}
-                  setPreferenceValue={setPreferenceValue}
-                  pickPathForPreference={pickPathForPreference}
-                />
-
-                {selectedCommandSchema ? (
-                  <PreferenceSection
-                    title={t('settings.extensions.commandPreferences')}
-                    extName={selectedSchema.extName}
-                    cmdName={selectedCommandSchema.name}
-                    preferences={selectedCommandSchema.preferences}
-                    values={getPreferenceValues(selectedSchema.extName, selectedCommandSchema.name)}
-                    setPreferenceValue={setPreferenceValue}
-                    pickPathForPreference={pickPathForPreference}
+                {selectedCommandInfo?.id === 'system-emoji-picker' ? (
+                  <EmojiPickerSettingsSection
+                    enabled={settings?.emojiPickerEnabled ?? true}
+                    triggerPrefix={settings?.emojiPickerTriggerPrefix ?? ':'}
+                    excludedAppBundleIds={settings?.emojiPickerExcludedAppBundleIds ?? []}
+                    onChange={async (patch) => {
+                      await window.electron.saveSettings(patch);
+                      setSettings((prev) => (prev ? { ...prev, ...patch } : prev));
+                    }}
                   />
                 ) : null}
+
+                {selectedCommandInfo?.id === 'system-clipboard-manager' ? (
+                  <ClipboardSettingsSection
+                    retentionDays={settings?.clipboardHistoryRetentionDays ?? null}
+                    onRetentionChange={async (next) => {
+                      await window.electron.saveSettings({ clipboardHistoryRetentionDays: next });
+                      setSettings((prev) => (prev ? { ...prev, clipboardHistoryRetentionDays: next } : prev));
+                    }}
+                    blacklist={settings?.clipboardAppBlacklist ?? []}
+                    onBlacklistChange={async (next) => {
+                      await window.electron.saveSettings({ clipboardAppBlacklist: next });
+                      setSettings((prev) => (prev ? { ...prev, clipboardAppBlacklist: next } : prev));
+                    }}
+                  />
+                ) : null}
+
+                {selectedCommandInfo?.id?.startsWith(QUICK_LINK_COMMAND_PREFIX) ? (
+                  <QuickLinkEditorSection
+                    commandId={selectedCommandInfo.id}
+                    onDeleted={() => setSelected({ extName: selectedSchema.extName })}
+                  />
+                ) : (
+                  <>
+                    <PreferenceSection
+                      title={t('settings.extensions.extensionPreferences')}
+                      extName={selectedSchema.extName}
+                      preferences={selectedSchema.preferences}
+                      values={getPreferenceValues(selectedSchema.extName)}
+                      setPreferenceValue={setPreferenceValue}
+                      pickPathForPreference={pickPathForPreference}
+                    />
+
+                    {selectedCommandSchema ? (
+                      <PreferenceSection
+                        title={t('settings.extensions.commandPreferences')}
+                        extName={selectedSchema.extName}
+                        cmdName={selectedCommandSchema.name}
+                        preferences={selectedCommandSchema.preferences}
+                        values={getPreferenceValues(selectedSchema.extName, selectedCommandSchema.name)}
+                        setPreferenceValue={setPreferenceValue}
+                        pickPathForPreference={pickPathForPreference}
+                      />
+                    ) : null}
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -1466,7 +1667,7 @@ const PreferenceSection: React.FC<{
                   <select
                     value={textValue}
                     onChange={(e) => setPreferenceValue(extName, pref, e.target.value, cmdName)}
-                    className="w-full bg-[var(--ui-segment-bg)] border border-[var(--ui-panel-border)] rounded-md px-2.5 py-1.5 text-xs text-[var(--text-secondary)] outline-none"
+                    className="sc-select sc-select--sm"
                   >
                     <option value="">{t('settings.extensions.preferences.selectOption')}</option>
                     {(pref.data || []).map((opt) => (
@@ -1482,7 +1683,7 @@ const PreferenceSection: React.FC<{
                       value={textValue}
                       placeholder={pref.placeholder || ''}
                       onChange={(e) => setPreferenceValue(extName, pref, e.target.value, cmdName)}
-                      className="flex-1 bg-[var(--ui-segment-bg)] border border-[var(--ui-panel-border)] rounded-md px-2.5 py-1.5 text-xs text-[var(--text-secondary)] placeholder:text-[color:var(--text-subtle)] outline-none"
+                      className="sc-input sc-input--sm flex-1"
                     />
                     {(type === 'file' || type === 'directory' || type === 'appPicker') && (
                       <button
@@ -1502,6 +1703,691 @@ const PreferenceSection: React.FC<{
           </div>
         );
       })}
+    </div>
+  );
+};
+
+const QUICK_LINK_COMMAND_PREFIX = 'quicklink-';
+const QUICK_LINK_BROWSER_PROTOCOLS = new Set(['http', 'https', 'file']);
+
+function isBrowserProtocolUrlTemplate(urlTemplate: string): boolean {
+  const normalized = String(urlTemplate || '').trim();
+  if (!normalized) return false;
+  const candidate = normalized.replace(/\{[^}]+\}/g, 'placeholder');
+  try {
+    const parsed = new URL(candidate);
+    const protocol = String(parsed.protocol || '').replace(':', '').trim().toLowerCase();
+    return QUICK_LINK_BROWSER_PROTOCOLS.has(protocol);
+  } catch {
+    return false;
+  }
+}
+
+const QuickLinkEditorSection: React.FC<{
+  commandId: string;
+  onDeleted?: () => void;
+}> = ({ commandId, onDeleted }) => {
+  const { t } = useI18n();
+  const quickLinkId = commandId.startsWith(QUICK_LINK_COMMAND_PREFIX)
+    ? commandId.slice(QUICK_LINK_COMMAND_PREFIX.length)
+    : '';
+
+  const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [name, setName] = useState('');
+  const [urlTemplate, setUrlTemplate] = useState('');
+  const [applicationPath, setApplicationPath] = useState('');
+  const [applicationName, setApplicationName] = useState('');
+  const [applicationBundleId, setApplicationBundleId] = useState('');
+  const [appIconDataUrl, setAppIconDataUrl] = useState<string | undefined>(undefined);
+  const [apps, setApps] = useState<InstalledAppEntry[]>([]);
+  const [savingState, setSavingState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [statusMessage, setStatusMessage] = useState('');
+  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const initialRef = useRef({ name: '', urlTemplate: '', applicationPath: '' });
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setNotFound(false);
+    setStatusMessage('');
+    setSavingState('idle');
+    setConfirmingDelete(false);
+    (async () => {
+      try {
+        const [all, applications] = await Promise.all([
+          window.electron.quickLinkGetAll(),
+          window.electron.getApplications(),
+        ]);
+        if (cancelled) return;
+        const link = (all || []).find((entry) => entry.id === quickLinkId);
+        if (!link) {
+          setNotFound(true);
+          setLoading(false);
+          return;
+        }
+        const isBrowserUrl = isBrowserProtocolUrlTemplate(link.urlTemplate || '');
+        const effectiveAppPath = isBrowserUrl ? '' : link.applicationPath || '';
+        setName(link.name || '');
+        setUrlTemplate(link.urlTemplate || '');
+        setApplicationPath(effectiveAppPath);
+        setApplicationName(isBrowserUrl ? '' : link.applicationName || '');
+        setApplicationBundleId(isBrowserUrl ? '' : link.applicationBundleId || '');
+        setAppIconDataUrl(isBrowserUrl ? undefined : link.appIconDataUrl);
+        initialRef.current = {
+          name: link.name || '',
+          urlTemplate: link.urlTemplate || '',
+          applicationPath: effectiveAppPath,
+        };
+        setApps(
+          (applications || [])
+            .filter((entry) => Boolean(entry?.path))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
+        setLoading(false);
+      } catch {
+        if (!cancelled) {
+          setNotFound(true);
+          setLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [quickLinkId]);
+
+  const dirty =
+    name !== initialRef.current.name ||
+    urlTemplate !== initialRef.current.urlTemplate ||
+    applicationPath !== initialRef.current.applicationPath;
+
+  const onSave = async () => {
+    const trimmedName = name.trim();
+    const trimmedUrl = urlTemplate.trim();
+    if (!trimmedName) {
+      setSavingState('error');
+      setStatusMessage(t('quickLinks.nameRequired'));
+      return;
+    }
+    if (!trimmedUrl) {
+      setSavingState('error');
+      setStatusMessage(t('quickLinks.urlRequired'));
+      return;
+    }
+    setSavingState('saving');
+    setStatusMessage('');
+    try {
+      const updated = await window.electron.quickLinkUpdate(quickLinkId, {
+        name: trimmedName,
+        urlTemplate: trimmedUrl,
+        applicationName: applicationName || undefined,
+        applicationPath: applicationPath || undefined,
+        applicationBundleId: applicationBundleId || undefined,
+        appIconDataUrl,
+      });
+      if (!updated) {
+        setSavingState('error');
+        setStatusMessage(t('quickLinks.saveFailed'));
+        return;
+      }
+      initialRef.current = {
+        name: trimmedName,
+        urlTemplate: trimmedUrl,
+        applicationPath: applicationPath || '',
+      };
+      setSavingState('saved');
+      setStatusMessage(t('quickLinks.saved'));
+      window.setTimeout(() => {
+        setSavingState((curr) => (curr === 'saved' ? 'idle' : curr));
+        setStatusMessage((curr) => (curr === t('quickLinks.saved') ? '' : curr));
+      }, 1800);
+    } catch (error: any) {
+      setSavingState('error');
+      setStatusMessage(error?.message || t('quickLinks.saveFailed'));
+    }
+  };
+
+  const onDelete = async () => {
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    setDeleting(true);
+    try {
+      await window.electron.quickLinkDelete(quickLinkId);
+      onDeleted?.();
+    } catch (error: any) {
+      setSavingState('error');
+      setStatusMessage(error?.message || t('quickLinks.deleteFailed'));
+    } finally {
+      setDeleting(false);
+      setConfirmingDelete(false);
+    }
+  };
+
+  const onApplicationChange = (path: string) => {
+    if (!path) {
+      setApplicationPath('');
+      setApplicationName('');
+      setApplicationBundleId('');
+      setAppIconDataUrl(undefined);
+      return;
+    }
+    const app = apps.find((entry) => entry.path === path);
+    setApplicationPath(path);
+    setApplicationName(app?.name || '');
+    setApplicationBundleId(app?.bundleId || '');
+    setAppIconDataUrl(app?.iconDataUrl);
+  };
+
+  if (!quickLinkId) return null;
+
+  if (loading) {
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-[var(--text-subtle)]">{t('quickLinks.edit')}</div>
+        <div className="text-xs text-[var(--text-subtle)]">{t('common.loading')}</div>
+      </div>
+    );
+  }
+
+  if (notFound) {
+    return (
+      <div className="space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-[var(--text-subtle)]">{t('quickLinks.edit')}</div>
+        <div className="text-xs text-[var(--text-subtle)]">{t('quickLinks.notFound')}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] uppercase tracking-wider text-[var(--text-subtle)]">{t('quickLinks.edit')}</div>
+
+      <div className="space-y-1">
+        <label className="text-xs text-[var(--text-secondary)] font-medium">{t('quickLinks.name')}</label>
+        <input
+          type="text"
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          className="sc-input sc-input--sm"
+        />
+      </div>
+
+      <div className="space-y-1">
+        <label className="text-xs text-[var(--text-secondary)] font-medium">{t('quickLinks.url')}</label>
+        <input
+          type="text"
+          value={urlTemplate}
+          onChange={(event) => {
+            const next = event.target.value;
+            setUrlTemplate(next);
+            if (isBrowserProtocolUrlTemplate(next) && applicationPath) {
+              setApplicationPath('');
+              setApplicationName('');
+              setApplicationBundleId('');
+              setAppIconDataUrl(undefined);
+            }
+          }}
+          placeholder="https://example.com/search?q={clipboard}"
+          className="sc-input sc-input--sm sc-input--mono"
+        />
+        <p className="text-[11px] text-[var(--text-subtle)]">{t('quickLinks.urlHint')}</p>
+      </div>
+
+      <div className="space-y-1">
+        <label className="text-xs text-[var(--text-secondary)] font-medium">{t('quickLinks.openWith')}</label>
+        <select
+          value={applicationPath}
+          onChange={(event) => onApplicationChange(event.target.value)}
+          className="sc-select sc-select--sm"
+        >
+          <option value="">{t('quickLinks.defaultBrowser')}</option>
+          {apps.map((app) => (
+            <option key={app.path} value={app.path}>
+              {app.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {statusMessage ? (
+        <p
+          className={`text-[11px] ${
+            savingState === 'error' ? 'text-red-300/90' : 'text-emerald-300/90'
+          }`}
+        >
+          {statusMessage}
+        </p>
+      ) : null}
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={!dirty || savingState === 'saving'}
+          className="px-3 py-1.5 text-xs font-medium rounded-md bg-[var(--ui-segment-active-bg)] text-[var(--text-primary)] hover:bg-[var(--ui-segment-hover-bg)] border border-[var(--ui-segment-border)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          {savingState === 'saving' ? t('common.saving') : t('common.save')}
+        </button>
+        <button
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+          className="px-3 py-1.5 text-xs font-medium rounded-md border border-red-400/25 bg-red-500/10 text-red-200/90 hover:bg-red-500/18 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ml-auto"
+        >
+          {deleting
+            ? t('settings.extensions.uninstall.uninstalling')
+            : confirmingDelete
+              ? t('quickLinks.confirmDelete')
+              : t('quickLinks.delete')}
+        </button>
+      </div>
+    </div>
+  );
+};
+
+type InstalledAppEntry = {
+  name: string;
+  path: string;
+  bundleId?: string;
+  iconDataUrl?: string;
+};
+
+const CLIPBOARD_RETENTION_OPTIONS: { value: number | null; labelKey: string }[] = [
+  { value: 1, labelKey: 'settings.advanced.clipboardRetention.option.1day' },
+  { value: 7, labelKey: 'settings.advanced.clipboardRetention.option.7days' },
+  { value: 30, labelKey: 'settings.advanced.clipboardRetention.option.1month' },
+  { value: 90, labelKey: 'settings.advanced.clipboardRetention.option.3months' },
+  { value: 180, labelKey: 'settings.advanced.clipboardRetention.option.6months' },
+  { value: 365, labelKey: 'settings.advanced.clipboardRetention.option.1year' },
+  { value: null, labelKey: 'settings.advanced.clipboardRetention.option.never' },
+];
+
+const ClipboardSettingsSection: React.FC<{
+  retentionDays: number | null;
+  onRetentionChange: (next: number | null) => Promise<void>;
+  blacklist: string[];
+  onBlacklistChange: (next: string[]) => Promise<void>;
+}> = ({ retentionDays, onRetentionChange, blacklist, onBlacklistChange }) => {
+  const { t } = useI18n();
+  return (
+    <div className="space-y-5">
+      <div className="space-y-2">
+        <div className="text-[11px] uppercase tracking-wider text-[var(--text-subtle)]">
+          {t('settings.advanced.clipboardRetention.title')}
+        </div>
+        <p className="text-[11px] text-[var(--text-subtle)] leading-snug">
+          {t('settings.advanced.clipboardRetention.description')}
+        </p>
+        <div className="w-full max-w-[320px]">
+          <select
+            value={retentionDays == null ? 'never' : String(retentionDays)}
+            onChange={(event) => {
+              const raw = event.target.value;
+              const next = raw === 'never' ? null : Number(raw);
+              void onRetentionChange(next);
+            }}
+            className="sc-select"
+          >
+            {CLIPBOARD_RETENTION_OPTIONS.map((opt) => (
+              <option
+                key={opt.value == null ? 'never' : String(opt.value)}
+                value={opt.value == null ? 'never' : String(opt.value)}
+              >
+                {t(opt.labelKey)}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <AppBundleIdBlacklistSection
+        blacklist={blacklist}
+        onChange={onBlacklistChange}
+        titleKey="settings.extensions.clipboardBlacklist.title"
+        descriptionKey="settings.extensions.clipboardBlacklist.description"
+        addLabelKey="settings.extensions.clipboardBlacklist.add"
+        removeLabelKey="settings.extensions.clipboardBlacklist.remove"
+        emptyKey="settings.extensions.clipboardBlacklist.empty"
+        searchPlaceholderKey="settings.extensions.clipboardBlacklist.searchPlaceholder"
+        loadingKey="settings.extensions.clipboardBlacklist.loading"
+        noAppsKey="settings.extensions.clipboardBlacklist.noApps"
+      />
+    </div>
+  );
+};
+
+const AppBundleIdBlacklistSection: React.FC<{
+  blacklist: string[];
+  onChange: (next: string[]) => Promise<void>;
+  titleKey: string;
+  descriptionKey: string;
+  addLabelKey: string;
+  removeLabelKey: string;
+  emptyKey: string;
+  searchPlaceholderKey: string;
+  loadingKey: string;
+  noAppsKey: string;
+}> = ({
+  blacklist,
+  onChange,
+  titleKey,
+  descriptionKey,
+  addLabelKey,
+  removeLabelKey,
+  emptyKey,
+  searchPlaceholderKey,
+  loadingKey,
+  noAppsKey,
+}) => {
+  const { t } = useI18n();
+  const [apps, setApps] = useState<InstalledAppEntry[]>([]);
+  const [appsLoaded, setAppsLoaded] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerSearch, setPickerSearch] = useState('');
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const installed = await window.electron.getApplications();
+        if (cancelled) return;
+        setApps(
+          (installed || [])
+            .filter((entry) => Boolean(entry?.bundleId))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        );
+      } catch {
+        if (!cancelled) setApps([]);
+      } finally {
+        if (!cancelled) setAppsLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pickerOpen) return;
+    const onMouseDown = (event: MouseEvent) => {
+      if (pickerRef.current?.contains(event.target as Node)) return;
+      setPickerOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPickerOpen(false);
+    };
+    window.addEventListener('mousedown', onMouseDown);
+    window.addEventListener('keydown', onKeyDown);
+    const focusTimer = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+    return () => {
+      window.removeEventListener('mousedown', onMouseDown);
+      window.removeEventListener('keydown', onKeyDown);
+      window.clearTimeout(focusTimer);
+    };
+  }, [pickerOpen]);
+
+  const appByBundleId = useMemo(() => {
+    const map = new Map<string, InstalledAppEntry>();
+    for (const entry of apps) {
+      const key = String(entry.bundleId || '').toLowerCase();
+      if (key) map.set(key, entry);
+    }
+    return map;
+  }, [apps]);
+
+  const blacklistedEntries = useMemo(() => {
+    return blacklist.map((bundleId) => {
+      const match = appByBundleId.get(String(bundleId || '').toLowerCase());
+      return {
+        bundleId,
+        name: match?.name || bundleId,
+        iconDataUrl: match?.iconDataUrl,
+      };
+    });
+  }, [blacklist, appByBundleId]);
+
+  const selectableApps = useMemo(() => {
+    const already = new Set(blacklist.map((b) => String(b || '').toLowerCase()));
+    const q = pickerSearch.trim().toLowerCase();
+    return apps.filter((entry) => {
+      const key = String(entry.bundleId || '').toLowerCase();
+      if (!key || already.has(key)) return false;
+      if (!q) return true;
+      return (
+        entry.name.toLowerCase().includes(q) ||
+        key.includes(q)
+      );
+    });
+  }, [apps, blacklist, pickerSearch]);
+
+  const handleAdd = async (bundleId: string) => {
+    const normalized = String(bundleId || '').trim();
+    if (!normalized) return;
+    if (blacklist.some((b) => String(b || '').toLowerCase() === normalized.toLowerCase())) return;
+    const next = [...blacklist, normalized];
+    setPickerOpen(false);
+    setPickerSearch('');
+    await onChange(next);
+  };
+
+  const handleRemove = async (bundleId: string) => {
+    const next = blacklist.filter((b) => b !== bundleId);
+    await onChange(next);
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] uppercase tracking-wider text-[var(--text-subtle)]">
+          {t(titleKey)}
+        </div>
+        <div className="relative" ref={pickerRef}>
+          <button
+            type="button"
+            onClick={() => setPickerOpen((prev) => !prev)}
+            className="inline-flex items-center gap-1 rounded-md border border-[var(--ui-segment-border)] bg-[var(--ui-segment-bg)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:bg-[var(--ui-segment-hover-bg)] transition-colors"
+          >
+            <Plus className="w-3 h-3" />
+            {t(addLabelKey)}
+          </button>
+          {pickerOpen ? (
+            <div
+              className="absolute right-0 top-full mt-1 w-72 max-h-[320px] rounded-lg border border-[var(--ui-panel-border)] shadow-2xl overflow-hidden z-20 flex flex-col"
+              style={{
+                background:
+                  'linear-gradient(160deg, rgba(var(--on-surface-rgb), 0.08), rgba(var(--on-surface-rgb), 0.01)), rgba(var(--surface-base-rgb), 0.42)',
+                backdropFilter: 'blur(96px) saturate(190%)',
+                WebkitBackdropFilter: 'blur(96px) saturate(190%)',
+                borderColor: 'rgba(var(--on-surface-rgb), 0.05)',
+              }}
+            >
+              <div className="p-1.5 border-b border-[var(--ui-divider)]">
+                <input
+                  ref={searchInputRef}
+                  value={pickerSearch}
+                  onChange={(event) => setPickerSearch(event.target.value)}
+                  placeholder={t(searchPlaceholderKey)}
+                  className="sc-input sc-input--sm"
+                />
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+                {!appsLoaded ? (
+                  <div className="px-2.5 py-2 text-[11px] text-[var(--text-subtle)]">
+                    {t(loadingKey)}
+                  </div>
+                ) : selectableApps.length === 0 ? (
+                  <div className="px-2.5 py-2 text-[11px] text-[var(--text-subtle)]">
+                    {t(noAppsKey)}
+                  </div>
+                ) : (
+                  selectableApps.map((entry) => (
+                    <button
+                      key={entry.bundleId}
+                      type="button"
+                      onClick={() => {
+                        if (entry.bundleId) void handleAdd(entry.bundleId);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-[var(--ui-segment-hover-bg)] transition-colors"
+                    >
+                      {entry.iconDataUrl ? (
+                        <img
+                          src={entry.iconDataUrl}
+                          alt=""
+                          className="w-4 h-4 rounded-sm object-contain flex-shrink-0"
+                          draggable={false}
+                        />
+                      ) : (
+                        <TerminalSquare className="w-4 h-4 text-[var(--text-subtle)] flex-shrink-0" />
+                      )}
+                      <span className="text-[12px] text-[var(--text-secondary)] truncate">{entry.name}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+      <p className="text-[11px] text-[var(--text-subtle)] leading-snug">
+        {t(descriptionKey)}
+      </p>
+      {blacklistedEntries.length === 0 ? (
+        <div className="rounded-md border border-dashed border-[var(--ui-divider)] px-3 py-3 text-[11px] text-[var(--text-subtle)]">
+          {t(emptyKey)}
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-1.5">
+          {blacklistedEntries.map((entry) => (
+            <div
+              key={entry.bundleId}
+              className="inline-flex items-center gap-1.5 rounded-md border border-[var(--ui-divider)] bg-[var(--ui-segment-bg)] pl-1.5 pr-1 py-1"
+              title={entry.bundleId}
+            >
+              {entry.iconDataUrl ? (
+                <img
+                  src={entry.iconDataUrl}
+                  alt=""
+                  className="w-3.5 h-3.5 rounded-sm object-contain"
+                  draggable={false}
+                />
+              ) : (
+                <TerminalSquare className="w-3.5 h-3.5 text-[var(--text-subtle)]" />
+              )}
+              <span className="text-[11px] text-[var(--text-secondary)] max-w-[180px] truncate">{entry.name}</span>
+              <button
+                type="button"
+                onClick={() => void handleRemove(entry.bundleId)}
+                className="p-0.5 rounded-sm text-[var(--text-subtle)] hover:text-red-300/90 hover:bg-[var(--ui-segment-hover-bg)]"
+                aria-label={t(removeLabelKey)}
+                title={t(removeLabelKey)}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const EmojiPickerSettingsSection: React.FC<{
+  enabled: boolean;
+  triggerPrefix: string;
+  excludedAppBundleIds: string[];
+  onChange: (patch: {
+    emojiPickerEnabled?: boolean;
+    emojiPickerTriggerPrefix?: string;
+    emojiPickerExcludedAppBundleIds?: string[];
+  }) => Promise<void>;
+}> = ({ enabled, triggerPrefix, excludedAppBundleIds, onChange }) => {
+  const { t } = useI18n();
+  const [prefixDraft, setPrefixDraft] = React.useState(triggerPrefix);
+
+  React.useEffect(() => { setPrefixDraft(triggerPrefix); }, [triggerPrefix]);
+
+  return (
+    <div className="space-y-4">
+      <div className="text-[11px] uppercase tracking-wider text-[var(--text-subtle)]">
+        {t('settings.extensions.emojiPicker.enabled')}
+      </div>
+
+      {/* Enable toggle */}
+      <div className="flex items-start justify-between gap-4">
+        <p className="text-[11px] text-[var(--text-subtle)] leading-snug max-w-[260px]">
+          {t('settings.extensions.emojiPicker.enabledDesc')}
+        </p>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={enabled}
+          aria-label={t('settings.extensions.emojiPicker.enabled')}
+          onClick={() => void onChange({ emojiPickerEnabled: !enabled })}
+          className={`relative flex-shrink-0 w-10 h-6 rounded-full border transition-colors ${
+            enabled
+              ? 'bg-[var(--accent)] border-[var(--accent-hover)]'
+              : 'bg-[var(--ui-segment-bg)] border-[var(--ui-segment-border)]'
+          }`}
+        >
+          <span
+            className={`absolute top-1/2 h-4 w-4 -translate-y-1/2 rounded-full border shadow-sm bg-[var(--bg-overlay-strong)] border-[var(--ui-segment-border)] transition-all ${
+              enabled ? 'right-0.5 left-auto' : 'left-0.5 right-auto'
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* Trigger prefix — only shown when enabled */}
+      {enabled && (
+        <div className="space-y-1.5">
+          <label className="text-xs text-[var(--text-secondary)] font-medium">
+            {t('settings.extensions.emojiPicker.triggerPrefix')}
+          </label>
+          <p className="text-[11px] text-[var(--text-subtle)] leading-snug">
+            {t('settings.extensions.emojiPicker.triggerPrefixDesc')}
+          </p>
+          <input
+            type="text"
+            maxLength={4}
+            value={prefixDraft}
+            placeholder={t('settings.extensions.emojiPicker.triggerPrefixPlaceholder')}
+            onChange={(e) => setPrefixDraft(e.target.value)}
+            onBlur={() => {
+              const trimmed = prefixDraft.trim();
+              if (trimmed && trimmed !== triggerPrefix) {
+                void onChange({ emojiPickerTriggerPrefix: trimmed });
+              } else if (!trimmed) {
+                setPrefixDraft(triggerPrefix);
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            }}
+            className="sc-input sc-input--sm w-24"
+          />
+        </div>
+      )}
+
+      {/* Excluded apps — only shown when enabled */}
+      {enabled && (
+        <AppBundleIdBlacklistSection
+          blacklist={excludedAppBundleIds}
+          onChange={async (next) => onChange({ emojiPickerExcludedAppBundleIds: next })}
+          titleKey="settings.extensions.emojiPicker.excludedApps.title"
+          descriptionKey="settings.extensions.emojiPicker.excludedApps.description"
+          addLabelKey="settings.extensions.emojiPicker.excludedApps.add"
+          removeLabelKey="settings.extensions.emojiPicker.excludedApps.remove"
+          emptyKey="settings.extensions.emojiPicker.excludedApps.empty"
+          searchPlaceholderKey="settings.extensions.emojiPicker.excludedApps.searchPlaceholder"
+          loadingKey="settings.extensions.emojiPicker.excludedApps.loading"
+          noAppsKey="settings.extensions.emojiPicker.excludedApps.noApps"
+        />
+      )}
     </div>
   );
 };

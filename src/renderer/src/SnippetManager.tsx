@@ -240,7 +240,7 @@ const SnippetForm: React.FC<SnippetFormProps> = ({ snippet, onSave, onCancel }) 
   return (
     <div className="snippet-view w-full h-full flex flex-col" onKeyDown={handleKeyDown}>
       {/* Header */}
-      <div className="snippet-header flex items-center gap-3 px-5 py-3.5">
+      <div className="snippet-header drag-region flex items-center gap-3 px-5 py-3.5">
         <button
           onClick={onCancel}
           className="text-white/40 hover:text-white/70 transition-colors flex-shrink-0"
@@ -554,6 +554,7 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
     inlineRef: inlineArgumentClusterRef,
     minStartRatio: 0.26,
     gapPx: 8,
+    revisionKey: view,
   });
 
   const getResolvedInlineArgumentValues = useCallback(
@@ -602,6 +603,12 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
         const resolvedValues = getResolvedInlineArgumentValues(s, fields);
         if (fields.length <= MAX_INLINE_SNIPPET_ARGUMENTS) {
           await window.electron.snippetPasteResolved(s.id, resolvedValues);
+          setInlineArgumentValuesBySnippetId((prev) => {
+            if (!prev[s.id]) return prev;
+            const next = { ...prev };
+            delete next[s.id];
+            return next;
+          });
           return;
         }
         setDynamicPrompt({ snippet: s, mode: 'paste', fields, values: resolvedValues });
@@ -621,6 +628,12 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
         const resolvedValues = getResolvedInlineArgumentValues(activeSnippet, fields);
         if (fields.length <= MAX_INLINE_SNIPPET_ARGUMENTS) {
           await window.electron.snippetCopyToClipboardResolved(activeSnippet.id, resolvedValues);
+          setInlineArgumentValuesBySnippetId((prev) => {
+            if (!prev[activeSnippet.id]) return prev;
+            const next = { ...prev };
+            delete next[activeSnippet.id];
+            return next;
+          });
           return;
         }
         setDynamicPrompt({ snippet: activeSnippet, mode: 'copy', fields, values: resolvedValues });
@@ -858,6 +871,16 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
         }
       }
 
+      // Cmd+1 through Cmd+9: quick-paste the Nth snippet (Alfred-style)
+      if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+        const idx = parseInt(e.key, 10) - 1;
+        if (idx < filteredSnippets.length) {
+          e.preventDefault();
+          handlePaste(filteredSnippets[idx]);
+          return;
+        }
+      }
+
       if (e.key.toLowerCase() === 'e' && e.metaKey) {
         e.preventDefault();
         handleEdit();
@@ -930,23 +953,20 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
           }
           break;
 
-        case 'Backspace':
-        case 'Delete':
-          if (e.metaKey || e.ctrlKey) {
-            e.preventDefault();
-            if (filteredSnippets[selectedIndex]) {
-              handleDelete();
-            }
-          }
-          break;
-
         case 'Escape':
           e.preventDefault();
           onClose();
           break;
+
+        case 'Backspace':
+          if (!searchQuery) {
+            e.preventDefault();
+            onClose();
+          }
+          break;
       }
     },
-    [showActions, selectedActionIndex, actions, filteredSnippets, selectedIndex, onClose, dynamicPrompt, activeSnippet, loadSnippets]
+    [showActions, selectedActionIndex, actions, filteredSnippets, selectedIndex, onClose, dynamicPrompt, activeSnippet, loadSnippets, handlePaste, searchQuery]
   );
 
   // ─── Render: Create / Edit ──────────────────────────────────────
@@ -978,7 +998,7 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
   return (
     <div className="snippet-view snippet-search-view w-full h-full flex flex-col" onKeyDown={handleKeyDown} tabIndex={-1}>
       {/* Header */}
-      <div className="snippet-header flex h-16 items-center gap-2 px-4">
+      <div className="snippet-header drag-region flex h-16 items-center gap-2 px-4">
         <button
           onClick={onClose}
           className="text-white/40 hover:text-white/70 transition-colors flex-shrink-0"
@@ -1011,7 +1031,10 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
               <div
                 ref={inlineArgumentClusterRef}
                 className="pointer-events-auto inline-flex min-w-0 items-center gap-1.5"
-                style={{ marginLeft: inlineArgumentStartPx != null ? `${inlineArgumentStartPx}px` : '30%' }}
+                style={{
+                  marginLeft: inlineArgumentStartPx != null ? `${inlineArgumentStartPx}px` : '30%',
+                  visibility: inlineArgumentStartPx != null ? 'visible' : 'hidden',
+                }}
               >
                 {inlineActiveSnippetDynamicFields.map((field, index) => (
                   <InlineArgumentField
@@ -1170,6 +1193,12 @@ const SnippetManager: React.FC<SnippetManagerProps> = ({ onClose, initialView })
                         {snippet.content.split('\n')[0]}
                       </div>
                     </div>
+                    {index < 9 && (
+                      <span className="inline-flex items-center gap-0.5 flex-shrink-0 mt-0.5">
+                        <kbd className="inline-flex items-center justify-center w-[18px] h-[18px] rounded bg-[var(--kbd-bg)] text-[10px] font-medium text-[var(--text-muted)]">⌘</kbd>
+                        <kbd className="inline-flex items-center justify-center w-[18px] h-[18px] rounded bg-[var(--kbd-bg)] text-[10px] font-medium text-[var(--text-muted)]">{index + 1}</kbd>
+                      </span>
+                    )}
                   </div>
                 </div>
               ))}

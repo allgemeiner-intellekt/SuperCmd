@@ -2,27 +2,23 @@
  * useMenuBarExtensions.ts
  *
  * Manages the lifecycle of Raycast-compatible menu-bar and background no-view extensions.
- * - Loads all eligible menu-bar extension commands on mount via getMenuBarExtensions()
+ *
+ * Menu-bar extensions do NOT auto-mount on app startup. The user must explicitly run
+ * each menu-bar command from the launcher to activate it for the current session.
+ * This avoids running extensions with render-phase side effects (e.g. 1-click-confetti)
+ * on every app launch.
+ *
  * - menuBarExtensions[]: currently mounted menu-bar runners (unique key per entry so
  *   React remounts when the extension reloads)
  * - backgroundNoViewRuns[]: queued no-view extension bundles to execute in the background
  * - upsertMenuBarExtension(): add or update an entry; { remount: true } forces a full remount
- * - hideMenuBarExtension(): remove from UI and persist hidden state in localStorage
+ * - hideMenuBarExtension(): remove from UI
  * - remountMenuBarExtensionsForExtension(): remounts all runners for an extension name
  *   (debounced 200 ms) — triggered by sc-extension-storage-changed events
  */
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { ExtensionBundle } from '../../types/electron';
-import { HIDDEN_MENUBAR_CMDS_KEY } from '../utils/constants';
-import {
-  readJsonObject,
-  writeJsonObject,
-  getMenuBarCommandKey,
-  hydrateExtensionBundlePreferences,
-  getMissingRequiredPreferences,
-  getMissingRequiredArguments,
-} from '../utils/extension-preferences';
 
 export interface MenuBarEntry {
   key: string;
@@ -33,6 +29,8 @@ export interface BackgroundNoViewRun {
   runId: string;
   bundle: ExtensionBundle;
   launchType: 'userInitiated' | 'background';
+  /** When true, execution status is mirrored to the system status-bar badge. */
+  reportStatus?: boolean;
 }
 
 export interface UseMenuBarExtensionsReturn {
@@ -43,10 +41,10 @@ export interface UseMenuBarExtensionsReturn {
     extName: string;
     cmdName: string;
     extId: string;
-    storageKey: string;
   };
   isMenuBarExtensionMounted: (bundle: Partial<ExtensionBundle>) => boolean;
   hideMenuBarExtension: (bundle: Partial<ExtensionBundle>) => void;
+  hideMenuBarExtensionsForExtension: (extensionName: string) => void;
   upsertMenuBarExtension: (bundle: ExtensionBundle, options?: { remount?: boolean }) => void;
   remountMenuBarExtensionsForExtension: (extensionName: string) => void;
 }
@@ -60,8 +58,7 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
     const extName = bundle.extName || bundle.extensionName || '';
     const cmdName = bundle.cmdName || bundle.commandName || '';
     const extId = `${bundle.extensionName || bundle.extName || ''}/${bundle.commandName || bundle.cmdName || ''}`;
-    const storageKey = getMenuBarCommandKey(extName, cmdName);
-    return { extName, cmdName, extId, storageKey };
+    return { extName, cmdName, extId };
   }, []);
 
   const isMenuBarExtensionMounted = useCallback((bundle: Partial<ExtensionBundle>) => {
@@ -75,7 +72,7 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
   }, [menuBarExtensions, getMenuBarIdentity]);
 
   const hideMenuBarExtension = useCallback((bundle: Partial<ExtensionBundle>) => {
-    const { extName, cmdName, extId, storageKey } = getMenuBarIdentity(bundle);
+    const { extName, cmdName, extId } = getMenuBarIdentity(bundle);
     if (!extName || !cmdName) return;
     setMenuBarExtensions((prev) =>
       prev.filter(
@@ -84,21 +81,40 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
           (entry.bundle.cmdName || entry.bundle.commandName) !== cmdName
       )
     );
-    const hidden = readJsonObject(HIDDEN_MENUBAR_CMDS_KEY);
-    hidden[storageKey] = true;
-    writeJsonObject(HIDDEN_MENUBAR_CMDS_KEY, hidden);
     window.electron.removeMenuBar?.(extId);
   }, [getMenuBarIdentity]);
 
+  // Tear down every menu-bar runner belonging to an extension. Used by uninstall:
+  // the on-disk delete does not unload the bundle that's already been evaluated
+  // into the live <ExtensionView /> tree, so without this call the extension's
+  // setInterval keeps firing and its menu-bar item never disappears.
+  const hideMenuBarExtensionsForExtension = useCallback((extensionName: string) => {
+    const normalized = (extensionName || '').trim();
+    if (!normalized) return;
+    setMenuBarExtensions((prev) => {
+      const removed: MenuBarEntry[] = [];
+      const next = prev.filter((entry) => {
+        const entryExt = (entry.bundle.extName || entry.bundle.extensionName || '').trim();
+        if (entryExt === normalized) {
+          removed.push(entry);
+          return false;
+        }
+        return true;
+      });
+      if (removed.length === 0) return prev;
+      for (const entry of removed) {
+        const cmdName = entry.bundle.cmdName || entry.bundle.commandName || '';
+        const extId = `${normalized}/${cmdName}`;
+        window.electron.removeMenuBar?.(extId);
+      }
+      return next;
+    });
+  }, []);
+
   const upsertMenuBarExtension = useCallback((bundle: ExtensionBundle, options?: { remount?: boolean }) => {
     const remount = Boolean(options?.remount);
-    const { extName, cmdName, storageKey } = getMenuBarIdentity(bundle);
+    const { extName, cmdName } = getMenuBarIdentity(bundle);
     if (!extName || !cmdName) return;
-    const hidden = readJsonObject(HIDDEN_MENUBAR_CMDS_KEY);
-    if (hidden[storageKey]) {
-      delete hidden[storageKey];
-      writeJsonObject(HIDDEN_MENUBAR_CMDS_KEY, hidden);
-    }
     setMenuBarExtensions((prev) => {
       const idx = prev.findIndex(
         (entry) =>
@@ -140,35 +156,8 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
     });
   }, []);
 
-  // Load and run menu-bar extensions in the background
-  useEffect(() => {
-    (window as any).electron?.getMenuBarExtensions?.().then((exts: any[]) => {
-      if (exts && exts.length > 0) {
-        console.log(`[MenuBar] Loading ${exts.length} menu-bar extension(s)`);
-        const hidden = readJsonObject(HIDDEN_MENUBAR_CMDS_KEY);
-        const runnable = exts
-          .map((ext) => hydrateExtensionBundlePreferences(ext))
-          .filter((ext) => {
-            const missingPrefs = getMissingRequiredPreferences(ext);
-            const missingArgs = getMissingRequiredArguments(ext);
-            return missingPrefs.length === 0 && missingArgs.length === 0;
-          })
-          .filter((bundle) => {
-            const extName = bundle.extName || bundle.extensionName || '';
-            const cmdName = bundle.cmdName || bundle.commandName || '';
-            const storageKey = getMenuBarCommandKey(extName, cmdName);
-            return !hidden[storageKey];
-          })
-          .map((bundle) => ({
-            key: `${bundle.extName || bundle.extensionName}:${bundle.cmdName || bundle.commandName}:initial`,
-            bundle,
-          }));
-        setMenuBarExtensions(runnable);
-      }
-    }).catch((err: any) => {
-      console.error('[MenuBar] Failed to load menu-bar extensions:', err);
-    });
-  }, []);
+  // Note: no auto-mount on app startup. Menu-bar extensions are per-session — the
+  // user must explicitly run each command from the launcher to mount it.
 
   // LocalStorage changes should refresh menu-bar commands for the same extension.
   // This matches Raycast behavior where menu-bar commands observe state changes quickly.
@@ -185,6 +174,14 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
     };
   }, [remountMenuBarExtensionsForExtension]);
 
+  useEffect(() => {
+    return window.electron.onExtensionPreferencesUpdated((payload) => {
+      const extensionName = String(payload?.extensionName || '').trim();
+      if (!extensionName) return;
+      remountMenuBarExtensionsForExtension(extensionName);
+    });
+  }, [remountMenuBarExtensionsForExtension]);
+
   return {
     menuBarExtensions,
     backgroundNoViewRuns,
@@ -192,6 +189,7 @@ export function useMenuBarExtensions(): UseMenuBarExtensionsReturn {
     getMenuBarIdentity,
     isMenuBarExtensionMounted,
     hideMenuBarExtension,
+    hideMenuBarExtensionsForExtension,
     upsertMenuBarExtension,
     remountMenuBarExtensionsForExtension,
   };

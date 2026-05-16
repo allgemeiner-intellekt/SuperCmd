@@ -10,14 +10,21 @@
  * - Per-command hotkey registration
  */
 
+// Suppress EPIPE errors from console.log when stdout pipe breaks
+process.stdout?.on?.('error', () => {});
+process.stderr?.on?.('error', () => {});
+
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { fork, type ChildProcess } from 'child_process';
-import { getAvailableCommands, executeCommand, invalidateCache } from './commands';
-import { loadSettings, saveSettings, setOAuthToken, getOAuthToken, removeOAuthToken } from './settings-store';
-import type { AppSettings } from './settings-store';
-import { streamAI, isAIAvailable, transcribeAudio } from './ai-provider';
+import { fork, execFileSync, type ChildProcess } from 'child_process';
+import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
+import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery } from './commands';
+import { loadSettings, saveSettings, setOAuthToken, getOAuthToken, removeOAuthToken, loadWindowState, saveWindowState, clearWindowState, loadNotesWindowState, saveNotesWindowState, loadSettingsLocation, getDefaultSettingsPath, relocateSettingsFile, resetSettingsLocation, startSettingsWatcher, setSettingsBroadcaster, setExternalSettingsChangeHandler, settingsFileExistsOrICloudPlaceholder } from './settings-store';
+import type { AppSettings, RelocateMode } from './settings-store';
+import { streamAI, streamAIChat, isAIAvailable, transcribeAudio } from './ai-provider';
+import { scanAppRemnants } from './app-uninstaller';
+import * as soulverCalculator from './soulver-calculator';
 import { addMemory, buildMemoryContextSystemPrompt } from './memory';
 import {
   createScriptCommandTemplate,
@@ -35,6 +42,19 @@ import {
   uninstallExtension,
 } from './extension-registry';
 import {
+  deleteAiChatConversation,
+  getAiChatSnapshot,
+  mergeAiChatSnapshot,
+  upsertAiChatConversation,
+} from './ai-chat-store';
+import {
+  getExtensionPreferences,
+  getExtensionPreferencesSnapshot,
+  mergeExtensionPreferencesSnapshot,
+  setExtensionPreferenceValue,
+  setExtensionPreferences,
+} from './extension-preferences-store';
+import {
   searchExtensions,
   getPopularExtensions,
   getExtensionDetails,
@@ -50,7 +70,9 @@ import {
   getClipboardItemById,
   searchClipboardHistory,
   setClipboardMonitorEnabled,
+  setClipboardAppBlacklist,
   togglePinClipboardItem,
+  pruneClipboardHistoryOlderThan,
 } from './clipboard-manager';
 import {
   initSnippetStore,
@@ -93,6 +115,18 @@ import {
 } from './file-search-index';
 import { ensureCalendarAccess, getCalendarEvents } from './calendar-events';
 import {
+  openInDefaultBrowser as bsOpen,
+  resolveInput as bsResolveInput,
+  listEntries as bsListEntries,
+  clearHistory as bsClearHistory,
+  pruneByRetentionNow as bsPruneByRetention,
+  getAutocomplete as bsGetAutocomplete,
+  listImportableBrowsers as bsListImportableBrowsers,
+  importFromBrowser as bsImportFromBrowser,
+  fetchSearchSuggestion as bsFetchSearchSuggestion,
+  type BrowserSearchSource,
+} from './browser-search-history';
+import {
   initNoteStore,
   getAllNotes,
   searchNotes,
@@ -126,6 +160,12 @@ import {
   isCanvasLibInstalled,
   getCanvasLibDir,
 } from './canvas-store';
+import {
+  type RaycastImportProgress,
+  executeRaycastConfigImport,
+  importRaycastConfigFromFile,
+  previewRaycastConfigImport,
+} from './raycast-config-import';
 
 import { initialize as initAptabase, trackEvent } from "@aptabase/electron/main";
 
@@ -137,28 +177,6 @@ try {
 
 // ─── Native Binary Helpers ──────────────────────────────────────────
 
-/**
- * Resolve the path to a pre-compiled native binary in dist/native/.
- * In packaged apps the dist/native/ directory lives in app.asar.unpacked
- * (see asarUnpack in package.json), so we swap the asar path for the
- * unpacked one — child_process.spawn is not asar-aware.
- */
-function resolvePackagedUnpackedPath(candidatePath: string): string {
-  if (!app.isPackaged) return candidatePath;
-  if (!candidatePath.includes('app.asar')) return candidatePath;
-  const unpackedPath = candidatePath.replace('app.asar', 'app.asar.unpacked');
-  try {
-    if (fs.existsSync(unpackedPath)) {
-      return unpackedPath;
-    }
-  } catch {}
-  return candidatePath;
-}
-
-function getNativeBinaryPath(name: string): string {
-  const base = path.join(__dirname, '..', 'native', name);
-  return resolvePackagedUnpackedPath(base);
-}
 
 const WHISPERCPP_FRAMEWORK_VERSION = 'v1.8.3';
 const WHISPERCPP_MODEL_NAME = 'base';
@@ -1550,6 +1568,45 @@ function syncNativeLiquidGlassClassOnWindow(win: any, enabled: boolean): void {
   } catch {}
 }
 
+// Shared loader for the native-helpers N-API addon. Currently exposes:
+//   - activateApp / postPaste / activateAndPaste (paste flow)
+//   - setWindowAnimationBehaviorNone (disable NSWindow show/hide animation)
+// Lazy + cached so a single missing/broken build doesn't spam warnings, and
+// non-darwin platforms simply get null.
+let cachedNativeHelpersAddon: any | null = null;
+let nativeHelpersAddonLoadFailed = false;
+function getNativeHelpersAddon(): any | null {
+  if (cachedNativeHelpersAddon) return cachedNativeHelpersAddon;
+  if (nativeHelpersAddonLoadFailed) return null;
+  try {
+    cachedNativeHelpersAddon = require(path.join(__dirname, '..', 'native', 'native_helpers.node'));
+    return cachedNativeHelpersAddon;
+  } catch (e: any) {
+    nativeHelpersAddonLoadFailed = true;
+    console.warn('[native-helpers] failed to load addon:', e?.message);
+    return null;
+  }
+}
+
+// Disable macOS native NSWindow show/hide animation for a given window.
+// macOS Tahoe (26) added a default fade/scale appear animation for panel-style
+// windows, which makes the launcher feel sluggish when toggled. The addon
+// flips animationBehavior to None on the underlying NSWindow. Best-effort:
+// silently no-op on non-darwin or when the addon isn't available.
+function disableWindowAnimation(win: any): void {
+  if (process.platform !== 'darwin') return;
+  if (!win || typeof win.getNativeWindowHandle !== 'function') return;
+  if (typeof win.isDestroyed === 'function' && win.isDestroyed()) return;
+  const addon = getNativeHelpersAddon();
+  if (!addon || typeof addon.setWindowAnimationBehaviorNone !== 'function') return;
+  try {
+    const handle = win.getNativeWindowHandle();
+    addon.setWindowAnimationBehaviorNone(handle);
+  } catch (e: any) {
+    console.warn('[disableWindowAnimation] failed:', e?.message);
+  }
+}
+
 function applyLiquidGlassToWindow(
   win: any,
   options?: {
@@ -1839,10 +1896,11 @@ async function getNodeSnapshot(): Promise<{ target: NodeWindowInfo | null; windo
 
 const DEFAULT_WINDOW_WIDTH = 760;
 const DEFAULT_WINDOW_HEIGHT = 480;
+const COMPACT_WINDOW_HEIGHT = 100;
 const ONBOARDING_WINDOW_WIDTH = 1120;
 const ONBOARDING_WINDOW_HEIGHT = 740;
 const CURSOR_PROMPT_WINDOW_WIDTH = 500;
-const CURSOR_PROMPT_WINDOW_HEIGHT = 90;
+const CURSOR_PROMPT_WINDOW_HEIGHT = 100;
 const CURSOR_PROMPT_LEFT_OFFSET = 20;
 const PROMPT_WINDOW_PREWARM_DELAY_MS = 420;
 const WHISPER_WINDOW_WIDTH = 266;
@@ -1948,9 +2006,10 @@ function computeDetachedPopupPosition(
   }
 
   if (popupName === DETACHED_MEMORY_STATUS_WINDOW_NAME) {
+    // Horizontally centered, near the bottom of the work area
     return {
-      x: workArea.x + workArea.width - width - 20,
-      y: workArea.y + 16,
+      x: workArea.x + Math.floor((workArea.width - width) / 2),
+      y: workArea.y + Math.floor(workArea.height * 0.88 - height / 2),
     };
   }
 
@@ -2017,10 +2076,14 @@ function computeDetachedPopupPosition(
 let mainWindow: InstanceType<typeof BrowserWindow> | null = null;
 let promptWindow: InstanceType<typeof BrowserWindow> | null = null;
 let promptWindowPrewarmScheduled = false;
+let promptRendererReady = false;
+let pendingPromptWindowShown: { mode: string; selectedTextSnapshot: string } | null = null;
 let memoryStatusWindow: InstanceType<typeof BrowserWindow> | null = null;
 let memoryStatusHideTimer: NodeJS.Timeout | null = null;
 let memoryStatusRenderSeq = 0;
 let memoryStatusHideTimerSeq = 0;
+let confettiWindow: InstanceType<typeof BrowserWindow> | null = null;
+let confettiCloseTimer: NodeJS.Timeout | null = null;
 let settingsWindow: InstanceType<typeof BrowserWindow> | null = null;
 let extensionStoreWindow: InstanceType<typeof BrowserWindow> | null = null;
 let notesWindow: InstanceType<typeof BrowserWindow> | null = null;
@@ -2028,6 +2091,7 @@ let pendingNoteJson: string | null = null;
 let canvasWindow: InstanceType<typeof BrowserWindow> | null = null;
 let pendingCanvasJson: string | null = null;
 let isVisible = false;
+let isAppQuitting = false;
 let suppressBlurHide = false; // When true, blur won't hide the window (used during file dialogs)
 let showWindowBlurGraceUntil = 0; // Timestamp until which blur-to-hide is suppressed after show (prevents flash-close)
 let oauthBlurHideSuppressionDepth = 0; // Keep launcher alive while OAuth browser flow is in progress
@@ -2048,16 +2112,51 @@ const OPENING_SHORTCUT_SUPPRESSION_MS = 220;
 let openingShortcutSuppressionUntil = 0;
 let openingShortcutToSuppress = '';
 
-function getMemoryStatusWindowHtml(
-  variant: 'processing' | 'success' | 'error' = 'processing',
-  text: string = ''
-): string {
-  const safeVariant =
-    variant === 'success' || variant === 'error' ? variant : 'processing';
-  const safeText = String(text || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+function setMacActivationPolicy(policy: 'regular' | 'accessory' | 'prohibited'): void {
+  if (process.platform !== 'darwin') return;
+  try {
+    (app as any).setActivationPolicy?.(policy);
+  } catch {}
+}
+
+function enterOverlayMacActivationPolicy(): void {
+  if (process.platform !== 'darwin') return;
+  // AeroSpace classifies regular-app focused AX windows as workspace windows.
+  // The launcher is an overlay, so keep the app accessory while only the
+  // launcher/overlay windows are active; AeroSpace then treats the panel like
+  // a popup and doesn't bind it to the first workspace it appeared on.
+  setMacActivationPolicy('accessory');
+  try { app.dock.hide(); } catch {}
+}
+
+function enterRegularMacActivationPolicy(): void {
+  if (process.platform !== 'darwin') return;
+  setMacActivationPolicy('regular');
+  try { app.dock.show(); } catch {}
+}
+
+function restoreOverlayMacActivationPolicyIfPossible(): void {
+  if (process.platform !== 'darwin') return;
+  if (isAppQuitting) return;
+  if (launcherMode === 'onboarding') return;
+  if (settingsWindow || extensionStoreWindow || canvasWindow) return;
+  enterOverlayMacActivationPolicy();
+}
+
+function prepareWindowsForAppQuit(): void {
+  isAppQuitting = true;
+  if (process.platform === 'darwin') {
+    setMacActivationPolicy('regular');
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win || win.isDestroyed()) continue;
+    try { win.setClosable(true); } catch {}
+    try { win.setMinimizable(true); } catch {}
+    try { win.setMaximizable(true); } catch {}
+  }
+}
+
+function getMemoryStatusWindowHtml(): string {
   return `<!doctype html>
 <html>
 <head>
@@ -2074,6 +2173,8 @@ function getMemoryStatusWindowHtml(
       -webkit-font-smoothing: antialiased;
       user-select: none;
       pointer-events: none;
+      opacity: 1;
+      transition: opacity 180ms ease;
     }
     .wrap {
       width: 100%;
@@ -2086,7 +2187,7 @@ function getMemoryStatusWindowHtml(
       border-radius: 12px;
       border: 1px solid rgba(255,255,255,0.12);
       background: rgba(12,12,14,0.78);
-      box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
       backdrop-filter: blur(18px);
       -webkit-backdrop-filter: blur(18px);
       display: flex;
@@ -2095,6 +2196,7 @@ function getMemoryStatusWindowHtml(
       padding: 0 12px;
       box-sizing: border-box;
       color: rgba(255,255,255,0.92);
+      transition: background 180ms ease, border-color 180ms ease, color 180ms ease;
     }
     .card.success {
       border-color: rgba(52, 211, 153, 0.28);
@@ -2113,6 +2215,7 @@ function getMemoryStatusWindowHtml(
       background: rgba(255,255,255,0.9);
       flex: 0 0 auto;
       box-shadow: 0 0 0 4px rgba(255,255,255,0.10);
+      transition: background 180ms ease, box-shadow 180ms ease;
     }
     .card.processing .dot {
       animation: pulse 1s ease-in-out infinite;
@@ -2141,11 +2244,22 @@ function getMemoryStatusWindowHtml(
 </head>
 <body>
   <div class="wrap">
-    <div id="card" class="card ${safeVariant}">
+    <div id="card" class="card processing">
       <div class="dot"></div>
-      <div id="text" class="text">${safeText}</div>
+      <div id="text" class="text"></div>
     </div>
   </div>
+  <script>
+    window.__scUpdate = function(variant, text) {
+      document.getElementById('card').className = 'card ' + variant;
+      document.getElementById('text').textContent = text;
+      // Restore opacity in case a previous fade-out set it to 0.
+      document.documentElement.style.opacity = '1';
+    };
+    window.__scFadeOut = function() {
+      document.documentElement.style.opacity = '0';
+    };
+  </script>
 </body>
 </html>`;
 }
@@ -2161,9 +2275,17 @@ function hideMemoryStatusBar(): void {
   clearMemoryStatusHideTimer();
   memoryStatusRenderSeq += 1;
   if (!memoryStatusWindow || memoryStatusWindow.isDestroyed()) return;
+  const win = memoryStatusWindow;
   try {
-    memoryStatusWindow.hide();
+    if (win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.executeJavaScript('window.__scFadeOut && window.__scFadeOut()').catch(() => {});
+    }
   } catch {}
+  setTimeout(() => {
+    if (!win.isDestroyed()) {
+      try { win.hide(); } catch {}
+    }
+  }, 200);
 }
 
 async function ensureMemoryStatusWindow(): Promise<InstanceType<typeof BrowserWindow> | null> {
@@ -2191,8 +2313,15 @@ async function ensureMemoryStatusWindow(): Promise<InstanceType<typeof BrowserWi
       sandbox: true,
     },
   });
+  disableWindowAnimation(memoryStatusWindow);
   try { memoryStatusWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch {}
   try { memoryStatusWindow.setIgnoreMouseEvents(true, { forward: true }); } catch {}
+  // pop-up-menu level floats reliably above all normal app windows on macOS
+  // without the entitlement issues that screen-saver level can trigger.
+  try { memoryStatusWindow.setAlwaysOnTop(true, 'pop-up-menu'); } catch {}
+  // Prevent Chromium throttling on the hidden status window so executeJavaScript
+  // fires immediately when the badge needs to update.
+  try { memoryStatusWindow.webContents.setBackgroundThrottling(false); } catch {}
   if (process.platform === 'darwin') {
     try { memoryStatusWindow.setWindowButtonVisibility(false); } catch {}
   }
@@ -2220,11 +2349,12 @@ async function renderMemoryStatusBarContent(
   if (!memoryStatusWindow || memoryStatusWindow.isDestroyed()) return;
   if (renderSeq !== memoryStatusRenderSeq) return;
   if (!win.webContents || win.webContents.isDestroyed()) return;
+  const safeText = String(payload.text || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'");
   try {
-    await win.loadURL(
-      `data:text/html;charset=utf-8,${encodeURIComponent(
-        getMemoryStatusWindowHtml(payload.variant, payload.text)
-      )}`
+    await win.webContents.executeJavaScript(
+      `window.__scUpdate && window.__scUpdate('${payload.variant}', '${safeText}')`
     );
   } catch (error) {
     if (renderSeq === memoryStatusRenderSeq) {
@@ -2261,12 +2391,9 @@ async function showMemoryStatusBar(
   } catch {}
   if (renderSeq !== memoryStatusRenderSeq) return;
   try {
-    if (!win.isVisible()) {
-      if (typeof (win as any).showInactive === 'function') (win as any).showInactive();
-      else win.show();
-    } else {
-      win.show();
-    }
+    // Always use showInactive — the badge must never steal focus from the user's app.
+    if (typeof (win as any).showInactive === 'function') (win as any).showInactive();
+    else if (!win.isVisible()) win.show();
     win.moveTop();
   } catch {}
 
@@ -2279,6 +2406,156 @@ async function showMemoryStatusBar(
     }, MEMORY_STATUS_AUTOHIDE_MS);
   }
 }
+
+function getConfettiWindowHtml(): string {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <script>
+    (function() {
+      const canvas = document.getElementById('c');
+      const ctx = canvas.getContext('2d');
+      const dpr = window.devicePixelRatio || 1;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      canvas.width = Math.max(1, Math.floor(w * dpr));
+      canvas.height = Math.max(1, Math.floor(h * dpr));
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+
+      const COLORS = ['#ff4d6d', '#ffd166', '#06d6a0', '#4cc9f0', '#f72585', '#b8f2e6', '#ffffff'];
+      const particles = [];
+      // Two bursts from lower-left and lower-right, plus a center shower
+      const bursts = [
+        { x: canvas.width * 0.15, y: canvas.height * 0.85, angle: -Math.PI * 0.30, spread: 0.9 },
+        { x: canvas.width * 0.85, y: canvas.height * 0.85, angle: -Math.PI * 0.70, spread: 0.9 },
+        { x: canvas.width * 0.50, y: canvas.height * 0.55, angle: -Math.PI * 0.50, spread: 1.1 },
+      ];
+      const gravity = 0.32 * dpr;
+      for (const b of bursts) {
+        const count = 110;
+        for (let i = 0; i < count; i++) {
+          const a = b.angle + (Math.random() - 0.5) * b.spread;
+          const speed = (9 + Math.random() * 12) * dpr;
+          particles.push({
+            x: b.x,
+            y: b.y,
+            vx: Math.cos(a) * speed,
+            vy: Math.sin(a) * speed,
+            size: (4 + Math.random() * 7) * dpr,
+            color: COLORS[Math.floor(Math.random() * COLORS.length)],
+            rot: Math.random() * Math.PI * 2,
+            rotSpeed: (Math.random() - 0.5) * 0.3,
+          });
+        }
+      }
+
+      const durationMs = 1800;
+      const start = performance.now();
+      function tick(now) {
+        const elapsed = now - start;
+        const t = Math.min(1, elapsed / durationMs);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        for (const p of particles) {
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vy += gravity;
+          p.vx *= 0.993;
+          p.rot += p.rotSpeed;
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rot);
+          ctx.globalAlpha = 1 - t;
+          ctx.fillStyle = p.color;
+          ctx.fillRect(-p.size * 0.5, -p.size * 0.5, p.size, p.size * 0.62);
+          ctx.restore();
+        }
+        if (elapsed < durationMs) {
+          requestAnimationFrame(tick);
+        } else {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+        }
+      }
+      requestAnimationFrame(tick);
+    })();
+  </script>
+</body>
+</html>`;
+}
+
+function closeConfettiWindow(): void {
+  if (confettiCloseTimer) {
+    clearTimeout(confettiCloseTimer);
+    confettiCloseTimer = null;
+  }
+  if (confettiWindow && !confettiWindow.isDestroyed()) {
+    try { confettiWindow.close(); } catch {}
+  }
+  confettiWindow = null;
+}
+
+async function showConfettiBurst(): Promise<void> {
+  try {
+    closeConfettiWindow();
+    const cursor = screen.getCursorScreenPoint();
+    const display = screen.getDisplayNearestPoint(cursor) || screen.getPrimaryDisplay();
+    const { x, y, width, height } = display.bounds;
+    confettiWindow = new BrowserWindow({
+      x,
+      y,
+      width,
+      height,
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      hasShadow: false,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      focusable: false,
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+      },
+    });
+    disableWindowAnimation(confettiWindow);
+    try { confettiWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch {}
+    try { confettiWindow.setIgnoreMouseEvents(true, { forward: true }); } catch {}
+    try { confettiWindow.setAlwaysOnTop(true, 'screen-saver'); } catch {}
+    const win = confettiWindow;
+    win.on('closed', () => {
+      if (confettiWindow === win) confettiWindow = null;
+    });
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getConfettiWindowHtml())}`);
+    if (win.isDestroyed()) return;
+    try {
+      if (typeof (win as any).showInactive === 'function') (win as any).showInactive();
+      else win.show();
+    } catch {}
+    confettiCloseTimer = setTimeout(() => {
+      confettiCloseTimer = null;
+      closeConfettiWindow();
+    }, 2200);
+  } catch (error) {
+    console.warn('[Confetti] Failed to show confetti burst:', error);
+    closeConfettiWindow();
+  }
+}
+
 type AppUpdaterState =
   | 'idle'
   | 'unsupported'
@@ -2287,6 +2564,7 @@ type AppUpdaterState =
   | 'not-available'
   | 'downloading'
   | 'downloaded'
+  | 'restarting'
   | 'error';
 type AppUpdaterStatusSnapshot = {
   state: AppUpdaterState;
@@ -2305,7 +2583,12 @@ let appUpdaterConfigured = false;
 let appUpdater: any | null = null;
 let appUpdaterCheckPromise: Promise<void> | null = null;
 let appUpdaterDownloadPromise: Promise<void> | null = null;
+let appUpdaterRestartPromise: Promise<boolean> | null = null;
 const APP_UPDATER_AUTO_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const APP_UPDATER_RESTART_TIMEOUT_MS = 15_000;
+// Version string set when a background auto-check silently downloads an update.
+// null means no auto-downloaded update is ready (user must use manual flow).
+let autoUpdateDownloadedVersion: string | null = null;
 let appUpdaterAutoCheckTimer: NodeJS.Timeout | null = null;
 let appUpdaterStatusSnapshot: AppUpdaterStatusSnapshot = {
   state: 'idle',
@@ -2355,9 +2638,23 @@ const activeAIRequests = new Map<string, AbortController>(); // requestId → co
 const pendingOAuthCallbackUrls: string[] = [];
 let snippetExpanderProcess: any = null;
 let snippetExpanderStdoutBuffer = '';
+const snippetExpanderIntentionalKills = new WeakSet<object>();
+
+// Serial queue for clipboard-based paste operations.
+// Both snippet expansion and pasteTextToActiveApp write to the clipboard temporarily.
+// Without serialization they race and paste the wrong content.
+let clipboardOpQueue: Promise<void> = Promise.resolve();
+let emojiTriggerProcess: any = null;
+let emojiTriggerStdoutBuffer = '';
+let emojiPickerWindow: InstanceType<typeof BrowserWindow> | null = null;
+let emojiPickerCurrentQuery = '';
+let emojiPickerCurrentPrefixLen = 1;
+let emojiPickerSelectedIdx = 0;
 let nativeSpeechProcess: any = null;
 let nativeSpeechStdoutBuffer = '';
 let nativeColorPickerPromise: Promise<any> | null = null;
+let keyboardLockProcess: any = null;
+let keyboardLockReleaseResolvers: Array<() => void> = [];
 let whisperHoldWatcherProcess: any = null;
 let whisperHoldWatcherStdoutBuffer = '';
 let whisperHoldRequestSeq = 0;
@@ -3087,12 +3384,12 @@ function computeWindowManagementLayoutBounds(
     }
     case 'system-window-management-center-80': {
       const width = clampWindowManagementFineTuneValue(
-        Math.round(area.width * 0.8),
+        Math.round(area.width * 0.9),
         WINDOW_MANAGEMENT_FINE_TUNE_MIN_WIDTH,
         area.width
       );
       const height = clampWindowManagementFineTuneValue(
-        Math.round(area.height * 0.8),
+        Math.round(area.height * 0.9),
         WINDOW_MANAGEMENT_FINE_TUNE_MIN_HEIGHT,
         area.height
       );
@@ -3601,6 +3898,7 @@ function isWindowShownRoutedSystemCommand(commandId: string): boolean {
     commandId === 'system-search-snippets' ||
     commandId === 'system-create-snippet' ||
     commandId === 'system-search-notes' ||
+    commandId === 'system-search-canvases' ||
     commandId === 'system-search-quicklinks' ||
     commandId === 'system-create-quicklink' ||
     commandId === 'system-search-files' ||
@@ -4148,7 +4446,148 @@ let whisperEscapeRegistered = false;
 let whisperOverlayVisible = false;
 let speakOverlayVisible = false;
 let whisperChildWindow: InstanceType<typeof BrowserWindow> | null = null;
+let whisperOverlayOpeningGuardUntil = 0;
+let whisperSuperCmdTextTargetWindow: InstanceType<typeof BrowserWindow> | null = null;
 const LAUNCHER_SELECTION_SNAPSHOT_TTL_MS = 15_000;
+
+function markWhisperOverlayOpening(): void {
+  whisperOverlayOpeningGuardUntil = Date.now() + 1500;
+}
+
+function isWhisperOverlayActiveOrOpening(): boolean {
+  return whisperOverlayVisible || Date.now() < whisperOverlayOpeningGuardUntil;
+}
+
+function isWhisperSuperCmdTextTargetWindow(win: InstanceType<typeof BrowserWindow> | null | undefined): boolean {
+  if (!win || win.isDestroyed()) return false;
+  return win === mainWindow || win === notesWindow || win === canvasWindow;
+}
+
+function buildWhisperTextTargetCaptureScript(): string {
+  return `
+    (() => {
+      const editableSelector = '[contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
+      const getEditableFromSelection = () => {
+        const selection = window.getSelection && window.getSelection();
+        const node = selection && selection.anchorNode;
+        const element = node instanceof HTMLElement ? node : (node && node.parentElement);
+        const editable = element && element.closest && element.closest(editableSelector);
+        return editable instanceof HTMLElement ? editable : null;
+      };
+      const dispatchInput = (element, text) => {
+        try {
+          element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+        } catch (_) {
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      };
+      const setNativeValue = (element, value) => {
+        const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (descriptor && descriptor.set) descriptor.set.call(element, value);
+        else element.value = value;
+      };
+      const capture = () => {
+        const active = document.activeElement;
+        if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+          if (active.disabled || active.readOnly) return null;
+          const inputType = active instanceof HTMLInputElement ? String(active.type || 'text').toLowerCase() : 'textarea';
+          if (active instanceof HTMLInputElement && !['', 'text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(inputType)) return null;
+          return {
+            kind: 'input',
+            element: active,
+            selectionStart: active.selectionStart == null ? active.value.length : active.selectionStart,
+            selectionEnd: active.selectionEnd == null ? active.value.length : active.selectionEnd,
+          };
+        }
+        const editable = active instanceof HTMLElement && active.isContentEditable ? active : getEditableFromSelection();
+        if (!editable) return null;
+        const selection = window.getSelection && window.getSelection();
+        let range = null;
+        if (selection && selection.rangeCount > 0) {
+          const candidate = selection.getRangeAt(0);
+          if (editable.contains(candidate.commonAncestorContainer)) range = candidate.cloneRange();
+        }
+        return { kind: 'contenteditable', element: editable, range };
+      };
+      window.__supercmdWhisperTextTarget = capture();
+      window.__supercmdInsertWhisperText = (rawText) => {
+        const text = String(rawText || '');
+        const target = window.__supercmdWhisperTextTarget;
+        if (!text || !target || !target.element || !target.element.isConnected) return false;
+        try { target.element.focus({ preventScroll: true }); } catch (_) { try { target.element.focus(); } catch (_) {} }
+        if (target.kind === 'input') {
+          const value = target.element.value || '';
+          const start = Math.max(0, Math.min(value.length, target.selectionStart || 0));
+          const end = Math.max(start, Math.min(value.length, target.selectionEnd || start));
+          setNativeValue(target.element, value.slice(0, start) + text + value.slice(end));
+          const cursor = start + text.length;
+          try { target.element.setSelectionRange(cursor, cursor); } catch (_) {}
+          target.selectionStart = cursor;
+          target.selectionEnd = cursor;
+          dispatchInput(target.element, text);
+          return true;
+        }
+        const selection = window.getSelection && window.getSelection();
+        if (!selection) return false;
+        let range = target.range;
+        if (!range || !target.element.contains(range.commonAncestorContainer)) {
+          range = document.createRange();
+          range.selectNodeContents(target.element);
+          range.collapse(false);
+        }
+        selection.removeAllRanges();
+        selection.addRange(range);
+        let inserted = false;
+        try { inserted = document.execCommand('insertText', false, text); } catch (_) { inserted = false; }
+        if (!inserted) {
+          range.deleteContents();
+          const textNode = document.createTextNode(text);
+          range.insertNode(textNode);
+          range.setStartAfter(textNode);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+        if (selection.rangeCount > 0) target.range = selection.getRangeAt(0).cloneRange();
+        dispatchInput(target.element, text);
+        return true;
+      };
+      return Boolean(window.__supercmdWhisperTextTarget);
+    })();
+  `;
+}
+
+function captureWhisperSuperCmdTextTarget(): void {
+  const focusedWindow = BrowserWindow.getFocusedWindow() as InstanceType<typeof BrowserWindow> | null;
+  if (!isWhisperSuperCmdTextTargetWindow(focusedWindow)) {
+    whisperSuperCmdTextTargetWindow = null;
+    return;
+  }
+  void focusedWindow.webContents.executeJavaScript(buildWhisperTextTargetCaptureScript(), true)
+    .then((captured: unknown) => {
+      whisperSuperCmdTextTargetWindow = captured ? focusedWindow : null;
+    })
+    .catch(() => {
+      if (whisperSuperCmdTextTargetWindow === focusedWindow) {
+        whisperSuperCmdTextTargetWindow = null;
+      }
+    });
+}
+
+async function insertTextIntoWhisperSuperCmdTarget(text: string): Promise<boolean> {
+  const targetWindow = whisperSuperCmdTextTargetWindow;
+  if (!isWhisperSuperCmdTextTargetWindow(targetWindow)) return false;
+  const textLiteral = JSON.stringify(String(text || ''));
+  try {
+    return Boolean(await targetWindow.webContents.executeJavaScript(
+      `Boolean(window.__supercmdInsertWhisperText && window.__supercmdInsertWhisperText(${textLiteral}))`,
+      true
+    ));
+  } catch {
+    return false;
+  }
+}
 
 function registerWhisperEscapeShortcut(): void {
   if (whisperEscapeRegistered) return;
@@ -4626,6 +5065,12 @@ function getElevenLabsApiKey(settings: AppSettings): string {
   return normalizeApiKey(process.env.ELEVENLABS_API_KEY);
 }
 
+function getMistralApiKey(settings: AppSettings): string {
+  const fromSettings = normalizeApiKey(settings.ai?.mistralApiKey);
+  if (fromSettings) return fromSettings;
+  return normalizeApiKey(process.env.MISTRAL_API_KEY);
+}
+
 const DEFAULT_ELEVENLABS_TTS_VOICE_ID = '21m00Tcm4TlvDq8ikWAM'; // Rachel
 
 function resolveElevenLabsTtsConfig(selectedModel: string): { modelId: string; voiceId: string } {
@@ -4747,6 +5192,98 @@ function transcribeAudioWithElevenLabs(opts: {
         }
       );
       req.on('error', reject);
+      req.write(body);
+      req.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function transcribeAudioWithMistralVoxtral(opts: {
+  audioBuffer: Buffer;
+  apiKey: string;
+  model: string;
+  language?: string;
+  mimeType?: string;
+}): Promise<string> {
+  const boundary = `----SuperCmdMistralBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
+  const normalized = String(opts.mimeType || '').toLowerCase();
+  const filename = normalized.includes('mp3') || normalized.includes('mpeg') ? 'audio.mp3' : 'audio.wav';
+  const contentType = filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav';
+  const parts: Buffer[] = [];
+
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`
+  ));
+  parts.push(opts.audioBuffer);
+  parts.push(Buffer.from('\r\n'));
+
+  parts.push(Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${opts.model || 'voxtral-mini-latest'}\r\n`
+  ));
+
+  if (opts.language) {
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\n${opts.language}\r\n`
+    ));
+  }
+
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+  const body = Buffer.concat(parts);
+
+  return new Promise<string>((resolve, reject) => {
+    try {
+      const https = require('https');
+      const req = https.request(
+        {
+          hostname: 'api.mistral.ai',
+          path: '/v1/audio/transcriptions',
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${opts.apiKey}`,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+          },
+        },
+        (res: any) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk: Buffer) => chunks.push(chunk));
+          res.on('end', () => {
+            const responseBody = Buffer.concat(chunks).toString('utf-8');
+            if (res.statusCode && res.statusCode >= 400) {
+              reject(new Error(`Mistral Voxtral STT HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
+              return;
+            }
+            try {
+              const parsed = JSON.parse(responseBody || '{}');
+              const content = parsed?.choices?.[0]?.message?.content;
+              const text = Array.isArray(content)
+                ? content
+                    .map((part: any) => typeof part === 'string' ? part : String(part?.text || ''))
+                    .join('')
+                    .trim()
+                : String(content || parsed?.text || parsed?.transcript || '').trim();
+              if (!text) {
+                reject(new Error('Mistral Voxtral STT returned an empty transcript.'));
+                return;
+              }
+              resolve(text);
+            } catch {
+              const text = responseBody.trim();
+              if (!text) {
+                reject(new Error('Mistral Voxtral STT returned an empty response.'));
+                return;
+              }
+              resolve(text);
+            }
+          });
+        }
+      );
+      req.on('error', reject);
+      req.setTimeout(60000, () => {
+        req.destroy(new Error('Mistral Voxtral STT timed out.'));
+      });
       req.write(body);
       req.end();
     } catch (error) {
@@ -5009,21 +5546,10 @@ async function getSelectedTextForSpeak(options?: { allowClipboardFallback?: bool
       const { execFile } = require('child_process');
       const { promisify } = require('util');
       const execFileAsync = promisify(execFile);
-      const script = `
-        tell application "System Events"
-          try
-            set frontApp to first application process whose frontmost is true
-            set focusedElement to value of attribute "AXFocusedUIElement" of frontApp
-            if focusedElement is missing value then return ""
-            set selectedText to value of attribute "AXSelectedText" of focusedElement
-            return selectedText
-          on error
-            return ""
-          end try
-        end tell
-      `;
-      const { stdout } = await execFileAsync('/usr/bin/osascript', ['-e', script]);
-      markSystemEventsPermissionGranted();
+      // Use the native get-selected-text binary (AXUIElement direct calls, ~5-10 ms)
+      // instead of osascript (~50-200 ms + System Events permission dialog risk).
+      const binaryPath = getNativeBinaryPath('get-selected-text');
+      const { stdout } = await execFileAsync(binaryPath, [], { timeout: 500 });
       return String(stdout || '').trim();
     } catch {
       return '';
@@ -5090,22 +5616,24 @@ async function captureSelectionSnapshotBeforeShow(options?: { allowClipboardFall
     rememberSelectionSnapshot('');
     return '';
   }
-  // Skip System Events during window-show if permission hasn't been confirmed
-  // yet, to avoid triggering the macOS Automation dialog unexpectedly.
-  if (!systemEventsPermissionConfirmed) {
+  const allowClipboardFallback = options?.allowClipboardFallback === true;
+  // Skip only the System Events fallback during window-show if permission
+  // has not been confirmed. AX selection reads do not require Automation.
+  if (allowClipboardFallback && !systemEventsPermissionConfirmed) {
     rememberSelectionSnapshot('');
     return '';
   }
-  const allowClipboardFallback = options?.allowClipboardFallback === true;
   try {
     const selected = String(
       await getSelectedTextForSpeak({ allowClipboardFallback, clipboardWaitMs: 90 }) || ''
     );
-    rememberSelectionSnapshot(selected);
+    // Only update the snapshot if we actually captured something; if AX returned
+    // empty (common for apps that don't expose AXSelectedText), leave the existing
+    // snapshot intact so cursor-prompt can still use a recently captured selection.
+    if (selected.trim()) rememberSelectionSnapshot(selected);
     return getRecentSelectionSnapshot();
   } catch {
-    rememberSelectionSnapshot('');
-    return '';
+    return getRecentSelectionSnapshot();
   }
 }
 
@@ -5403,6 +5931,11 @@ function parseHoldShortcutConfig(shortcut: string): {
     n: 45, m: 46, '.': 47, '`': 50,
     period: 47, comma: 43, slash: 44, semicolon: 41, quote: 39,
     tab: 48, space: 49, return: 36, enter: 36, escape: 53, fn: 63, function: 63,
+    backspace: 51, delete: 117, forwarddelete: 117,
+    up: 126, down: 125, left: 123, right: 124,
+    home: 115, end: 119, pageup: 116, pagedown: 121,
+    f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100,
+    f9: 101, f10: 109, f11: 103, f12: 111,
   };
   const keyCode = map[keyToken];
   if (!Number.isFinite(keyCode)) return null;
@@ -5867,7 +6400,7 @@ function startFnSpeakToggleWatcher(): void {
               preserveFocusWhenHidden: launcherMode !== 'onboarding',
             });
             lastWhisperShownAt = Date.now();
-            const startDelays = [180, 340, 520];
+            const startDelays = [180, 340, 520, 800, 1200];
             startDelays.forEach((delay) => {
               setTimeout(() => {
                 if (!fnSpeakToggleIsPressed) return;
@@ -6151,6 +6684,15 @@ app.on('open-url', (event: any, url: string) => {
     // not a valid URL, fall through to OAuth
   }
 
+  // Handle command-launch deeplinks: supercmd://extensions/<owner>/<ext>/<cmd>
+  // and supercmd://script-commands/<slug> (plus legacy raycast:// equivalents).
+  if (isCommandDeepLink(url)) {
+    void launchCommandDeepLink(url).catch((e) => {
+      console.error(`[open-url] Failed to launch command deeplink: ${url}`, e);
+    });
+    return;
+  }
+
   handleOAuthCallbackUrl(url);
 });
 
@@ -6334,7 +6876,7 @@ function parseExtensionCommandPath(pathValue: string): { extensionName: string; 
   return { extensionName, commandName };
 }
 
-type ParsedRaycastDeepLink =
+type ParsedCommandDeepLink =
   | {
       type: 'extension';
       ownerOrAuthorName?: string;
@@ -6348,12 +6890,21 @@ type ParsedRaycastDeepLink =
       type: 'scriptCommand';
       commandName: string;
       arguments: string[];
+    }
+  | {
+      type: 'command';
+      commandId: string;
     };
 
-function parseRaycastDeepLink(url: string): ParsedRaycastDeepLink | null {
+/**
+ * Parse `supercmd://extensions/...` / `supercmd://script-commands/...` deeplinks.
+ * Also accepts the legacy `raycast://` scheme so extension authors that emit
+ * Raycast-style URLs keep working.
+ */
+function parseCommandDeepLink(url: string): ParsedCommandDeepLink | null {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'raycast:') return null;
+    if (parsed.protocol !== 'supercmd:' && parsed.protocol !== 'raycast:') return null;
 
     const parts = parsed.pathname.split('/').filter(Boolean).map((v) => decodeURIComponent(v));
 
@@ -6392,11 +6943,120 @@ function parseRaycastDeepLink(url: string): ParsedRaycastDeepLink | null {
         arguments: parseScriptArgumentsFromQuery(parsed),
       };
     }
+
+    // `commands/<id>` is a SuperCmd-specific universal launcher — Raycast
+    // doesn't expose its internal command ids, so we only accept the
+    // `supercmd://` scheme here (not the legacy `raycast://` compat scheme).
+    if (parsed.hostname === 'commands' && parsed.protocol === 'supercmd:') {
+      const commandId = parts.join('/').trim();
+      if (!commandId) return null;
+      return {
+        type: 'command',
+        commandId,
+      };
+    }
   } catch {
     return null;
   }
 
   return null;
+}
+
+/**
+ * True when the URL looks like a command-launch deeplink we can handle
+ * (supercmd://extensions/..., supercmd://script-commands/..., or the
+ * legacy raycast:// equivalents).
+ */
+function isCommandDeepLink(url: string): boolean {
+  if (!url) return false;
+  if (url.startsWith('raycast://')) return true;
+  if (!url.startsWith('supercmd://')) return false;
+  try {
+    const host = new URL(url).hostname;
+    return host === 'extensions' || host === 'script-commands' || host === 'commands';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a command-launch deeplink and dispatch it to the renderer.
+ * Returns true on success, false if the URL is unsupported or the
+ * command target cannot be found.
+ */
+async function launchCommandDeepLink(url: string): Promise<boolean> {
+  const deepLink = parseCommandDeepLink(url);
+  if (!deepLink) {
+    console.warn(`Unsupported command deep link: ${url}`);
+    return false;
+  }
+
+  if (deepLink.type === 'scriptCommand') {
+    const script = getScriptCommandBySlug(deepLink.commandName);
+    if (!script) {
+      console.warn(`Script command deeplink target not found: ${deepLink.commandName}`);
+      return false;
+    }
+    try {
+      await showWindow();
+      const payload = JSON.stringify({
+        commandId: script.id,
+        arguments: deepLink.arguments || [],
+        source: 'deeplink',
+      });
+      await mainWindow?.webContents.executeJavaScript(
+        `window.dispatchEvent(new CustomEvent('sc-run-script-command', { detail: ${payload} }));`,
+        true
+      );
+      return true;
+    } catch (e) {
+      console.error(`Failed to launch script command deeplink: ${url}`, e);
+      return false;
+    }
+  }
+
+  if (deepLink.type === 'command') {
+    try {
+      const commands = await getAvailableCommands();
+      const target = commands.find((c) => c.id === deepLink.commandId);
+      if (!target) {
+        console.warn(`Command deeplink target not found: ${deepLink.commandId}`);
+        return false;
+      }
+      return await runCommandById(deepLink.commandId, 'launcher');
+    } catch (e) {
+      console.error(`Failed to launch command deeplink: ${url}`, e);
+      return false;
+    }
+  }
+
+  try {
+    const bundle = await buildLaunchBundle({
+      extensionName: deepLink.extensionName,
+      commandName: deepLink.commandName,
+      args: deepLink.arguments,
+      type: deepLink.launchType || 'userInitiated',
+      fallbackText: deepLink.fallbackText || null,
+    });
+    await showWindow();
+    const payload = JSON.stringify({
+      bundle,
+      launchOptions: { type: bundle.launchType || 'userInitiated' },
+      source: {
+        commandMode: 'deeplink',
+        extensionName: bundle.extensionName,
+        commandName: bundle.commandName,
+      },
+    });
+    await mainWindow?.webContents.executeJavaScript(
+      `window.dispatchEvent(new CustomEvent('sc-launch-extension-bundle', { detail: ${payload} }));`,
+      true
+    );
+    return true;
+  } catch (e) {
+    console.error(`Failed to launch extension deep link: ${url}`, e);
+    return false;
+  }
 }
 
 function normalizeOpenTarget(rawTarget: string): {
@@ -6428,64 +7088,47 @@ async function openTargetWithApplication(target: string, application?: string): 
   const appName = String(application || '').trim();
   const { normalizedTarget, launchTarget, externalTarget } = normalizeOpenTarget(rawTarget);
 
+  // All three branches fire-and-forget — same reason as openAppByPath /
+  // openSettingsPane. Awaiting LaunchServices held the launcher visible
+  // for the dispatch window (1-3s on macOS).
+
   if (appName) {
-    try {
-      const { spawn } = require('child_process');
-      const exitCode = await new Promise<number>((resolve) => {
-        const proc = spawn('open', ['-a', appName, launchTarget], { shell: false });
-        let stderr = '';
-
-        proc.stderr?.on('data', (data: Buffer) => {
-          stderr += data.toString();
-        });
-
-        proc.on('close', (code: number | null) => {
-          const resolved = code ?? 1;
-          if (resolved !== 0) {
-            console.error(`Failed to open target with ${appName}: ${launchTarget}`, stderr.trim() || `exit code ${resolved}`);
-          }
-          resolve(resolved);
-        });
-
-        proc.on('error', (err: Error) => {
-          console.error(`Failed to open target with ${appName}: ${launchTarget}`, err);
-          resolve(1);
-        });
-      });
-      return exitCode === 0;
-    } catch (error) {
-      console.error(`Failed to open target with ${appName}: ${launchTarget}`, error);
-      return false;
-    }
+    const { spawn } = require('child_process');
+    const proc = spawn('/usr/bin/open', ['-a', appName, launchTarget], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    proc.on('error', (err: Error) => {
+      console.error(`Failed to open target with ${appName}: ${launchTarget}`, err);
+    });
+    proc.unref();
+    return true;
   }
 
   if (path.isAbsolute(normalizedTarget)) {
-    try {
-      const openPathError = await shell.openPath(normalizedTarget);
-      if (openPathError) {
-        console.error(`Failed to open path: ${normalizedTarget}`, openPathError);
-        return false;
-      }
-      return true;
-    } catch (error) {
-      console.error(`Failed to open path: ${normalizedTarget}`, error);
-      return false;
-    }
+    void shell
+      .openPath(normalizedTarget)
+      .then((openPathError: string) => {
+        if (openPathError) {
+          console.error(`Failed to open path: ${normalizedTarget}`, openPathError);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error(`Failed to open path: ${normalizedTarget}`, error);
+      });
+    return true;
   }
 
-  try {
-    await shell.openExternal(externalTarget);
-    return true;
-  } catch (error) {
+  void shell.openExternal(externalTarget).catch((error: unknown) => {
     if (externalTarget !== rawTarget) {
-      try {
-        await shell.openExternal(rawTarget);
-        return true;
-      } catch {}
+      void shell.openExternal(rawTarget).catch(() => {
+        console.error(`Failed to open URL: ${rawTarget}`, error);
+      });
+      return;
     }
     console.error(`Failed to open URL: ${rawTarget}`, error);
-    return false;
-  }
+  });
+  return true;
 }
 
 async function openQuickLinkById(id: string, dynamicValues?: Record<string, string>): Promise<boolean> {
@@ -6590,12 +7233,20 @@ function createWindow(): void {
     frame: false,
     hasShadow: false,
     resizable: false,
+    minimizable: false,
+    maximizable: false,
+    closable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
     show: false,
     vibrancy: false,
     transparent: true,
     backgroundColor: '#00000000',
+    // Without this, macOS eats the first mouse-down on the panel to activate
+    // the window — so a click only registers if the window is already key.
+    // Mouse users (e.g. Mac mini, multi-monitor) hit this constantly because
+    // the cursor often sits on another display when the launcher pops in.
+    acceptFirstMouse: true,
     ...(useDarwinLauncherPanel
       ? {
           // Use AppKit's panel-backed window on macOS for launcher semantics.
@@ -6605,16 +7256,72 @@ function createWindow(): void {
         }
       : {}),
     webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
+      // Extensions (curated from Raycast store) execute inside this window's
+      // renderer. We enable Node so they can import real `node:*` built-ins
+      // (fs, crypto, child_process, stream, ...) instead of hand-rolled stubs.
+      //
+      // contextIsolation MUST be false: with it on, `contextBridge` serializes
+      // values across worlds and does NOT support classes — so real Node
+      // classes like EventEmitter lose their prototype, breaking packages
+      // like signal-exit and anything that extends Node base classes.
+      //
+      // sandbox must also be false for Node to be available at all.
+      //
+      // Other windows (settings, notes, canvas, overlays, extension store)
+      // keep contextIsolation: true — they run only our own code and don't
+      // need Node in the renderer.
+      nodeIntegration: true,
+      contextIsolation: false,
+      sandbox: false,
+      // Without this, Chromium throttles paint of the hidden launcher,
+      // so the first frame after show() is catch-up and feels sluggish.
+      backgroundThrottling: false,
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  disableWindowAnimation(mainWindow);
   mainWindow.setWindowButtonVisibility(true);
-  applyLiquidGlassToWindow(mainWindow, {
-    cornerRadius: 16,
-    fallbackVibrancy: 'under-window',
-  });
+  // Defer NSGlassEffectView attachment until the renderer's React tree has
+  // mounted (signalled via the 'renderer-ready' IPC from App.tsx's useEffect).
+  //
+  // Background: in 1.0.17, main.tsx switched from synchronous static imports
+  // to async dynamic import() chunks for memory savings. The launcher's App
+  // chunk loads asynchronously, so React mounts AFTER did-finish-load fires.
+  // applyLiquidGlassToWindow used to listen for did-finish-load and attach
+  // the glass view immediately — which meant on macOS Tahoe (private
+  // NSGlassEffectView) + hardened runtime (signed builds), the glass view
+  // got inserted while the WebContents view contained only the empty
+  // <div id="root">. AppKit registered the glass view in a state that
+  // suppressed mouseMoved/mouseDown delivery for the rest of the window's
+  // life. Pre-Tahoe didn't have NSGlassEffectView. Unsigned builds have
+  // looser AppKit behaviour, so they masked the bug.
+  //
+  // Waiting for 'renderer-ready' guarantees the React tree exists before
+  // glass attaches, which is the timing 1.0.16 (sync imports) had naturally.
+  let launcherGlassAttached = false;
+  const attachLauncherGlass = () => {
+    if (launcherGlassAttached) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    launcherGlassAttached = true;
+    applyLiquidGlassToWindow(mainWindow, {
+      cornerRadius: 16,
+      fallbackVibrancy: 'under-window',
+    });
+  };
+  const onAnyRendererReady = (event: any) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (event.sender !== mainWindow.webContents) {
+      // Different window's renderer — keep listening for the launcher's.
+      ipcMain.once('renderer-ready', onAnyRendererReady);
+      return;
+    }
+    attachLauncherGlass();
+  };
+  ipcMain.once('renderer-ready', onAnyRendererReady);
+  // Safety fallback: if renderer-ready never arrives (renderer crash, route
+  // change, etc.) attach glass after 5s anyway so we don't ship a glass-less
+  // launcher in edge cases.
+  setTimeout(attachLauncherGlass, 5000);
 
   // Allow renderer getUserMedia requests so Chromium can surface native prompts.
   mainWindow.webContents.session.setPermissionRequestHandler((_wc: any, permission: any, callback: any) => {
@@ -6732,6 +7439,8 @@ function createWindow(): void {
     const detachedPopupName = resolveDetachedPopupName(details);
     if (!detachedPopupName) return;
 
+    disableWindowAnimation(childWindow);
+
     const hideWindowButtons = () => {
       if (process.platform !== 'darwin') return;
       try {
@@ -6782,6 +7491,11 @@ function createWindow(): void {
   // The dock is hidden later in openLauncherFromUserEntry() after the window
   // is confirmed loaded, or deferred until onboarding completes for fresh installs.
 
+  // Prevent Chromium from throttling JS timers/execution when the window is
+  // hidden. Without this, executeJavaScript on the hidden renderer (no-view
+  // hotkey dispatch) can stall for 1–2 seconds.
+  mainWindow.webContents.setBackgroundThrottling(false);
+
   loadWindowUrl(mainWindow, '/');
 
   mainWindow.webContents.once('did-finish-load', () => {
@@ -6802,12 +7516,22 @@ function createWindow(): void {
       isVisible &&
       !suppressBlurHide &&
       oauthBlurHideSuppressionDepth === 0 &&
+      !isWhisperOverlayActiveOrOpening() &&
       launcherMode !== 'whisper' &&
       launcherMode !== 'speak' &&
       launcherMode !== 'onboarding'
     ) {
       hideWindow();
     }
+  });
+
+  // Persist the window position whenever it is moved in default mode so we
+  // can restore it on the next open.
+  mainWindow.on('moved', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (launcherMode !== 'default') return;
+    const [x, y] = mainWindow.getPosition();
+    saveWindowState({ x, y });
   });
 
   mainWindow.on('closed', () => {
@@ -6972,10 +7696,11 @@ function computePromptWindowBounds(
 }
 
 function getDefaultPromptWindowBounds(): { x: number; y: number; width: number; height: number } {
-  const area = screen.getPrimaryDisplay().workArea;
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display?.workArea || screen.getPrimaryDisplay().workArea;
   return {
     x: area.x + Math.floor((area.width - CURSOR_PROMPT_WINDOW_WIDTH) / 2),
-    y: area.y + Math.floor(area.height * 0.28),
+    y: area.y + Math.floor((area.height - CURSOR_PROMPT_WINDOW_HEIGHT) / 2),
     width: CURSOR_PROMPT_WINDOW_WIDTH,
     height: CURSOR_PROMPT_WINDOW_HEIGHT,
   };
@@ -6983,6 +7708,7 @@ function getDefaultPromptWindowBounds(): { x: number; y: number; width: number; 
 
 function createPromptWindow(initialBounds?: { x: number; y: number; width: number; height: number }): void {
   if (promptWindow && !promptWindow.isDestroyed()) return;
+  promptRendererReady = false;
   const useNativeLiquidGlass = shouldUseNativeLiquidGlass();
   const bounds = initialBounds || getDefaultPromptWindowBounds();
   promptWindow = new BrowserWindow({
@@ -7008,6 +7734,7 @@ function createPromptWindow(initialBounds?: { x: number; y: number; width: numbe
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  disableWindowAnimation(promptWindow);
   if (process.platform === 'darwin') {
     try { promptWindow.setWindowButtonVisibility(false); } catch {}
   }
@@ -7017,12 +7744,29 @@ function createPromptWindow(initialBounds?: { x: number; y: number; width: numbe
   });
   promptWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   loadWindowUrl(promptWindow, '/prompt');
-  promptWindow.on('blur', () => {
-    hidePromptWindow();
-  });
   promptWindow.on('closed', () => {
     promptWindow = null;
+    promptRendererReady = false;
+    pendingPromptWindowShown = null;
   });
+
+  // Defer any queued window-shown until the React app has mounted.
+  // 'did-finish-load' fires before React mounts (dynamic import chunks), so we
+  // wait for the explicit 'renderer-ready' signal from PromptApp instead.
+  const capturedWindow = promptWindow;
+  const onPromptRendererReady = (event: Electron.IpcMainEvent) => {
+    if (!capturedWindow || capturedWindow.isDestroyed()) return;
+    if (event.sender !== capturedWindow.webContents) {
+      ipcMain.once('renderer-ready', onPromptRendererReady);
+      return;
+    }
+    promptRendererReady = true;
+    if (pendingPromptWindowShown) {
+      capturedWindow.webContents.send('window-shown', pendingPromptWindowShown);
+      pendingPromptWindowShown = null;
+    }
+  };
+  ipcMain.once('renderer-ready', onPromptRendererReady);
 }
 
 function schedulePromptWindowPrewarm(): void {
@@ -7043,17 +7787,21 @@ function showPromptWindow(
     createPromptWindow(getDefaultPromptWindowBounds());
   }
   if (!promptWindow) return;
-  const bounds = computePromptWindowBounds(preCapturedCaretRect, preCapturedInputRect);
+  const bounds = getDefaultPromptWindowBounds();
   promptWindow.setBounds(bounds);
   promptWindow.show();
   promptWindow.focus();
   promptWindow.moveTop();
   promptWindow.webContents.focus();
   const selectedTextSnapshot = String(getRecentSelectionSnapshot() || lastCursorPromptSelection || '').trim();
-  promptWindow.webContents.send('window-shown', {
-    mode: 'prompt',
-    selectedTextSnapshot,
-  });
+  const payload = { mode: 'prompt', selectedTextSnapshot };
+  if (promptRendererReady) {
+    promptWindow.webContents.send('window-shown', payload);
+  } else {
+    // Renderer hasn't mounted yet (first open) — the createPromptWindow
+    // ipcMain.once('renderer-ready') handler will deliver this once PromptApp mounts.
+    pendingPromptWindowShown = payload;
+  }
 }
 
 function hidePromptWindow(): void {
@@ -7081,7 +7829,13 @@ function getLauncherSize(mode: LauncherMode) {
   if (mode === 'onboarding') {
     return { width: ONBOARDING_WINDOW_WIDTH, height: ONBOARDING_WINDOW_HEIGHT, topFactor: 0.12 };
   }
-  return { width: DEFAULT_WINDOW_WIDTH, height: DEFAULT_WINDOW_HEIGHT, topFactor: 0.2 };
+  const viewMode = loadSettings().launcherViewMode || 'expanded';
+  const height = viewMode === 'compact' ? COMPACT_WINDOW_HEIGHT : DEFAULT_WINDOW_HEIGHT;
+  return { width: DEFAULT_WINDOW_WIDTH, height, topFactor: 0.2 };
+}
+
+function getLauncherSizeForCompact(): { width: number; height: number; topFactor: number } {
+  return { width: DEFAULT_WINDOW_WIDTH, height: COMPACT_WINDOW_HEIGHT, topFactor: 0.2 };
 }
 
 function getTypingCaretRect():
@@ -7271,6 +8025,27 @@ function applyLauncherBounds(mode: LauncherMode): void {
   } = currentDisplay.workArea;
   const size = getLauncherSize(mode);
   const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+  // In default mode, restore the last saved position — but only if the cursor
+  // is on the same display as the saved position. Otherwise the launcher would
+  // open on the "wrong" monitor (the one where it was last used), even when
+  // the user has moved to a different display.
+  if (mode === 'default') {
+    const saved = loadWindowState();
+    if (saved) {
+      const savedCenter = { x: saved.x + Math.floor(size.width / 2), y: saved.y + Math.floor(size.height / 2) };
+      const savedDisplay = screen.getDisplayNearestPoint(savedCenter);
+      const cursorDisplay = screen.getDisplayNearestPoint(cursorPoint);
+      if (savedDisplay.id === cursorDisplay.id) {
+        const wa = savedDisplay.workArea;
+        const clampedX = clamp(saved.x, wa.x, wa.x + wa.width - size.width);
+        const clampedY = clamp(saved.y, wa.y, wa.y + wa.height - size.height);
+        mainWindow.setBounds({ x: clampedX, y: clampedY, width: size.width, height: size.height });
+        return;
+      }
+    }
+  }
+
   const promptFallbackX = displayX + Math.floor((displayWidth - size.width) / 2);
   const promptFallbackY = displayY + Math.floor(displayHeight * 0.32);
   const windowX = mode === 'speak'
@@ -7327,12 +8102,13 @@ function setLauncherMode(mode: LauncherMode): void {
       if (mode === 'onboarding') {
         // Make onboarding behave like a normal app window — visible in dock and
         // Mission Control, doesn't drop behind other windows.
+        enterRegularMacActivationPolicy();
+        try { mainWindow.setClosable(true); } catch {}
+        try { mainWindow.setMinimizable(true); } catch {}
+        try { mainWindow.setMaximizable(true); } catch {}
         mainWindow.setAlwaysOnTop(false);
         mainWindow.setSkipTaskbar(false);
         try { mainWindow.setHiddenInMissionControl(false); } catch {}
-        if (process.platform === 'darwin') {
-          try { app.dock.show(); } catch {}
-        }
         mainWindow.setVisibleOnAllWorkspaces(false, {
           visibleOnFullScreen: true,
           skipTransformProcessType: process.platform === 'darwin',
@@ -7340,10 +8116,11 @@ function setLauncherMode(mode: LauncherMode): void {
       } else {
         mainWindow.setAlwaysOnTop(true);
         mainWindow.setSkipTaskbar(true);
+        try { mainWindow.setClosable(false); } catch {}
+        try { mainWindow.setMinimizable(false); } catch {}
+        try { mainWindow.setMaximizable(false); } catch {}
         try { mainWindow.setHiddenInMissionControl(true); } catch {}
-        if (process.platform === 'darwin' && prevMode === 'onboarding') {
-          try { app.dock.hide(); } catch {}
-        }
+        restoreOverlayMacActivationPolicyIfPossible();
         setLauncherOverlayTopmost(true);
       }
     } catch {}
@@ -7403,6 +8180,10 @@ function resolveLauncherEntryTargetWindowId(): string | null {
   if (normalized) return normalized;
   const fallback = String(windowManagementTargetWindowId || '').trim();
   return fallback || null;
+}
+
+function resolveLauncherEntryTargetWorkArea(): { x: number; y: number; width: number; height: number } | null {
+  return cloneWorkArea(launcherEntryWindowManagementTargetWorkArea ?? windowManagementTargetWorkArea);
 }
 
 function captureFrontmostAppContext(): void {
@@ -7497,11 +8278,23 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
   if (launcherMode !== 'onboarding') {
     captureFrontmostAppContext();
     launcherEntryFrontmostApp = cloneFrontmostAppContext(lastFrontmostApp);
-    await captureWindowManagementTargetWindow();
-    launcherEntryWindowManagementTargetWindowId = String(windowManagementTargetWindowId || '').trim() || null;
-    launcherEntryWindowManagementTargetWorkArea = cloneWorkArea(windowManagementTargetWorkArea);
-    // Keep launcher open path fast: avoid clipboard fallback (synthetic Cmd+C)
-    // on window open because it can interfere with immediate typing.
+    // Capture is a worker IPC (~50 ms) — don't await it. WM consumers
+    // already fall back to windowManagementTargetWindowId, which the
+    // capture sets as a side-effect, so a racing consumer still sees data.
+    launcherEntryWindowManagementTargetWindowId = null;
+    launcherEntryWindowManagementTargetWorkArea = null;
+    void captureWindowManagementTargetWindow()
+      .then(() => {
+        launcherEntryWindowManagementTargetWindowId = String(windowManagementTargetWindowId || '').trim() || null;
+        launcherEntryWindowManagementTargetWorkArea = cloneWorkArea(windowManagementTargetWorkArea);
+      })
+      .catch(() => {});
+    // AX-only selection capture on window open: avoid clipboard fallback
+    // (synthetic Cmd+C) here because the promise is not awaited — by the
+    // time the AX check completes (~50 ms osascript spawn), mainWindow.show()
+    // has already run and the launcher is frontmost.  The synthetic Cmd+C
+    // would therefore land in the launcher's own input rather than the
+    // original app, interfering with immediate typing.
     selectionSnapshotPromise = captureSelectionSnapshotBeforeShow({ allowClipboardFallback: false });
   } else {
     launcherEntryFrontmostApp = null;
@@ -7521,8 +8314,32 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
     selectedTextSnapshot: initialSelectionSnapshot,
   };
 
-  // Notify renderer before showing the window so it can finalize view state
-  // (including contextual command list) before first paint.
+  // Show first, notify second. The window-shown handler does non-trivial
+  // work (state resets, focus, optional fetch); running it before show()
+  // makes the user wait for that work before seeing the window.
+  if (shouldActivateLauncherWindow) {
+    try {
+      app.focus({ steal: true });
+    } catch {}
+  }
+  mainWindow.show();
+  if (shouldActivateLauncherWindow) {
+    mainWindow.focus();
+  } else {
+    // On macOS Tahoe (26), NSPanel.show() no longer implicitly makes the
+    // panel the key window. Without being key, the panel does not receive
+    // mouseMoved/mouseDown events (no hover, no clicks) — though scroll and
+    // webContents-focused keyboard input still work, which matches the
+    // reported symptom. Calling focus() on a non-activating panel triggers
+    // makeKeyAndOrderFront without activating the app, so the previously
+    // frontmost app stays "active" for selection capture.
+    try { mainWindow.focus(); } catch {}
+    try { (mainWindow as any).focusOnWebView?.(); } catch {}
+    try { mainWindow.webContents.focus(); } catch {}
+  }
+  mainWindow.moveTop();
+  isVisible = true;
+
   mainWindow.webContents.send('window-shown', windowShownPayload);
 
   if (selectionSnapshotPromise) {
@@ -7534,21 +8351,6 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
       mainWindow.webContents.send('selection-snapshot-updated', { selectedTextSnapshot: nextSnapshot });
     });
   }
-
-  if (shouldActivateLauncherWindow) {
-    try {
-      app.focus({ steal: true });
-    } catch {}
-  }
-  mainWindow.show();
-  if (shouldActivateLauncherWindow) {
-    mainWindow.focus();
-  } else {
-    try { (mainWindow as any).focusOnWebView?.(); } catch {}
-    try { mainWindow.webContents.focus(); } catch {}
-  }
-  mainWindow.moveTop();
-  isVisible = true;
 
   // Now that the window is visible on the current Space, confine it here
   // and re-sync AeroSpace (the pre-show move may have been a no-op for
@@ -7575,6 +8377,9 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
       if (shouldActivateLauncherWindow) {
         mainWindow.focus();
       } else {
+        // See note above: required on macOS Tahoe to make the NSPanel key
+        // so it receives mouse-moved/mouse-down events.
+        try { mainWindow.focus(); } catch {}
         try { (mainWindow as any).focusOnWebView?.(); } catch {}
         try { mainWindow.webContents.focus(); } catch {}
       }
@@ -7612,6 +8417,11 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
 
 function hideWindow(): void {
   if (!mainWindow) return;
+  // Already hidden — calling mainWindow.hide() again on macOS triggers an
+  // NSWindow orderOut which can shift focus to another SuperCmd window (e.g.
+  // the settings window), causing paste/keystroke events to land there instead
+  // of the user's active app.
+  if (!isVisible) return;
   emitWindowHidden();
   mainWindow.hide();
   isVisible = false;
@@ -7657,6 +8467,13 @@ function openPreferredDevTools(): boolean {
 }
 
 async function activateLastFrontmostApp(): Promise<boolean> {
+  if (isWhisperSuperCmdTextTargetWindow(whisperSuperCmdTextTargetWindow)) {
+    try {
+      whisperSuperCmdTextTargetWindow.show();
+      whisperSuperCmdTextTargetWindow.focus();
+      return true;
+    } catch {}
+  }
   if (!lastFrontmostApp) return false;
   const { execFile } = require('child_process');
   const { promisify } = require('util');
@@ -7728,27 +8545,55 @@ async function pasteTextToActiveApp(text: string): Promise<boolean> {
   const value = String(text || '');
   if (!value) return false;
 
-  const { execFile } = require('child_process');
-  const { promisify } = require('util');
-  const execFileAsync = promisify(execFile);
-  const previousClipboardText = systemClipboard.readText();
+  // Signal caller as soon as the paste keystroke fires, but hold the queue
+  // slot until the clipboard is restored so concurrent ops don't read our
+  // temporary value as their "original".
+  let signalCaller!: (v: boolean) => void;
+  const callerPromise = new Promise<boolean>((res) => { signalCaller = res; });
 
-  try {
-    systemClipboard.writeText(value);
-    await execFileAsync('osascript', [
-      '-e',
-      'tell application "System Events" to keystroke "v" using command down',
-    ]);
-    setTimeout(() => {
-      try {
-        systemClipboard.writeText(previousClipboardText);
-      } catch {}
-    }, 250);
-    return true;
-  } catch (error) {
-    console.error('pasteTextToActiveApp failed:', error);
-    return false;
-  }
+  clipboardOpQueue = clipboardOpQueue.then(async () => {
+    const { execFile } = require('child_process');
+    const { promisify } = require('util');
+    const execFileAsync = promisify(execFile);
+
+    try {
+      const previousClipboardText = systemClipboard.readText();
+      systemClipboard.writeText(value);
+
+      // Fast path: in-process native addon — activates app, polls until
+      // frontmost, posts ⌘V via CGEvent. Same addon used by clipboard paste.
+      const target = lastFrontmostApp?.bundleId || lastFrontmostApp?.name;
+      if (target) {
+        try {
+          const nativeHelpersAddon = getNativeHelpersAddon();
+          const ok = nativeHelpersAddon?.activateAndPaste?.(target);
+          if (ok) {
+            signalCaller(true);
+            await new Promise<void>((resolve) => setTimeout(resolve, 250));
+            try { systemClipboard.writeText(previousClipboardText); } catch {}
+            return;
+          }
+        } catch (e: any) {
+          console.warn('[pasteTextToActiveApp] native-helpers addon failed:', e?.message);
+        }
+      }
+
+      // Slow fallback: osascript
+      await execFileAsync('osascript', [
+        '-e',
+        'tell application "System Events" to keystroke "v" using command down',
+      ]);
+      signalCaller(true);
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+      try { systemClipboard.writeText(previousClipboardText); } catch {}
+    } catch (error) {
+      console.error('pasteTextToActiveApp failed:', error);
+      signalCaller(false);
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+  }).catch(() => {});
+
+  return callerPromise;
 }
 
 async function replaceTextDirectly(previousText: string, nextText: string): Promise<boolean> {
@@ -7761,11 +8606,13 @@ async function replaceTextDirectly(previousText: string, nextText: string): Prom
 
   try {
     if (prev.length > 0) {
+      // The original selection is still active in the target app, so a single
+      // backspace (or simply typing) replaces the entire selection.  Sending
+      // prev.length backspaces is wrong: the first one deletes the whole
+      // selection and every subsequent one eats a character *before* it.
       const script = `
         tell application "System Events"
-          repeat ${prev.length} times
-            key code 51
-          end repeat
+          key code 51
         end tell
       `;
       await execFileAsync('osascript', ['-e', script]);
@@ -7780,6 +8627,46 @@ async function replaceTextDirectly(previousText: string, nextText: string): Prom
   }
 }
 
+/**
+ * After a paste, select the just-pasted text via AX so the next
+ * replaceTextViaBackspaceAndPaste call can clear it with a backspace.
+ * Falls back silently if the app doesn't support AXSelectedTextRange writes.
+ */
+async function selectJustPastedText(textLength: number): Promise<void> {
+  if (textLength <= 0) return;
+  const { execFile } = require('child_process');
+  const { promisify } = require('util');
+  const execFileAsync = promisify(execFile);
+  const script = `
+    ObjC.import('ApplicationServices');
+    function copyAttr(el, attr) {
+      const ref = Ref();
+      return $.AXUIElementCopyAttributeValue(el, attr, ref) === 0 ? ref[0] : null;
+    }
+    function decodeCFRange(axVal) {
+      const ref = Ref(); ref[0] = $.CFRangeMake(0,0);
+      $.AXValueGetValue(axVal, $.kAXValueCFRangeType, ref);
+      return ref[0];
+    }
+    (function() {
+      const sys = $.AXUIElementCreateSystemWide();
+      const el = copyAttr(sys, $.kAXFocusedUIElementAttribute);
+      if (!el) return;
+      const rangeVal = copyAttr(el, $.kAXSelectedTextRangeAttribute);
+      if (!rangeVal) return;
+      const cur = decodeCFRange(rangeVal);
+      const endPos = cur.location + cur.length;
+      const start = endPos - ${textLength};
+      if (start < 0) return;
+      const newRange = $.AXValueCreate($.kAXValueCFRangeType, $.CFRangeMake(start, ${textLength}));
+      $.AXUIElementSetAttributeValue(el, $.kAXSelectedTextRangeAttribute, newRange);
+    })();
+  `;
+  try {
+    await execFileAsync('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], { timeout: 2000 });
+  } catch {}
+}
+
 async function replaceTextViaBackspaceAndPaste(previousText: string, nextText: string): Promise<boolean> {
   const prev = String(previousText || '');
   const next = String(nextText || '');
@@ -7790,11 +8677,11 @@ async function replaceTextViaBackspaceAndPaste(previousText: string, nextText: s
 
   try {
     if (prev.length > 0) {
+      // Single backspace to clear the active selection — see replaceTextDirectly
+      // for rationale.
       const script = `
         tell application "System Events"
-          repeat ${prev.length} times
-            key code 51
-          end repeat
+          key code 51
         end tell
       `;
       await execFileAsync('osascript', ['-e', script]);
@@ -7829,10 +8716,22 @@ async function hideAndPaste(): Promise<boolean> {
   const { promisify } = require('util');
   const execFileAsync = promisify(execFile);
 
-  // Re-activate the previous frontmost app explicitly
-  await activateLastFrontmostApp();
+  // Fast path: in-process native addon — activates app, polls until
+  // frontmost, posts ⌘V via CGEvent. Runs inside Electron so it
+  // inherits accessibility permissions. Zero process spawn overhead.
+  const target = lastFrontmostApp?.bundleId || lastFrontmostApp?.name;
+  if (target) {
+    try {
+      const nativeHelpersAddon = getNativeHelpersAddon();
+      const ok = nativeHelpersAddon?.activateAndPaste?.(target);
+      if (ok) return true;
+    } catch (e: any) {
+      console.warn('[hideAndPaste] native-helpers addon failed:', e?.message);
+    }
+  }
 
-  // Small delay to let the target app gain focus
+  // Slow fallback: osascript for both activation and keystroke
+  await activateLastFrontmostApp();
   await new Promise(resolve => setTimeout(resolve, 200));
 
   try {
@@ -7840,7 +8739,6 @@ async function hideAndPaste(): Promise<boolean> {
     return true;
   } catch (e) {
     console.error('Failed to simulate paste keystroke:', e);
-    // Fallback with extra delay
     try {
       await new Promise(resolve => setTimeout(resolve, 200));
       await execFileAsync('osascript', ['-e', `
@@ -7858,47 +8756,52 @@ async function hideAndPaste(): Promise<boolean> {
 }
 
 async function expandSnippetKeywordInPlace(keyword: string, delimiter: string): Promise<void> {
-  try {
-    console.log(`[SnippetExpander] trigger keyword="${keyword}" delimiter="${delimiter}"`);
-    const snippet = getSnippetByKeyword(keyword);
-    if (!snippet) return;
+  // Enqueue so this never races with pasteTextToActiveApp or another concurrent expansion.
+  clipboardOpQueue = clipboardOpQueue.then(async () => {
+    try {
+      console.log(`[SnippetExpander] trigger keyword="${keyword}" delimiter="${delimiter}"`);
+      const snippet = getSnippetByKeyword(keyword);
+      if (!snippet) return;
 
-    const resolved = renderSnippetById(snippet.id, {});
-    if (!resolved) return;
+      const resolved = renderSnippetById(snippet.id, {});
+      if (!resolved) return;
 
-    const fullText = `${resolved}${delimiter || ''}`;
-    const backspaceCount = keyword.length + (delimiter ? 1 : 0);
-    if (backspaceCount <= 0) return;
+      const fullText = `${resolved}${delimiter || ''}`;
+      const backspaceCount = keyword.length + (delimiter ? 1 : 0);
+      if (backspaceCount <= 0) return;
 
-    const originalClipboard = electron.clipboard.readText();
-    electron.clipboard.writeText(fullText);
+      const originalClipboard = electron.clipboard.readText();
+      electron.clipboard.writeText(fullText);
 
-    const { execFile } = require('child_process');
-    const { promisify } = require('util');
-    const execFileAsync = promisify(execFile);
+      const { execFile } = require('child_process');
+      const { promisify } = require('util');
+      const execFileAsync = promisify(execFile);
 
-    const script = `
-      tell application "System Events"
-        repeat ${backspaceCount} times
-          key code 51
-        end repeat
-        keystroke "v" using command down
-      end tell
-    `;
+      const script = `
+        tell application "System Events"
+          repeat ${backspaceCount} times
+            key code 51
+          end repeat
+          keystroke "v" using command down
+        end tell
+      `;
 
-    await execFileAsync('osascript', ['-e', script]);
+      await execFileAsync('osascript', ['-e', script]);
 
-    // Restore user's clipboard after insertion.
-    setTimeout(() => {
+      // Restore user's clipboard. Await so the queue slot isn't released until
+      // the clipboard is back to normal (prevents the next op from saving our
+      // temporary snippet content as its "original").
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
       electron.clipboard.writeText(originalClipboard);
-    }, 80);
-  } catch (error) {
-    console.error('[SnippetExpander] Failed to expand keyword:', error);
-  }
+    } catch (error) {
+      console.error('[SnippetExpander] Failed to expand keyword:', error);
+    }
+  }).catch(() => {});
 }
 
 function stopSnippetExpander(): void {
   if (!snippetExpanderProcess) return;
+  snippetExpanderIntentionalKills.add(snippetExpanderProcess);
   try {
     snippetExpanderProcess.kill();
   } catch {}
@@ -7963,9 +8866,512 @@ function refreshSnippetExpander(): void {
     if (text) console.warn('[SnippetExpander]', text);
   });
 
+  const spawnedProcess = snippetExpanderProcess;
   snippetExpanderProcess.on('exit', () => {
-    snippetExpanderProcess = null;
-    snippetExpanderStdoutBuffer = '';
+    if (snippetExpanderProcess === spawnedProcess) {
+      snippetExpanderProcess = null;
+      snippetExpanderStdoutBuffer = '';
+    }
+    if (!snippetExpanderIntentionalKills.has(spawnedProcess)) {
+      // Unexpected exit (crash, OS signal, etc.) — restart after a short delay.
+      console.warn('[SnippetExpander] Process exited unexpectedly, restarting...');
+      setTimeout(() => refreshSnippetExpander(), 500);
+    }
+  });
+}
+
+// ─── Emoji Trigger (system-wide `:name` popup) ─────────────────────
+
+type EmojiEntry = { name: string; emoji: string; keywords: string[] };
+
+// Loaded lazily from src/main/emoji-data.json (bundled at build time).
+// File format: [{ n: name, e: emoji, k: [keywords] }, ...]
+let emojiTriggerData: EmojiEntry[] | null = null;
+
+function loadEmojiTriggerData(): EmojiEntry[] {
+  if (emojiTriggerData) return emojiTriggerData;
+  try {
+    const fs = require('fs');
+    const candidates = [
+      path.join(__dirname, 'emoji-data.json'),           // dist/main/emoji-data.json (if bundled there)
+      path.join(__dirname, '..', '..', 'src', 'main', 'emoji-data.json'), // dev: read from source
+      path.join(app.getAppPath(), 'src', 'main', 'emoji-data.json'),
+    ];
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Array<{ n: string; e: string; k?: string[] }>;
+        emojiTriggerData = raw.map((r) => ({
+          name: r.n,
+          emoji: r.e,
+          keywords: r.k || [],
+        }));
+        return emojiTriggerData;
+      }
+    }
+    console.warn('[EmojiTrigger] emoji-data.json not found in any candidate path');
+  } catch (e) {
+    console.warn('[EmojiTrigger] Failed to load emoji-data.json:', e);
+  }
+  emojiTriggerData = [];
+  return emojiTriggerData;
+}
+
+function searchEmojiTriggerMatches(query: string, max = 8): EmojiEntry[] {
+  if (!query) return [];
+  const q = query.toLowerCase();
+  const data = loadEmojiTriggerData();
+  const nameExact: EmojiEntry[] = [];
+  const namePrefix: EmojiEntry[] = [];
+  const keywordPrefix: EmojiEntry[] = [];
+  const substring: EmojiEntry[] = [];
+  for (const e of data) {
+    if (e.name === q) {
+      nameExact.push(e);
+    } else if (e.name.startsWith(q)) {
+      namePrefix.push(e);
+    } else if (e.keywords.some((k) => k.startsWith(q))) {
+      keywordPrefix.push(e);
+    } else if (e.name.includes(q) || e.keywords.some((k) => k.includes(q))) {
+      substring.push(e);
+    }
+  }
+  return [...nameExact, ...namePrefix, ...keywordPrefix, ...substring].slice(0, max);
+}
+
+function getEmojiPickerWindowHtml(): string {
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: transparent; overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      user-select: none; pointer-events: none; color: rgba(255,255,255,0.92);
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      display: flex;
+      align-items: flex-start;
+    }
+    #wrap {
+      display: inline-flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+    }
+    #card {
+      display: inline-flex; align-items: center; gap: 2px;
+      padding: 5px 6px;
+      border-radius: 12px;
+      background: rgba(18,18,20,0.86);
+      border: 1px solid rgba(255,255,255,0.10);
+      box-shadow: 0 6px 22px rgba(0,0,0,0.38);
+      backdrop-filter: blur(24px) saturate(160%);
+      -webkit-backdrop-filter: blur(24px) saturate(160%);
+    }
+    .item {
+      display: flex; align-items: center; justify-content: center;
+      width: 36px; height: 36px;
+      border-radius: 8px;
+      font-size: 26px; line-height: 1;
+      transition: background 60ms ease, transform 60ms ease;
+    }
+    .item.sel { background: rgba(86, 140, 255, 0.95); transform: scale(1.06); }
+    #hint {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 18px;
+      padding: 0 7px;
+      border-radius: 8px;
+      background: rgba(18,18,20,0.78);
+      border: 1px solid rgba(255,255,255,0.13);
+      color: rgba(255,255,255,0.76);
+      font-size: 10.5px;
+      font-weight: 500;
+      letter-spacing: 0;
+      line-height: 18px;
+      box-shadow: 0 5px 16px rgba(0,0,0,0.30);
+    }
+    kbd {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 14px;
+      padding: 0 4px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.14);
+      color: rgba(255,255,255,0.88);
+      font: inherit;
+      font-size: 9px;
+      line-height: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="card"></div>
+    <div id="hint">Press <kbd>Esc</kbd> to close</div>
+  </div>
+  <script>
+    const card = document.getElementById('card');
+    function render(matches, selIdx) {
+      if (!matches || matches.length === 0) { card.innerHTML = ''; return; }
+      let html = '';
+      for (let i = 0; i < matches.length; i++) {
+        html += '<div class="item' + (i === selIdx ? ' sel' : '') + '">' + matches[i].emoji + '</div>';
+      }
+      card.innerHTML = html;
+    }
+    window.__render = render;
+  </script>
+</body>
+</html>`;
+}
+
+async function ensureEmojiPickerWindow(): Promise<InstanceType<typeof BrowserWindow> | null> {
+  if (emojiPickerWindow && !emojiPickerWindow.isDestroyed()) return emojiPickerWindow;
+  emojiPickerWindow = new BrowserWindow({
+    width: 340,
+    height: 80,
+    // Explicit x/y so the window does NOT default to screen-center; we'll
+    // setBounds to the real position before showing.
+    x: 0,
+    y: 0,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    hasShadow: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    show: false,
+    acceptFirstMouse: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  disableWindowAnimation(emojiPickerWindow);
+  try { emojiPickerWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch {}
+  try { emojiPickerWindow.setIgnoreMouseEvents(true, { forward: false }); } catch {}
+  try { emojiPickerWindow.setAlwaysOnTop(true, 'pop-up-menu'); } catch {}
+  try { emojiPickerWindow.webContents.setBackgroundThrottling(false); } catch {}
+  if (process.platform === 'darwin') {
+    try { emojiPickerWindow.setWindowButtonVisibility(false); } catch {}
+  }
+  emojiPickerWindow.on('closed', () => { emojiPickerWindow = null; });
+  try {
+    await emojiPickerWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getEmojiPickerWindowHtml())}`);
+  } catch (error) {
+    console.warn('[EmojiTrigger] Failed to load picker window:', error);
+    try { emojiPickerWindow.close(); } catch {}
+    emojiPickerWindow = null;
+    return null;
+  }
+  return emojiPickerWindow;
+}
+
+type CaretRect = { x: number; y: number; w: number; h: number };
+
+function computeEmojiPickerPosition(
+  winW: number,
+  winH: number,
+  caret: CaretRect | null
+): { x: number; y: number } {
+  let anchorX: number;
+  let anchorY: number;
+  let caretTop: number;
+  if (caret) {
+    anchorX = caret.x;
+    anchorY = caret.y + caret.h + 2;
+    caretTop = caret.y;
+  } else {
+    const cursor = screen.getCursorScreenPoint();
+    anchorX = cursor.x + 4;
+    anchorY = cursor.y + 18;
+    caretTop = cursor.y;
+  }
+  const display = screen.getDisplayNearestPoint({ x: anchorX, y: anchorY });
+  const bounds = display.workArea;
+  let x = anchorX;
+  let y = anchorY;
+  if (x + winW > bounds.x + bounds.width) x = bounds.x + bounds.width - winW - 4;
+  if (x < bounds.x) x = bounds.x + 4;
+  // If the popup would extend below the screen, flip above the caret.
+  if (y + winH > bounds.y + bounds.height) y = caretTop - winH - 2;
+  if (y < bounds.y) y = bounds.y + 4;
+  return { x: Math.round(x), y: Math.round(y) };
+}
+
+function positionEmojiPickerAtCaret(
+  win: InstanceType<typeof BrowserWindow>,
+  caret: CaretRect | null
+): void {
+  try {
+    const [w, h] = win.getSize();
+    const { x, y } = computeEmojiPickerPosition(w, h, caret);
+    // setBounds is more reliable than setPosition on hidden windows in macOS.
+    win.setBounds({ x, y, width: w, height: h });
+  } catch (err) {
+    console.warn('[EmojiTrigger] setBounds failed:', err);
+  }
+}
+
+function isEmojiPickerExcludedForApp(bundleId: string): boolean {
+  const normalized = bundleId.trim().toLowerCase();
+  if (!normalized) return false;
+  const excluded = loadSettings().emojiPickerExcludedAppBundleIds || [];
+  for (const entry of excluded) {
+    if (String(entry || '').trim().toLowerCase() === normalized) return true;
+  }
+  return false;
+}
+
+async function renderEmojiPicker(query: string, caret: CaretRect | null, prefixLen: number, bundleId: string): Promise<void> {
+  if (isEmojiPickerExcludedForApp(bundleId)) {
+    // Tell the helper to leave trigger mode so subsequent keystrokes aren't
+    // tracked. We never showed the picker, so there's nothing to hide locally.
+    writeEmojiTriggerCmd({ cmd: 'dismiss' });
+    return;
+  }
+  emojiPickerCurrentQuery = query;
+  emojiPickerCurrentPrefixLen = prefixLen;
+  emojiPickerSelectedIdx = 0;
+  const matches = searchEmojiTriggerMatches(query);
+  if (matches.length === 0) {
+    hideEmojiPicker();
+    return;
+  }
+  const win = await ensureEmojiPickerWindow();
+  if (!win) return;
+  // Position BEFORE first show so there's no visible flicker at (0,0).
+  positionEmojiPickerAtCaret(win, caret);
+  const js = `window.__render(${JSON.stringify(matches)}, ${emojiPickerSelectedIdx});`;
+  try { await win.webContents.executeJavaScript(js, true); } catch {}
+  if (!win.isVisible()) {
+    try { win.showInactive(); } catch {}
+    // macOS quirk: setBounds on a hidden window sometimes does not commit.
+    // Re-apply the position after show to guarantee it lands at the caret.
+    positionEmojiPickerAtCaret(win, caret);
+  }
+  // Enable keyboard interception now that picker is visible
+  writeEmojiTriggerCmd({ cmd: 'intercept', enabled: true });
+}
+
+function updateEmojiPickerSelection(delta: number): void {
+  if (!emojiPickerWindow || emojiPickerWindow.isDestroyed() || !emojiPickerWindow.isVisible()) return;
+  const matches = searchEmojiTriggerMatches(emojiPickerCurrentQuery);
+  if (matches.length === 0) return;
+  emojiPickerSelectedIdx = (emojiPickerSelectedIdx + delta + matches.length) % matches.length;
+  const js = `window.__render(${JSON.stringify(matches)}, ${emojiPickerSelectedIdx});`;
+  try { emojiPickerWindow.webContents.executeJavaScript(js, true); } catch {}
+}
+
+function hideEmojiPicker(): void {
+  emojiPickerCurrentQuery = '';
+  emojiPickerCurrentPrefixLen = 1; // reset so a stale value never corrupts deletion count
+  emojiPickerSelectedIdx = 0;
+  writeEmojiTriggerCmd({ cmd: 'intercept', enabled: false });
+  if (emojiPickerWindow && !emojiPickerWindow.isDestroyed() && emojiPickerWindow.isVisible()) {
+    try { emojiPickerWindow.hide(); } catch {}
+  }
+}
+
+function writeEmojiTriggerCmd(cmd: Record<string, unknown>): void {
+  if (!emojiTriggerProcess || !emojiTriggerProcess.stdin) return;
+  try {
+    emojiTriggerProcess.stdin.write(JSON.stringify(cmd) + '\n');
+  } catch {}
+}
+
+async function insertEmojiReplacingTrigger(emoji: string, queryLen: number, prefixLen: number): Promise<void> {
+  // Do NOT use pasteTextToActiveApp here — it targets `lastFrontmostApp` by
+  // bundle ID, which is stale for system-wide emoji triggers (the user never
+  // opened the launcher, so lastFrontmostApp points to an old app).
+  // Instead, drive everything via a single osascript call that always targets
+  // whoever is currently frontmost. Writing the emoji to clipboard first and
+  // restoring after avoids clipboard history pollution.
+  const deleteCount = prefixLen + queryLen;
+  const { execFile } = require('child_process');
+  const { promisify } = require('util');
+  const execFileAsync = promisify(execFile);
+
+  const prevClipboard = systemClipboard.readText();
+  systemClipboard.writeText(emoji);
+  try {
+    const backspaces = deleteCount > 0
+      ? Array(deleteCount).fill('key code 51').join('\n') + '\n'
+      : '';
+    // One process spawn: backspaces + Cmd+V, both directed at the current
+    // frontmost app (no bundle ID lookup, no stale state).
+    await execFileAsync('osascript', [
+      '-e',
+      `tell application "System Events"\n${backspaces}keystroke "v" using command down\nend tell`,
+    ]);
+  } catch (error) {
+    console.warn('[EmojiTrigger] Failed to insert emoji:', error);
+  }
+  setTimeout(() => { try { systemClipboard.writeText(prevClipboard); } catch {} }, 300);
+}
+
+function handleEmojiTriggerNav(key: string): void {
+  const matches = searchEmojiTriggerMatches(emojiPickerCurrentQuery);
+  if (matches.length === 0) { hideEmojiPicker(); return; }
+  if (key === 'left') {
+    updateEmojiPickerSelection(-1);
+    return;
+  }
+  if (key === 'right') {
+    updateEmojiPickerSelection(1);
+    return;
+  }
+  if (key === 'enter' || key === 'tab') {
+    const pick = matches[emojiPickerSelectedIdx];
+    if (!pick) { hideEmojiPicker(); return; }
+    const queryLen  = emojiPickerCurrentQuery.length;
+    const prefixLen = emojiPickerCurrentPrefixLen;
+    hideEmojiPicker();
+    writeEmojiTriggerCmd({ cmd: 'dismiss' });
+    void insertEmojiReplacingTrigger(pick.emoji, queryLen, prefixLen);
+    return;
+  }
+  if (key === 'escape') {
+    hideEmojiPicker();
+    return;
+  }
+}
+
+function stopEmojiTriggerMonitor(): void {
+  if (!emojiTriggerProcess) return;
+  try { emojiTriggerProcess.kill(); } catch {}
+  emojiTriggerProcess = null;
+  emojiTriggerStdoutBuffer = '';
+  hideEmojiPicker();
+}
+
+function isEmojiPickerActive(settings: AppSettings): boolean {
+  // Disabled either via the dedicated toggle or by disabling the command entry.
+  if (!settings.emojiPickerEnabled) return false;
+  if (settings.disabledCommands?.includes('system-emoji-picker')) return false;
+  return true;
+}
+
+function refreshEmojiTriggerMonitor(): void {
+  const settings = loadSettings();
+  stopEmojiTriggerMonitor();
+  if (isEmojiPickerActive(settings)) {
+    startEmojiTriggerMonitor(settings.emojiPickerTriggerPrefix || ':');
+  }
+}
+
+function startEmojiTriggerMonitor(triggerPrefix = ':'): void {
+  if (process.platform !== 'darwin') return;
+  if (emojiTriggerProcess) return;
+
+  const binaryPath = getNativeBinaryPath('emoji-trigger-monitor');
+  const fs = require('fs');
+  if (!fs.existsSync(binaryPath)) {
+    try {
+      const { execFileSync } = require('child_process');
+      const nativeDir = path.join(app.getAppPath(), 'src', 'native');
+      execFileSync('swiftc', [
+        '-O', '-o', binaryPath,
+        path.join(nativeDir, 'emoji-trigger-monitor.swift'),
+        path.join(nativeDir, 'ax-caret-query.swift'),
+        '-framework', 'AppKit',
+        '-framework', 'ApplicationServices',
+      ]);
+    } catch (error) {
+      console.warn('[EmojiTrigger] Native helper not found and compile failed:', error);
+      return;
+    }
+  }
+
+  const { spawn } = require('child_process');
+  let proc: any;
+  try {
+    proc = spawn(binaryPath, [triggerPrefix], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: process.env.NODE_ENV === 'development'
+        ? { ...process.env, AX_CARET_DEBUG: '1' }
+        : process.env,
+    });
+  } catch (error) {
+    console.warn('[EmojiTrigger] Failed to spawn native helper:', error);
+    return;
+  }
+  emojiTriggerProcess = proc;
+  console.log('[EmojiTrigger] Started system-wide emoji monitor');
+
+  proc.stdout.on('data', (chunk: Buffer | string) => {
+    emojiTriggerStdoutBuffer += chunk.toString();
+    const lines = emojiTriggerStdoutBuffer.split('\n');
+    emojiTriggerStdoutBuffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      if (trimmed === 'emoji-trigger-monitor-ready') continue;
+      try {
+        const payload = JSON.parse(trimmed) as {
+          type?: string;
+          value?: string;
+          key?: string;
+          prefixLen?: number;
+          bundleId?: string;
+          caret?: { x: number; y: number; w: number; h: number; tier?: string };
+        };
+        if (payload.type === 'query' && typeof payload.value === 'string') {
+          const caret = payload.caret && typeof payload.caret.x === 'number'
+            ? { x: payload.caret.x, y: payload.caret.y, w: payload.caret.w, h: payload.caret.h }
+            : null;
+          const prefixLen = typeof payload.prefixLen === 'number' && payload.prefixLen > 0
+            ? payload.prefixLen
+            : 1;
+          const bundleId = typeof payload.bundleId === 'string' ? payload.bundleId : '';
+          if (process.env.NODE_ENV === 'development') {
+            // Log only metadata — never the raw query text — to avoid persisting
+            // typed input in application logs.
+            const caretDesc = caret ? `(${Math.round(caret.x)},${Math.round(caret.y)}) tier=${payload.caret?.tier ?? '?'}` : 'null';
+            console.log(`[EmojiTrigger] queryLen=${payload.value.length} prefixLen=${prefixLen} caret=${caretDesc} bundle=${bundleId || 'unknown'}`);
+          }
+          void renderEmojiPicker(payload.value, caret, prefixLen, bundleId);
+        } else if (payload.type === 'dismiss') {
+          hideEmojiPicker();
+        } else if (payload.type === 'nav' && typeof payload.key === 'string') {
+          handleEmojiTriggerNav(payload.key);
+        }
+      } catch {
+        // ignore malformed lines
+      }
+    }
+  });
+
+  proc.stderr.on('data', (chunk: Buffer | string) => {
+    const text = chunk.toString().trim();
+    if (text) console.warn('[EmojiTrigger]', text);
+  });
+
+  proc.on('exit', () => {
+    // Only clear the global reference if it still points at THIS process.
+    // Otherwise a late-firing exit handler from an old killed process would
+    // wipe the reference to the newly-spawned one, silently breaking it.
+    if (emojiTriggerProcess === proc) {
+      emojiTriggerProcess = null;
+      emojiTriggerStdoutBuffer = '';
+      hideEmojiPicker();
+    }
   });
 }
 
@@ -8016,10 +9422,9 @@ async function openLauncherFromUserEntry(): Promise<void> {
     return;
   }
 
-  // Returning user — hide dock for overlay-only behaviour, then show window.
-  if (process.platform === 'darwin') {
-    app.dock.hide();
-  }
+  // Returning user — keep the launcher as an accessory overlay so tiling WMs
+  // such as AeroSpace don't bind it to the first workspace where it appears.
+  enterOverlayMacActivationPolicy();
   setLauncherMode('default');
   await showWindow();
 }
@@ -8042,7 +9447,7 @@ async function openLauncherAndRunSystemCommand(
 
   if (isWindowManagementSystemCommand(commandId)) {
     const launcherTargetWindowId = resolveLauncherEntryTargetWindowId();
-    const launcherTargetWorkArea = cloneWorkArea(launcherEntryWindowManagementTargetWorkArea);
+    const launcherTargetWorkArea = resolveLauncherEntryTargetWorkArea();
     if (isVisible && (launcherTargetWindowId || launcherTargetWorkArea)) {
       windowManagementTargetWindowId = launcherTargetWindowId;
       windowManagementTargetWorkArea = launcherTargetWorkArea;
@@ -8052,6 +9457,10 @@ async function openLauncherAndRunSystemCommand(
   }
   if (preserveFocusWhenHidden) {
     captureFrontmostAppContext();
+  }
+  if (commandId === 'system-supercmd-whisper') {
+    captureWhisperSuperCmdTextTarget();
+    markWhisperOverlayOpening();
   }
   setLauncherMode(options?.mode || 'default');
 
@@ -8147,6 +9556,173 @@ function isAISectionDisabledForCommand(commandId: string, settings?: AppSettings
   return false;
 }
 
+async function closeAllRegularApps(): Promise<void> {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const { promisify } = require('util') as typeof import('util');
+  const execFileAsync = promisify(execFile);
+  const script = `
+    use framework "AppKit"
+
+    set excludedPid to ${process.pid}
+    set protectedBundleIds to {"com.apple.finder"}
+    set runningApps to current application's NSWorkspace's sharedWorkspace()'s runningApplications()
+
+    repeat with runningApp in runningApps
+      try
+        if (runningApp's activationPolicy() as integer) is not 0 then
+          -- Skip non-regular apps.
+        else
+          set runningPid to runningApp's processIdentifier() as integer
+          if runningPid is not excludedPid then
+            set bundleIdValue to runningApp's bundleIdentifier()
+            if bundleIdValue is missing value then
+              set bundleIdText to ""
+            else
+              set bundleIdText to bundleIdValue as text
+            end if
+            if protectedBundleIds does not contain bundleIdText then
+              runningApp's terminate()
+            end if
+          end if
+        end if
+      end try
+    end repeat
+  `;
+
+  await execFileAsync('/usr/bin/osascript', ['-l', 'AppleScript', '-e', script]);
+}
+
+async function executeSleep(): Promise<void> {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const { promisify } = require('util') as typeof import('util');
+  const execFileAsync = promisify(execFile);
+  await execFileAsync('/usr/bin/pmset', ['sleepnow']);
+}
+
+async function executeRestart(): Promise<void> {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const { promisify } = require('util') as typeof import('util');
+  const execFileAsync = promisify(execFile);
+  await execFileAsync('/usr/bin/osascript', ['-e', 'tell application "Finder" to restart']);
+}
+
+async function executeLockScreen(): Promise<void> {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const { promisify } = require('util') as typeof import('util');
+  const execFileAsync = promisify(execFile);
+  await execFileAsync('/usr/bin/osascript', [
+    '-e', 'tell application "System Events" to keystroke "q" using {command down, control down}',
+  ]);
+}
+
+async function executeLogout(): Promise<void> {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const { promisify } = require('util') as typeof import('util');
+  const execFileAsync = promisify(execFile);
+  await execFileAsync('/usr/bin/osascript', ['-e', 'tell application "Finder" to log out']);
+}
+
+async function executeToggleAppearance(): Promise<void> {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const { promisify } = require('util') as typeof import('util');
+  const execFileAsync = promisify(execFile);
+  await execFileAsync('/usr/bin/osascript', [
+    '-e', 'tell app "System Events" to tell appearance preferences to set dark mode to not dark mode',
+  ]);
+}
+
+async function executeShutdown(): Promise<void> {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const { promisify } = require('util') as typeof import('util');
+  const execFileAsync = promisify(execFile);
+  await execFileAsync('/usr/bin/osascript', ['-e', 'tell application "Finder" to shut down']);
+}
+
+async function confirmSystemAction(
+  commandId: string,
+  source: 'launcher' | 'hotkey' | 'widget'
+): Promise<boolean> {
+  const commands = await getAvailableCommands();
+  const command = commands.find((item) => item.id === commandId);
+  const title = String(command?.title || commandId).trim() || commandId;
+  const iconDataUrl = String(command?.iconDataUrl || '').trim();
+
+  let icon: Electron.NativeImage | undefined;
+  if (iconDataUrl) {
+    try {
+      const created = nativeImage.createFromDataURL(iconDataUrl);
+      if (!created.isEmpty()) {
+        icon = created.resize({ width: 64, height: 64 });
+      }
+    } catch {}
+  }
+
+  const details: Record<string, string> = {
+    'system-restart': 'Your Mac will restart. Make sure to save your work first.',
+    'system-logout': 'You will be logged out of your current session.',
+    'system-shutdown': 'Your Mac will shut down. Make sure to save your work first.',
+  };
+
+  const options: Electron.MessageBoxOptions = {
+    type: 'question',
+    buttons: [title, 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    title,
+    message: `${title}?`,
+    detail: details[commandId] || '',
+    icon,
+  };
+
+  const dialogParent = source === 'launcher' && mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : undefined;
+  const result = dialogParent
+    ? await dialog.showMessageBox(dialogParent, options)
+    : await dialog.showMessageBox(options);
+
+  return result.response === 0;
+}
+
+async function confirmQuitAllApps(source: 'launcher' | 'hotkey' | 'widget'): Promise<boolean> {
+  const commands = await getAvailableCommands();
+  const command = commands.find((item) => item.id === 'system-close-all-apps');
+  const title = String(command?.title || 'Quit All Apps').trim() || 'Quit All Apps';
+  const iconDataUrl = String(command?.iconDataUrl || '').trim();
+
+  let icon: Electron.NativeImage | undefined;
+  if (iconDataUrl) {
+    try {
+      const created = nativeImage.createFromDataURL(iconDataUrl);
+      if (!created.isEmpty()) {
+        icon = created.resize({ width: 64, height: 64 });
+      }
+    } catch {}
+  }
+
+  const options: Electron.MessageBoxOptions = {
+    type: 'question',
+    buttons: [title, 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    title,
+    message: `${title}?`,
+    detail: 'This will ask all currently running apps to quit. Finder and SuperCmd stay open.',
+    icon,
+  };
+
+  const dialogParent = source === 'launcher' && mainWindow && !mainWindow.isDestroyed()
+    ? mainWindow
+    : undefined;
+  const result = dialogParent
+    ? await dialog.showMessageBox(dialogParent, options)
+    : await dialog.showMessageBox(options);
+
+  return result.response === 0;
+}
+
 async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' | 'widget' = 'launcher'): Promise<boolean> {
   if (isAIDependentSystemCommand(commandId) && isAIDisabledInSettings()) {
     return false;
@@ -8206,7 +9782,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     lastWhisperShownAt = Date.now();
     // Opening detached whisper can race with renderer listener binding;
     // send explicit "start listening" with short retries.
-    const startDelays = [180, 340, 520];
+    const startDelays = [180, 340, 520, 800, 1200];
     startDelays.forEach((delay) => {
       setTimeout(() => {
         if (holdSeq !== whisperHoldRequestSeq) return;
@@ -8247,20 +9823,23 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     return true;
   }
   if (isCursorPromptCommand) {
-    const selectedBeforeOpenRaw = String(
-      await getSelectedTextForSpeak({ allowClipboardFallback: true }) || getRecentSelectionSnapshot() || ''
-    );
-    const selectedBeforeOpen = selectedBeforeOpenRaw.trim();
-    if (selectedBeforeOpen) {
-      rememberSelectionSnapshot(selectedBeforeOpenRaw);
-      lastCursorPromptSelection = selectedBeforeOpenRaw;
-    } else {
-      lastCursorPromptSelection = String(getRecentSelectionSnapshot() || '');
-    }
     captureFrontmostAppContext();
-    // Capture caret/input anchor before prompt focus changes active UI element.
-    const earlyCaretRect = getTypingCaretRect();
-    const earlyInputRect = earlyCaretRect ? null : getFocusedInputRect();
+
+    // For the hotkey path the original app is still frontmost — kick off the
+    // selection fetch concurrently with the sync caret captures so the two
+    // ~150 ms operations overlap.  For the launcher path the launcher itself
+    // is frontmost, so a live AX/clipboard query would target the launcher's
+    // search bar rather than the original app; in that case we rely entirely
+    // on the snapshot captured when the launcher opened.
+    const isLauncherPath = source === 'launcher';
+    const selectionPromise = isLauncherPath
+      ? Promise.resolve('')
+      : getSelectedTextForSpeak({ allowClipboardFallback: false });
+
+    // Caret/input captures must happen synchronously before focus shifts.
+    const earlyCaretRect = isLauncherPath ? null : getTypingCaretRect();
+    const earlyInputRect = earlyCaretRect ? null : (isLauncherPath ? null : getFocusedInputRect());
+
     if (source === 'hotkey' && isVisible && launcherMode === 'prompt') {
       hideWindow();
       return true;
@@ -8270,16 +9849,20 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
       hidePromptWindow();
       return true;
     }
-    // Open anchored to the captured typing caret (not mouse pointer).
+
+    // Await the selection. For the hotkey path the native AX query has
+    // typically resolved during the caret capture above, so this adds no
+    // measurable delay and does not touch the user's clipboard.
+    const selectedBeforeOpenRaw = String(
+      (await selectionPromise) || getRecentSelectionSnapshot() || lastCursorPromptSelection || ''
+    );
+    const selectedBeforeOpen = selectedBeforeOpenRaw.trim();
+    if (selectedBeforeOpen) {
+      rememberSelectionSnapshot(selectedBeforeOpenRaw);
+      lastCursorPromptSelection = selectedBeforeOpenRaw;
+    }
+    // If nothing found, keep lastCursorPromptSelection as-is (don't overwrite with empty).
     showPromptWindow(earlyCaretRect, earlyInputRect);
-    // Refresh selection in the background for AX-compatible apps.
-    void getSelectedTextForSpeak({ allowClipboardFallback: false, clipboardWaitMs: 0 })
-      .then((selectedBeforeOpen) => {
-        const selected = String(selectedBeforeOpen || '').trim();
-        if (!selected) return;
-        lastCursorPromptSelection = selected;
-      })
-      .catch(() => {});
     return true;
   }
   if (commandId === 'system-add-to-memory') {
@@ -8311,6 +9894,15 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     return true;
   }
 
+  if (commandId === 'system-reset-launcher-position') {
+    clearWindowState();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      applyLauncherBounds('default');
+    }
+    if (source === 'launcher') hideWindow();
+    return true;
+  }
+
   if (commandId === 'system-open-settings') {
     openSettingsWindow();
     if (source === 'launcher') hideWindow();
@@ -8324,6 +9916,89 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
   if (commandId === 'system-open-extensions-settings') {
     openSettingsWindow({ tab: 'extensions' });
     if (source === 'launcher') hideWindow();
+    return true;
+  }
+  if (commandId === 'system-open-extension-store') {
+    openExtensionStoreWindow();
+    if (source === 'launcher') hideWindow();
+    return true;
+  }
+  if (commandId === 'system-close-all-apps') {
+    try {
+      const confirmed = await confirmQuitAllApps(source);
+      if (!confirmed) return false;
+      await closeAllRegularApps();
+    } catch (error) {
+      console.error('Failed to close all apps:', error);
+      return false;
+    }
+    if (source === 'launcher') hideWindow();
+    return true;
+  }
+  if (commandId === 'system-sleep') {
+    if (source === 'launcher') hideWindow();
+    try {
+      await executeSleep();
+    } catch (error) {
+      console.error('Failed to sleep:', error);
+      return false;
+    }
+    return true;
+  }
+  if (commandId === 'system-restart') {
+    try {
+      const confirmed = await confirmSystemAction('system-restart', source);
+      if (!confirmed) return false;
+      if (source === 'launcher') hideWindow();
+      await executeRestart();
+    } catch (error) {
+      console.error('Failed to restart:', error);
+      return false;
+    }
+    return true;
+  }
+  if (commandId === 'system-lock-screen') {
+    if (source === 'launcher') hideWindow();
+    try {
+      await executeLockScreen();
+    } catch (error) {
+      console.error('Failed to lock screen:', error);
+      return false;
+    }
+    return true;
+  }
+  if (commandId === 'system-logout') {
+    try {
+      const confirmed = await confirmSystemAction('system-logout', source);
+      if (!confirmed) return false;
+      if (source === 'launcher') hideWindow();
+      await executeLogout();
+    } catch (error) {
+      console.error('Failed to log out:', error);
+      return false;
+    }
+    return true;
+  }
+  if (commandId === 'system-toggle-appearance') {
+    if (source === 'launcher') hideWindow();
+    try {
+      await executeToggleAppearance();
+    } catch (error) {
+      console.error('Failed to toggle appearance:', error);
+      return false;
+    }
+    return true;
+  }
+  if (commandId === 'system-shutdown') {
+    try {
+      const confirmed = await confirmSystemAction('system-shutdown', source);
+      if (!confirmed) return false;
+      if (source === 'launcher') hideWindow();
+      await executeShutdown();
+    } catch (error) {
+      console.error('Failed to shut down:', error);
+      return false;
+    }
     return true;
   }
   if (commandId === 'system-create-note') {
@@ -8388,7 +10063,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
       ? resolveLauncherEntryTargetWindowId()
       : (String(windowManagementTargetWindowId || '').trim() || null);
     const preferredTargetWorkArea = source === 'launcher' && isVisible
-      ? cloneWorkArea(launcherEntryWindowManagementTargetWorkArea)
+      ? resolveLauncherEntryTargetWorkArea()
       : cloneWorkArea(windowManagementTargetWorkArea);
     if (source === 'launcher' && isVisible) {
       windowManagementTargetWindowId = preferredTargetWindowId;
@@ -8442,7 +10117,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
       ? resolveLauncherEntryTargetWindowId()
       : (String(windowManagementTargetWindowId || '').trim() || null);
     const preferredTargetWorkArea = source === 'launcher' && isVisible
-      ? cloneWorkArea(launcherEntryWindowManagementTargetWorkArea)
+      ? resolveLauncherEntryTargetWorkArea()
       : cloneWorkArea(windowManagementTargetWorkArea);
     if (source === 'launcher' && isVisible) {
       windowManagementTargetWindowId = preferredTargetWindowId;
@@ -8506,9 +10181,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
       const created = createScriptCommandTemplate();
       invalidateScriptCommandsCache();
       invalidateCache();
-      try {
-        await shell.openPath(created.scriptPath);
-      } catch {}
+      void shell.openPath(created.scriptPath).catch(() => {});
       console.log(`[ScriptCommand] Created: ${path.basename(created.scriptPath)}`);
       if (source === 'launcher') {
         setTimeout(() => hideWindow(), 50);
@@ -8523,7 +10196,9 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
   if (commandId === 'system-open-script-commands') {
     try {
       const dir = getSuperCmdScriptCommandsDirectory();
-      await shell.openPath(dir);
+      void shell.openPath(dir).catch((error: unknown) => {
+        console.error('Failed to open script command directory:', error);
+      });
       if (source === 'launcher') {
         setTimeout(() => hideWindow(), 50);
       }
@@ -8559,7 +10234,15 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
         commandName: cmdName,
         type: 'userInitiated',
       });
-      await showWindow();
+      // For hotkey-triggered no-view commands, capture the frontmost app NOW
+      // (before the event reaches the renderer) so that any subsequent
+      // pasteText / hideAndPaste() call has a fresh lastFrontmostApp value.
+      // showWindow() captures it inside, but for silent runs we never call it.
+      if (source === 'hotkey' && bundle.mode === 'no-view') {
+        captureFrontmostAppContext();
+      } else {
+        await showWindow();
+      }
       return await dispatchRendererCustomEvent('sc-launch-extension-bundle', {
         bundle,
         launchOptions: { type: bundle.launchType || 'userInitiated' },
@@ -8586,6 +10269,19 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
       console.error(`Failed to launch script command via hotkey: ${commandId}`, error);
       return false;
     }
+  }
+
+  if (commandId === 'system-update-and-reopen') {
+    if (appUpdaterStatusSnapshot.state !== 'downloaded') {
+      void showMemoryStatusBar('error', 'No update ready to install.');
+      return false;
+    }
+    void showMemoryStatusBar('processing', 'Restarting to install update...');
+    const installed = await restartAndInstallAppUpdate();
+    if (!installed) {
+      void showMemoryStatusBar('error', 'Failed to restart for update installation.');
+    }
+    return installed;
   }
 
   if (commandId === 'system-check-for-updates') {
@@ -8618,7 +10314,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
       }
       if (appUpdaterStatusSnapshot.state === 'downloaded') {
         void showMemoryStatusBar('processing', 'Restarting to install update...');
-        const installed = restartAndInstallAppUpdate();
+        const installed = await restartAndInstallAppUpdate();
         if (installed) {
           return true;
         }
@@ -8635,10 +10331,13 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     }
   }
 
-  const success = await executeCommand(commandId);
-  if (success && source === 'launcher') {
+  // Hide up-front rather than awaiting executeCommand. App/settings paths
+  // are already fire-and-forget so this is mostly defense in depth — if a
+  // future path adds a slow await, the launcher still feels instant.
+  if (source === 'launcher') {
     setTimeout(() => hideWindow(), 50);
   }
+  const success = await executeCommand(commandId);
   return success;
 }
 
@@ -9393,6 +11092,7 @@ function registerCloseWindowShortcut(
 }
 
 function openSettingsWindow(payload?: SettingsNavigationPayload): void {
+  enterRegularMacActivationPolicy();
   if (settingsWindow) {
     if (payload) {
       settingsWindow.webContents.send('settings-tab-changed', payload);
@@ -9400,10 +11100,6 @@ function openSettingsWindow(payload?: SettingsNavigationPayload): void {
     settingsWindow.show();
     settingsWindow.focus();
     return;
-  }
-
-  if (process.platform === 'darwin') {
-    app.dock.show();
   }
 
   const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = (() => {
@@ -9444,6 +11140,7 @@ function openSettingsWindow(payload?: SettingsNavigationPayload): void {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  disableWindowAnimation(settingsWindow);
   applyLiquidGlassToWindow(settingsWindow, {
     cornerRadius: 14,
     fallbackVibrancy: 'hud',
@@ -9462,10 +11159,7 @@ function openSettingsWindow(payload?: SettingsNavigationPayload): void {
 
   settingsWindow.on('closed', () => {
     settingsWindow = null;
-    // Hide dock again when no settings/store/notes windows are open
-    if (process.platform === 'darwin' && !extensionStoreWindow && !notesWindow) {
-      app.dock.hide();
-    }
+    restoreOverlayMacActivationPolicyIfPossible();
   });
 }
 
@@ -9476,30 +11170,66 @@ function openNotesWindow(mode?: 'search' | 'create'): void {
     // Send mode + pending note JSON to the existing window
     notesWindow.webContents.send('notes-mode-changed', { mode: mode || 'create', noteJson: pendingNoteJson });
     pendingNoteJson = null;
+    // Re-assert cross-Space / fullscreen float — macOS can drop this flag
+    // across hide/show cycles, so reapply it defensively on every show.
+    try {
+      notesWindow.setVisibleOnAllWorkspaces(true, {
+        visibleOnFullScreen: true,
+        skipTransformProcessType: true,
+      } as any);
+    } catch {}
     notesWindow.show();
     notesWindow.focus();
     return;
   }
 
-  if (process.platform === 'darwin') {
-    app.dock.show();
-  }
+  // Note: intentionally NOT calling app.dock.show() here. On macOS,
+  // transformProcessType (triggered by dock.show) forces the app onto the
+  // primary Desktop Space, so opening Notes while a fullscreen app is
+  // active would cause macOS to Space-switch away from the fullscreen app.
+  // The floating setup below keeps Notes visible on the current Space —
+  // including the fullscreen Space — without a dock/process transform.
 
-  const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = (() => {
-    if (mainWindow) {
-      const b = mainWindow.getBounds();
-      const center = {
-        x: b.x + Math.floor(b.width / 2),
-        y: b.y + Math.floor(b.height / 2),
-      };
-      return screen.getDisplayNearestPoint(center).workArea;
-    }
-    return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
-  })();
-  const notesWidth = Math.max(520, Math.min(680, displayWidth - 300));
-  const notesHeight = Math.max(420, Math.min(560, displayHeight - 250));
-  const notesX = displayX + Math.floor((displayWidth - notesWidth) / 2);
-  const notesY = displayY + Math.floor((displayHeight - notesHeight) / 2);
+  // Prefer persisted bounds from the last session if they still land on an
+  // attached display; otherwise fall back to the centered-default layout.
+  const savedNotesBounds = loadNotesWindowState();
+  const notesBoundsOnScreen = (b: { x: number; y: number; width: number; height: number }): boolean => {
+    const displays = screen.getAllDisplays();
+    const cx = b.x + b.width / 2;
+    const cy = b.y + b.height / 2;
+    return displays.some((d: Electron.Display) => {
+      const wa = d.workArea;
+      return cx >= wa.x && cx <= wa.x + wa.width && cy >= wa.y && cy <= wa.y + wa.height;
+    });
+  };
+
+  let notesX: number;
+  let notesY: number;
+  let notesWidth: number;
+  let notesHeight: number;
+
+  if (savedNotesBounds && notesBoundsOnScreen(savedNotesBounds)) {
+    notesX = savedNotesBounds.x;
+    notesY = savedNotesBounds.y;
+    notesWidth = savedNotesBounds.width;
+    notesHeight = savedNotesBounds.height;
+  } else {
+    const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = (() => {
+      if (mainWindow) {
+        const b = mainWindow.getBounds();
+        const center = {
+          x: b.x + Math.floor(b.width / 2),
+          y: b.y + Math.floor(b.height / 2),
+        };
+        return screen.getDisplayNearestPoint(center).workArea;
+      }
+      return screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+    })();
+    notesWidth = Math.max(520, Math.min(680, displayWidth - 300));
+    notesHeight = Math.max(420, Math.min(560, displayHeight - 250));
+    notesX = displayX + Math.floor((displayWidth - notesWidth) / 2);
+    notesY = displayY + Math.floor((displayHeight - notesHeight) / 2);
+  }
   const useNativeLiquidGlass = shouldUseNativeLiquidGlass();
 
   notesWindow = new BrowserWindow({
@@ -9517,6 +11247,7 @@ function openNotesWindow(mode?: 'search' | 'create'): void {
     visualEffectState: 'active',
     hasShadow: false,
     alwaysOnTop: true,
+    fullscreenable: false,
     show: false,
     webPreferences: {
       nodeIntegration: false,
@@ -9524,6 +11255,20 @@ function openNotesWindow(mode?: 'search' | 'create'): void {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  disableWindowAnimation(notesWindow);
+  // Make Notes follow the user across Desktop Spaces and overlay fullscreen
+  // apps — mirrors the launcher / cursor prompt / memory status bar pattern.
+  // 'pop-up-menu' level is required to sit above native macOS fullscreen apps;
+  // the lower 'floating' level gets covered by fullscreen windows.
+  // skipTransformProcessType prevents a Space-switch when called while a
+  // fullscreen app is active.
+  try {
+    notesWindow.setVisibleOnAllWorkspaces(true, {
+      visibleOnFullScreen: true,
+      skipTransformProcessType: true,
+    } as any);
+  } catch {}
+  try { notesWindow.setAlwaysOnTop(true, 'pop-up-menu'); } catch {}
   applyLiquidGlassToWindow(notesWindow, {
     cornerRadius: 14,
     fallbackVibrancy: 'hud',
@@ -9539,27 +11284,43 @@ function openNotesWindow(mode?: 'search' | 'create'): void {
     notesWindow?.show();
   });
 
+  // Persist window position/size so Notes reopens where the user left it.
+  // Debounce move/resize events so we don't rewrite the JSON on every pixel.
+  let notesPersistTimer: NodeJS.Timeout | null = null;
+  const persistNotesBounds = () => {
+    if (notesPersistTimer) clearTimeout(notesPersistTimer);
+    notesPersistTimer = setTimeout(() => {
+      notesPersistTimer = null;
+      if (!notesWindow || notesWindow.isDestroyed()) return;
+      const b = notesWindow.getBounds();
+      saveNotesWindowState({ x: b.x, y: b.y, width: b.width, height: b.height });
+    }, 250);
+  };
+  notesWindow.on('move', persistNotesBounds);
+  notesWindow.on('resize', persistNotesBounds);
+  notesWindow.on('close', () => {
+    if (notesPersistTimer) { clearTimeout(notesPersistTimer); notesPersistTimer = null; }
+    if (!notesWindow || notesWindow.isDestroyed()) return;
+    const b = notesWindow.getBounds();
+    saveNotesWindowState({ x: b.x, y: b.y, width: b.width, height: b.height });
+  });
+
   notesWindow.on('closed', () => {
     notesWindow = null;
-    if (process.platform === 'darwin' && !settingsWindow && !extensionStoreWindow && !canvasWindow) {
-      app.dock.hide();
-    }
+    restoreOverlayMacActivationPolicyIfPossible();
   });
 }
 
 // ─── Canvas Window ────────────────────────────────────────────────
 
 function openCanvasWindow(mode?: 'create' | 'edit'): void {
+  enterRegularMacActivationPolicy();
   if (canvasWindow) {
     canvasWindow.webContents.send('canvas-mode-changed', { mode: mode || 'create', canvasJson: pendingCanvasJson });
     pendingCanvasJson = null;
     canvasWindow.show();
     canvasWindow.focus();
     return;
-  }
-
-  if (process.platform === 'darwin') {
-    app.dock.show();
   }
 
   const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = (() => {
@@ -9601,6 +11362,7 @@ function openCanvasWindow(mode?: 'create' | 'edit'): void {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  disableWindowAnimation(canvasWindow);
   applyLiquidGlassToWindow(canvasWindow, {
     cornerRadius: 14,
     fallbackVibrancy: 'hud',
@@ -9652,6 +11414,7 @@ function openCanvasWindow(mode?: 'create' | 'edit'): void {
           autoHideMenuBar: true,
           webPreferences: { contextIsolation: true, nodeIntegration: false },
         });
+        disableWindowAnimation(libWin);
         libWin.loadURL(libBrowserUrl);
 
         const maybeImport = (navUrl: string, event?: { preventDefault?: () => void }): boolean => {
@@ -9688,6 +11451,7 @@ function openCanvasWindow(mode?: 'create' | 'edit'): void {
 
   let savingBeforeClose = false;
   canvasWindow.on('close', (event: any) => {
+    if (isAppQuitting) return;
     if (savingBeforeClose) return;
     event.preventDefault();
     savingBeforeClose = true;
@@ -9700,9 +11464,7 @@ function openCanvasWindow(mode?: 'create' | 'edit'): void {
 
   canvasWindow.on('closed', () => {
     canvasWindow = null;
-    if (process.platform === 'darwin' && !settingsWindow && !extensionStoreWindow && !notesWindow) {
-      app.dock.hide();
-    }
+    restoreOverlayMacActivationPolicyIfPossible();
   });
 }
 
@@ -9795,14 +11557,11 @@ async function installCanvasLib(sender: any): Promise<void> {
 }
 
 function openExtensionStoreWindow(): void {
+  enterRegularMacActivationPolicy();
   if (extensionStoreWindow) {
     extensionStoreWindow.show();
     extensionStoreWindow.focus();
     return;
-  }
-
-  if (process.platform === 'darwin') {
-    app.dock.show();
   }
 
   const { x: displayX, y: displayY, width: displayWidth, height: displayHeight } = (() => {
@@ -9843,6 +11602,7 @@ function openExtensionStoreWindow(): void {
       preload: path.join(__dirname, 'preload.js'),
     },
   });
+  disableWindowAnimation(extensionStoreWindow);
   applyLiquidGlassToWindow(extensionStoreWindow, {
     cornerRadius: 14,
     fallbackVibrancy: 'hud',
@@ -9857,9 +11617,7 @@ function openExtensionStoreWindow(): void {
 
   extensionStoreWindow.on('closed', () => {
     extensionStoreWindow = null;
-    if (process.platform === 'darwin' && !settingsWindow && !notesWindow) {
-      app.dock.hide();
-    }
+    restoreOverlayMacActivationPolicyIfPossible();
   });
 }
 
@@ -9913,11 +11671,55 @@ function broadcastExtensionsUpdated(): void {
   }
 }
 
+// Sent in addition to `extensions-updated` so listeners that need to tear down
+// per-extension state (live menu-bar runners, background no-view runs, scheduled
+// interval refreshes) can target exactly the extension that was removed without
+// re-deriving it from a stale command list.
+function broadcastExtensionUninstalled(extensionName: string): void {
+  const name = String(extensionName || '').trim();
+  if (!name) return;
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    try {
+      window.webContents.send('extension-uninstalled', { extensionName: name });
+    } catch {}
+  }
+}
+
 function broadcastCommandsUpdated(): void {
   for (const window of BrowserWindow.getAllWindows()) {
     if (window.isDestroyed()) continue;
     try {
       window.webContents.send('commands-updated');
+    } catch {}
+  }
+}
+
+function broadcastExtensionPreferencesUpdated(extensionName: string): void {
+  const normalized = String(extensionName || '').trim();
+  if (!normalized) return;
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window || window.isDestroyed()) continue;
+    try {
+      window.webContents.send('extension-preferences-updated', { extensionName: normalized });
+    } catch {}
+  }
+}
+
+function broadcastAiChatsUpdated(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window || window.isDestroyed()) continue;
+    try {
+      window.webContents.send('ai-chats-updated');
+    } catch {}
+  }
+}
+
+function broadcastBrowserSearchHistoryChanged(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    try {
+      window.webContents.send('browser-search-history-changed');
     } catch {}
   }
 }
@@ -9951,7 +11753,11 @@ function startInstalledAppsWatchers(): void {
     try {
       const watcher = fs.watch(dir, { persistent: false }, (_eventType, filename) => {
         const changedName = String(filename || '').toLowerCase();
-        if (!changedName || changedName.endsWith('.app') || changedName.includes('.app/')) {
+        // Only react to top-level .app bundles being added or removed.
+        // Ignore null filenames (spurious macOS FSEvents) and changes inside
+        // an .app bundle (e.g. app writes temp files on quit) — those don't
+        // affect the set of installed applications.
+        if (changedName && changedName.endsWith('.app')) {
           scheduleInstalledAppsRefresh(`filesystem event in ${dir}`);
         }
       });
@@ -9979,11 +11785,18 @@ function stopInstalledAppsWatchers(): void {
 }
 
 function updateAppUpdaterStatus(patch: Partial<AppUpdaterStatusSnapshot>): void {
+  const previousState = appUpdaterStatusSnapshot.state;
   appUpdaterStatusSnapshot = {
     ...appUpdaterStatusSnapshot,
     ...patch,
   };
   sendAppUpdaterStatusToRenderers();
+  if (
+    previousState !== appUpdaterStatusSnapshot.state &&
+    (previousState === 'downloaded' || appUpdaterStatusSnapshot.state === 'downloaded')
+  ) {
+    broadcastCommandsUpdated();
+  }
 }
 
 function parseGithubRepository(input: string): { owner: string; repo: string } | null {
@@ -10244,13 +12057,35 @@ async function runBackgroundAppUpdaterCheck(): Promise<void> {
   }
 
   try {
-    await checkForAppUpdates();
+    const checkStatus = await checkForAppUpdates();
+    if (checkStatus.state === 'available') {
+      // Silently download the update in the background so it's ready to install.
+      try {
+        await downloadAppUpdate();
+        if (appUpdaterStatusSnapshot.state === 'downloaded') {
+          autoUpdateDownloadedVersion =
+            appUpdaterStatusSnapshot.latestVersion || checkStatus.latestVersion || 'unknown';
+        }
+      } catch {
+        // Non-fatal: the banner will not appear but the app keeps working.
+      }
+    }
   } catch {
     // Keep background checks non-fatal.
   } finally {
     const latestCheckedAt = readAppUpdaterLastCheckedAt();
     scheduleNextAppUpdaterAutoCheck(latestCheckedAt || Date.now());
   }
+}
+
+function isUpdateBannerDismissed(): boolean {
+  const settings = loadSettings() as any;
+  const dismissedAt = Number(settings.updateBannerDismissedAt || 0);
+  if (!dismissedAt) return false;
+  const dismissedVersion = String(settings.updateBannerDismissedVersion || '').trim();
+  const readyVersion = String(appUpdaterStatusSnapshot.latestVersion || autoUpdateDownloadedVersion || '').trim();
+  if (readyVersion && dismissedVersion !== readyVersion) return false;
+  return Date.now() - dismissedAt < 3 * 24 * 60 * 60 * 1000;
 }
 
 async function downloadAppUpdate(): Promise<AppUpdaterStatusSnapshot> {
@@ -10285,6 +12120,12 @@ async function downloadAppUpdate(): Promise<AppUpdaterStatusSnapshot> {
         supported: true,
         message: 'Downloading update...',
       });
+      if (process.platform === 'darwin') {
+        try {
+          appUpdater.autoInstallOnAppQuit = true;
+          appUpdater.autoRunAppAfterInstall = true;
+        } catch {}
+      }
       await appUpdater.downloadUpdate();
     })
     .catch((error: any) => {
@@ -10302,21 +12143,95 @@ async function downloadAppUpdate(): Promise<AppUpdaterStatusSnapshot> {
   return { ...appUpdaterStatusSnapshot };
 }
 
-function restartAndInstallAppUpdate(): boolean {
+async function restartAndInstallAppUpdate(): Promise<boolean> {
   ensureAppUpdaterConfigured();
   if (!appUpdater) return false;
+  if (appUpdaterRestartPromise) return appUpdaterRestartPromise;
   if (appUpdaterStatusSnapshot.state !== 'downloaded') return false;
-  try {
-    setTimeout(() => {
+
+  appUpdaterRestartPromise = new Promise<boolean>((resolve) => {
+    let settled = false;
+    let triggerTimer: NodeJS.Timeout | null = null;
+    let timeoutTimer: NodeJS.Timeout | null = null;
+
+    const cleanup = () => {
+      if (triggerTimer) {
+        clearTimeout(triggerTimer);
+        triggerTimer = null;
+      }
+      if (timeoutTimer) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
       try {
-        appUpdater.quitAndInstall(false, true);
+        app.removeListener('before-quit', markStarted);
       } catch {}
-    }, 40);
-    return true;
-  } catch (error) {
-    console.warn('[Updater] Failed to quit and install update:', error);
-    return false;
-  }
+      try {
+        electron.autoUpdater?.removeListener?.('before-quit-for-update', markStarted);
+      } catch {}
+    };
+
+    const finish = (ok: boolean, error?: any) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!ok) {
+        isAppQuitting = false;
+        const message = String(error?.message || error || 'Failed to restart for update installation.');
+        console.warn('[Updater] Failed to restart for update installation:', message);
+        updateAppUpdaterStatus({
+          state: 'downloaded',
+          supported: true,
+          message,
+        });
+      }
+      resolve(ok);
+    };
+
+    function markStarted() {
+      finish(true);
+    }
+
+    try {
+      app.once('before-quit', markStarted);
+      electron.autoUpdater?.once?.('before-quit-for-update', markStarted);
+
+      // electron-updater's update quit path closes windows before Electron emits
+      // app.before-quit. The launcher is normally not closable, so prepare it here
+      // or quitAndInstall can silently fail to close the app.
+      prepareWindowsForAppQuit();
+      updateAppUpdaterStatus({
+        state: 'restarting',
+        message: 'Restarting to install update...',
+      });
+
+      triggerTimer = setTimeout(() => {
+        try {
+          if (process.platform === 'darwin') {
+            try {
+              appUpdater.autoInstallOnAppQuit = true;
+              appUpdater.autoRunAppAfterInstall = true;
+            } catch {}
+            appUpdater.quitAndInstall();
+          } else {
+            appUpdater.quitAndInstall(false, true);
+          }
+        } catch (error: any) {
+          finish(false, error);
+        }
+      }, 40);
+
+      timeoutTimer = setTimeout(() => {
+        finish(false, 'Restart did not start. Please try Update and Restart again.');
+      }, APP_UPDATER_RESTART_TIMEOUT_MS);
+    } catch (error: any) {
+      finish(false, error);
+    }
+  }).finally(() => {
+    appUpdaterRestartPromise = null;
+  });
+
+  return appUpdaterRestartPromise;
 }
 
 // ─── Shortcut Management ────────────────────────────────────────────
@@ -10560,6 +12475,17 @@ protocol.registerSchemesAsPrivileged([
       stream: true,
     },
   },
+  {
+    scheme: 'sc-clipboard',
+    privileges: {
+      standard: true,
+      secure: true,
+      corsEnabled: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      stream: true,
+    },
+  },
 ]);
 
 app.whenReady().then(async () => {
@@ -10568,6 +12494,48 @@ app.whenReady().then(async () => {
   scrubInternalClipboardProbe('app startup');
   // Warm the worker so the first window-management action does not race spawn.
   setTimeout(() => { ensureWindowManagerWorker(); }, 0);
+
+  // Some external image hosts (e.g. libgen.bz, libgen.li, libgen.is) only
+  // serve covers when a Referer header is present — without one they return
+  // 200 OK with a zero-byte body, which the browser displays as a broken
+  // image. Electron pages loaded over file:// strip the Referer header by
+  // default, so cover thumbnails in extensions like `library-genesis` come
+  // out broken. Inject a same-origin Referer for any request that arrives
+  // without one. Only fires when no Referer was set by the renderer, so we
+  // never override an explicit value the caller chose.
+  try {
+    const { session: electronSession } = require('electron');
+    const defaultSession = electronSession?.defaultSession;
+    if (defaultSession?.webRequest?.onBeforeSendHeaders) {
+      let loggedRefererInjection = false;
+      defaultSession.webRequest.onBeforeSendHeaders(
+        { urls: ['http://*/*', 'https://*/*'] },
+        (details: any, callback: any) => {
+          const headers = { ...(details.requestHeaders || {}) };
+          const hasReferer = Boolean(headers['Referer'] || headers['referer']);
+          if (!hasReferer) {
+            try {
+              const parsed = new URL(details.url);
+              const refererValue = `${parsed.protocol}//${parsed.host}/`;
+              headers['Referer'] = refererValue;
+              if (!loggedRefererInjection) {
+                loggedRefererInjection = true;
+                console.log(
+                  `[webRequest] Injecting Referer fallback (first hit): ${refererValue} for ${details.url}`
+                );
+              }
+            } catch {}
+          }
+          callback({ requestHeaders: headers });
+        }
+      );
+      console.log('[webRequest] Referer fallback hook installed on defaultSession');
+    } else {
+      console.warn('[webRequest] defaultSession.webRequest.onBeforeSendHeaders unavailable');
+    }
+  } catch (error) {
+    console.warn('[main] Failed to install Referer fallback webRequest hook:', error);
+  }
 
   // Register the sc-asset:// protocol handler to serve extension asset files
   protocol.handle('sc-asset', (request: any) => {
@@ -10616,6 +12584,27 @@ app.whenReady().then(async () => {
 
       const { pathToFileURL } = require('url');
       // Convert via pathToFileURL so spaces/special chars are encoded correctly.
+      return net.fetch(pathToFileURL(filePath).toString());
+    } catch {
+      return new Response('Bad Request', { status: 400 });
+    }
+  });
+
+  // Register the sc-clipboard:// protocol handler to serve clipboard image
+  // files. In development the renderer is on http://localhost, so raw file://
+  // URLs are blocked by webSecurity. sc-clipboard:// is privileged and works
+  // from any origin.
+  protocol.handle('sc-clipboard', (request: any) => {
+    try {
+      const url = new URL(request.url);
+      let filePath = decodeURIComponent(url.pathname || '');
+      if (process.platform === 'win32' && /^\/[a-zA-Z]:/.test(filePath)) {
+        filePath = filePath.slice(1);
+      }
+      if (!filePath) {
+        return new Response('Bad Request', { status: 400 });
+      }
+      const { pathToFileURL } = require('url');
       return net.fetch(pathToFileURL(filePath).toString());
     } catch {
       return new Response('Bad Request', { status: 400 });
@@ -10678,7 +12667,18 @@ app.whenReady().then(async () => {
   // which should not appear while the user is on the onboarding screen.
   if (settings.hasSeenOnboarding) {
     startClipboardMonitor();
+    setClipboardAppBlacklist(settings.clipboardAppBlacklist);
+    pruneClipboardHistoryOlderThan(settings.clipboardHistoryRetentionDays);
   }
+
+  // Daily re-prune so long-running sessions also drop expired clipboard items.
+  setInterval(() => {
+    try {
+      pruneClipboardHistoryOlderThan(loadSettings().clipboardHistoryRetentionDays);
+    } catch (e) {
+      console.error('Clipboard prune tick failed:', e);
+    }
+  }, 24 * 60 * 60 * 1000);
 
   // Initialize snippet store
   initSnippetStore();
@@ -10686,6 +12686,9 @@ app.whenReady().then(async () => {
   initCanvasStore();
   try { refreshSnippetExpander(); } catch (e) {
     console.warn('[SnippetExpander] Failed to start:', e);
+  }
+  try { refreshEmojiTriggerMonitor(); } catch (e) {
+    console.warn('[EmojiTrigger] Failed to start:', e);
   }
   initQuickLinkStore();
 
@@ -10699,13 +12702,21 @@ app.whenReady().then(async () => {
 
   // ─── IPC: Launcher ──────────────────────────────────────────────
 
+  ipcMain.handle('calculator-evaluate', async (_event: any, expression: string) => {
+    try {
+      return await soulverCalculator.evaluate(String(expression ?? ''));
+    } catch (err: any) {
+      return { id: 0, value: null, raw: null, type: 'unknown', error: err?.message || String(err) };
+    }
+  });
+
   ipcMain.handle('get-commands', async () => {
     const s = loadSettings();
     const commands = await getAvailableCommands();
     const disabled = new Set(s.disabledCommands || []);
     const enabled = new Set((s as any).enabledCommands || []);
     const aiDisabled = isAIDisabledInSettings(s);
-    return commands.filter((c: any) => {
+    const filtered = commands.filter((c: any) => {
       const commandId = String(c?.id || '');
       if (aiDisabled && isAIDependentSystemCommand(commandId)) return false;
       if (isAISectionDisabledForCommand(commandId, s)) return false;
@@ -10713,6 +12724,35 @@ app.whenReady().then(async () => {
       if (c?.disabledByDefault && !enabled.has(c.id)) return false;
       return true;
     });
+
+    // Prepend the update banner command whenever an update is downloaded and ready —
+    // regardless of whether it came from the background auto-check or a manual trigger.
+    if (appUpdaterStatusSnapshot.state === 'downloaded' && !isUpdateBannerDismissed()) {
+      const version = appUpdaterStatusSnapshot.latestVersion || autoUpdateDownloadedVersion || app.getVersion();
+      const tadaIconDataUrl = `data:image/svg+xml;base64,${Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="tdBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#86efac" stop-opacity="0.7"/><stop offset="1" stop-color="#16a34a" stop-opacity="0.9"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#tdBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.95)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" fill="none"><path d="M5.8 11.3 2 22l10.7-3.8"/><path d="M4 3h.01M22 8h.01M15 2h.01M22 20h.01M22 2l-2.5 2.5M8 8l-2.5 2.5"/><path d="m15 7-6.5 6.5"/><path d="m9 13 1.5 1.5"/></g></svg>',
+        'utf8'
+      ).toString('base64')}`;
+      filtered.unshift({
+        id: 'system-update-and-reopen',
+        title: 'Update and Restart',
+        subtitle: `Version ${version} downloaded and ready to install`,
+        keywords: ['update', 'reopen', 'restart', 'install', 'version', version],
+        category: 'system',
+        iconDataUrl: tadaIconDataUrl,
+        alwaysOnTop: true,
+      });
+    }
+
+    return filtered;
+  });
+
+  ipcMain.handle('dismiss-update-banner', () => {
+    saveSettings({
+      updateBannerDismissedAt: Date.now(),
+      updateBannerDismissedVersion: appUpdaterStatusSnapshot.latestVersion || autoUpdateDownloadedVersion || '',
+    } as any);
+    broadcastCommandsUpdated();
   });
 
   ipcMain.handle(
@@ -10740,12 +12780,35 @@ app.whenReady().then(async () => {
     hideWindow();
   });
 
+  ipcMain.handle('show-window', async () => {
+    await showWindow();
+  });
+
+  ipcMain.handle('activate-last-frontmost-app', async () => {
+    await activateLastFrontmostApp();
+  });
+
+  ipcMain.handle('no-view-status', (_event: Electron.IpcMainInvokeEvent, variant: 'processing' | 'success' | 'error', text: string) => {
+    void showMemoryStatusBar(variant, String(text || ''));
+  });
+
+  ipcMain.handle('show-confetti', () => {
+    void showConfettiBurst();
+  });
+
   ipcMain.handle('open-devtools', () => {
     return openPreferredDevTools();
   });
 
   ipcMain.handle('close-prompt-window', () => {
     hidePromptWindow();
+  });
+
+  ipcMain.handle('reset-launcher-position', () => {
+    clearWindowState();
+    if (mainWindow && !mainWindow.isDestroyed() && isVisible && launcherMode === 'default') {
+      applyLauncherBounds('default');
+    }
   });
 
   ipcMain.handle('set-launcher-mode', (_event: any, mode: LauncherMode) => {
@@ -10762,6 +12825,7 @@ app.whenReady().then(async () => {
         lastWhisperShownAt = Date.now();
       } else {
         whisperHoldRequestSeq += 1;
+        whisperSuperCmdTextTargetWindow = null;
         stopWhisperHoldWatcher();
       }
       return;
@@ -10957,6 +13021,215 @@ app.whenReady().then(async () => {
     return loadSettings();
   });
 
+  // ─── Synced Extension List Helpers ──────────────────────────────
+  // Keep settings.installedExtensions in sync with install/uninstall events.
+  // The list represents user install intent. Uninstall tombstones represent
+  // synced removal intent, so another Mac with a stale extension folder does
+  // not resurrect the extension globally on launch.
+
+  function addInstalledExtensionToSettings(name: string): void {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return;
+    const current = loadSettings();
+    const existing = current.installedExtensions || [];
+    const extensionUninstallTombstones = { ...(current.extensionUninstallTombstones || {}) };
+    const hadTombstone = Object.prototype.hasOwnProperty.call(extensionUninstallTombstones, trimmed);
+    if (hadTombstone) delete extensionUninstallTombstones[trimmed];
+    const installedExtensions = existing.includes(trimmed) ? existing : [...existing, trimmed];
+    if (existing.includes(trimmed) && !hadTombstone) return;
+    const updated = saveSettings({ installedExtensions, extensionUninstallTombstones });
+    broadcastSettingsToAllWindows(updated);
+  }
+
+  function removeInstalledExtensionFromSettings(name: string): void {
+    const trimmed = String(name || '').trim();
+    if (!trimmed) return;
+    const current = loadSettings();
+    const existing = current.installedExtensions || [];
+    const extensionUninstallTombstones = {
+      ...(current.extensionUninstallTombstones || {}),
+      [trimmed]: Date.now(),
+    };
+    const updated = saveSettings({
+      installedExtensions: existing.filter((entry) => entry !== trimmed),
+      extensionUninstallTombstones,
+    });
+    broadcastSettingsToAllWindows(updated);
+  }
+
+  /**
+   * On app launch only: reconcile the synced installedExtensions list with
+   * what's actually on disk.
+   *  - Filesystem-only extensions (the typical first-run state) are added
+   *    to settings.installedExtensions so the user's other Macs pick them
+   *    up.
+   *  - Filesystem-only extensions with synced uninstall tombstones are stale
+   *    local folders from another Mac and are removed locally, not re-added.
+   *  - Settings-only entries (delivered by cloud sync from another Mac)
+   *    are queued for background install. Surfaced via the memory status
+   *    bar; failures are logged but don't block.
+   */
+  let autoInstallInFlight = false;
+  async function autoInstallMissingExtensions(): Promise<void> {
+    if (autoInstallInFlight) return;
+    autoInstallInFlight = true;
+    try {
+      await runAutoInstallMissingExtensions();
+    } finally {
+      autoInstallInFlight = false;
+    }
+  }
+  async function runAutoInstallMissingExtensions(): Promise<void> {
+    let current: AppSettings;
+    try {
+      current = loadSettings();
+    } catch (e) {
+      console.warn('autoInstallMissingExtensions: loadSettings failed:', e);
+      return;
+    }
+    const onDisk = new Set<string>();
+    try {
+      for (const name of getInstalledExtensionNames()) onDisk.add(name);
+    } catch (e) {
+      console.warn('autoInstallMissingExtensions: filesystem scan failed:', e);
+      return;
+    }
+    const inSettings = new Set<string>(current.installedExtensions || []);
+    const uninstallTombstones = current.extensionUninstallTombstones || {};
+
+    // 1) Reconcile anything on disk that isn't yet in settings. Legacy
+    // filesystem-only installs are imported; tombstoned folders are stale.
+    const extra: string[] = [];
+    const stale: string[] = [];
+    for (const name of onDisk) {
+      if (inSettings.has(name)) continue;
+      if (Object.prototype.hasOwnProperty.call(uninstallTombstones, name)) {
+        stale.push(name);
+      } else {
+        extra.push(name);
+      }
+    }
+    if (stale.length > 0) {
+      console.log(`[auto-install] removing ${stale.length} tombstoned extension folder(s): ${stale.join(', ')}`);
+      let removedAny = false;
+      for (const name of stale) {
+        try {
+          const ok = await uninstallExtension(name);
+          if (ok) {
+            onDisk.delete(name);
+            removedAny = true;
+            broadcastExtensionUninstalled(name);
+          } else {
+            console.warn(`[auto-install] failed to remove tombstoned extension folder: ${name}`);
+          }
+        } catch (e) {
+          console.warn(`[auto-install] error removing tombstoned extension folder ${name}:`, e);
+        }
+      }
+      if (removedAny) {
+        invalidateCache();
+        broadcastExtensionsUpdated();
+      }
+    }
+    if (extra.length > 0) {
+      const merged = [...(current.installedExtensions || []), ...extra];
+      const updated = saveSettings({ installedExtensions: merged });
+      broadcastSettingsToAllWindows(updated);
+    }
+
+    // 2) Install anything in settings that isn't on disk yet.
+    const missing: string[] = [];
+    for (const name of inSettings) {
+      if (!onDisk.has(name)) missing.push(name);
+    }
+    if (missing.length === 0) return;
+
+    console.log(`[auto-install] ${missing.length} extension(s) to install: ${missing.join(', ')}`);
+    let succeeded = 0;
+    for (const name of missing) {
+      try {
+        void showMemoryStatusBar('processing', `Installing ${name}…`);
+        const ok = await installExtension(name);
+        if (ok) {
+          succeeded += 1;
+          invalidateCache();
+          broadcastExtensionsUpdated();
+        } else {
+          console.warn(`[auto-install] failed: ${name}`);
+          void showMemoryStatusBar('error', `Could not install ${name}`);
+        }
+      } catch (e) {
+        console.warn(`[auto-install] error installing ${name}:`, e);
+        void showMemoryStatusBar('error', `Could not install ${name}`);
+      }
+    }
+    if (succeeded > 0) {
+      void showMemoryStatusBar(
+        'success',
+        succeeded === missing.length
+          ? `Installed ${succeeded} extension${succeeded === 1 ? '' : 's'}`
+          : `Installed ${succeeded} of ${missing.length} extensions`
+      );
+    }
+  }
+
+  // ─── IPC: Extension Preferences (synced) ────────────────────────
+  // The renderer's persistExtensionPreferences/persistCommandArguments
+  // helpers continue to write to localStorage (synchronous read cache);
+  // these handlers mirror the values into the synced settings file so
+  // they propagate across Macs.
+
+  ipcMain.handle(
+    'save-extension-preferences',
+    async (
+      _event: any,
+      args: { extName: string; cmdName?: string; extPrefs?: Record<string, unknown>; cmdPrefs?: Record<string, unknown> }
+    ) => {
+      const extName = String(args?.extName || '').trim();
+      if (!extName) return loadSettings();
+      const cmdName = String(args?.cmdName || '').trim();
+      const current = loadSettings();
+      const extensionPreferences = { ...(current.extensionPreferences || {}) };
+      const extensionCommandPreferences = { ...(current.extensionCommandPreferences || {}) };
+      if (args?.extPrefs && typeof args.extPrefs === 'object') {
+        extensionPreferences[extName] = args.extPrefs;
+      }
+      if (cmdName && args?.cmdPrefs && typeof args.cmdPrefs === 'object') {
+        const key = `${extName}/${cmdName}`;
+        extensionCommandPreferences[key] = args.cmdPrefs;
+      }
+      const result = saveSettings({ extensionPreferences, extensionCommandPreferences });
+      broadcastSettingsToAllWindows(result);
+      return result;
+    }
+  );
+
+  ipcMain.handle(
+    'save-extension-command-arguments',
+    async (
+      _event: any,
+      args: { extName: string; cmdName: string; values: Record<string, unknown> }
+    ) => {
+      const extName = String(args?.extName || '').trim();
+      const cmdName = String(args?.cmdName || '').trim();
+      if (!extName || !cmdName) return loadSettings();
+      const current = loadSettings();
+      const extensionCommandArguments = { ...(current.extensionCommandArguments || {}) };
+      const key = `${extName}/${cmdName}`;
+      extensionCommandArguments[key] = (args?.values && typeof args.values === 'object') ? args.values : {};
+      const result = saveSettings({ extensionCommandArguments });
+      broadcastSettingsToAllWindows(result);
+      return result;
+    }
+  );
+
+  ipcMain.handle('resize-launcher-window', (_event: any, expanded: boolean) => {
+    if (!mainWindow) return;
+    const curBounds = mainWindow.getBounds();
+    const targetHeight = expanded ? DEFAULT_WINDOW_HEIGHT : COMPACT_WINDOW_HEIGHT;
+    mainWindow.setBounds({ x: curBounds.x, y: curBounds.y, width: curBounds.width, height: targetHeight });
+  });
+
   ipcMain.handle('get-global-shortcut-status', () => {
     return { ...globalShortcutRegistrationState };
   });
@@ -10974,8 +13247,8 @@ app.whenReady().then(async () => {
     return await downloadAppUpdate();
   });
 
-  ipcMain.handle('app-updater-quit-and-install', () => {
-    return restartAndInstallAppUpdate();
+  ipcMain.handle('app-updater-quit-and-install', async () => {
+    return await restartAndInstallAppUpdate();
   });
 
   // Full update flow: check → download → restart
@@ -11012,7 +13285,7 @@ app.whenReady().then(async () => {
       // Step 3: Restart if downloaded
       if (appUpdaterStatusSnapshot.state === 'downloaded') {
         void showMemoryStatusBar('processing', 'Restarting to install update...');
-        const installed = restartAndInstallAppUpdate();
+        const installed = await restartAndInstallAppUpdate();
         if (installed) {
           return { success: true, message: 'Restarting to install update...', state: 'restarting' };
         }
@@ -11028,18 +13301,55 @@ app.whenReady().then(async () => {
     }
   });
 
+  function broadcastSettingsToAllWindows(result: AppSettings): void {
+    const windowsToNotify = [mainWindow, settingsWindow, extensionStoreWindow, promptWindow]
+      .filter(Boolean) as Array<InstanceType<typeof BrowserWindow>>;
+    for (const win of windowsToNotify) {
+      if (win.isDestroyed()) continue;
+      try {
+        win.webContents.send('settings-updated', result);
+      } catch {}
+    }
+  }
+
+  // Wire the settings store so external file changes (cloud sync) can
+  // also broadcast to renderer windows.
+  setSettingsBroadcaster(broadcastSettingsToAllWindows);
+
+  // Re-run startup side effects when settings.json arrives from another
+  // Mac via cloud sync. Without this, synced hotkeys/extensions reach
+  // settings and the UI but the OS-level registrations never happen, so
+  // hotkeys do nothing and referenced extensions stay un-downloaded
+  // until the next app launch.
+  setExternalSettingsChangeHandler((reloaded) => {
+    try {
+      const nextShortcut = reloaded.globalShortcut || '';
+      if (nextShortcut && nextShortcut !== currentShortcut) {
+        registerGlobalShortcut(nextShortcut);
+      }
+    } catch (e) {
+      console.warn('[settings-sync] global shortcut re-register failed:', e);
+    }
+    try {
+      registerCommandHotkeys(reloaded.commandHotkeys || {});
+    } catch (e) {
+      console.warn('[settings-sync] command hotkeys re-register failed:', e);
+    }
+    void autoInstallMissingExtensions();
+  });
+
+  startSettingsWatcher();
+
+  // Reconcile filesystem extensions vs the synced installedExtensions list,
+  // and install anything missing in the background. Also re-runs whenever
+  // an external sync writes settings.json (see setExternalSettingsChangeHandler).
+  void autoInstallMissingExtensions();
+
   ipcMain.handle(
     'save-settings',
     async (_event: any, patch: Partial<AppSettings>) => {
       const result = saveSettings(patch);
-      const windowsToNotify = [mainWindow, settingsWindow, extensionStoreWindow, promptWindow]
-        .filter(Boolean) as Array<InstanceType<typeof BrowserWindow>>;
-      for (const win of windowsToNotify) {
-        if (win.isDestroyed()) continue;
-        try {
-          win.webContents.send('settings-updated', result);
-        } catch {}
-      }
+      broadcastSettingsToAllWindows(result);
       if (patch.uiStyle !== undefined) {
         const nextStyle = String(result.uiStyle || 'default').trim().toLowerCase();
         const shouldEnableGlassy = nextStyle === 'glassy';
@@ -11086,6 +13396,19 @@ app.whenReady().then(async () => {
           console.error('Failed to rebuild extensions after updating custom folders:', error);
         }
       }
+      if (patch.scriptCommandFolders !== undefined) {
+        invalidateScriptCommandsCache();
+        invalidateCache();
+        broadcastCommandsUpdated();
+      }
+      if (
+        patch.emojiPickerEnabled !== undefined ||
+        patch.emojiPickerTriggerPrefix !== undefined ||
+        patch.disabledCommands !== undefined ||
+        patch.enabledCommands !== undefined
+      ) {
+        refreshEmojiTriggerMonitor();
+      }
       if (patch.fileSearchProtectedRootsEnabled !== undefined) {
         startFileSearchIndexing({
           homeDir: app.getPath('home'),
@@ -11099,10 +13422,9 @@ app.whenReady().then(async () => {
       // deferred to avoid triggering permission dialogs during onboarding.
       if (patch.hasSeenOnboarding === true) {
         fnWatcherOnboardingOverride = false;
-        if (process.platform === 'darwin') {
-          app.dock.hide();
-        }
+        enterOverlayMacActivationPolicy();
         startClipboardMonitor();
+        setClipboardAppBlacklist(loadSettings().clipboardAppBlacklist);
         syncFnSpeakToggleWatcher(loadSettings().commandHotkeys);
         syncFnCommandWatchers(loadSettings().commandHotkeys);
       }
@@ -11126,9 +13448,154 @@ app.whenReady().then(async () => {
       if (patch.hyperKey !== undefined) {
         syncHyperKeyMonitor();
       }
+      if (patch.clipboardHistoryRetentionDays !== undefined) {
+        pruneClipboardHistoryOlderThan(result.clipboardHistoryRetentionDays);
+      }
+      if (patch.clipboardAppBlacklist !== undefined) {
+        setClipboardAppBlacklist(result.clipboardAppBlacklist);
+      }
       return result;
     }
   );
+
+  ipcMain.handle('rayconfig-import', async (event: any) => {
+    suppressBlurHide = true;
+    try {
+      const result = await importRaycastConfigFromFile(getDialogParentWindow(event));
+      if (!result.canceled) {
+        invalidateScriptCommandsCache();
+        invalidateCache();
+        broadcastCommandsUpdated();
+        for (const extensionName of result.importedExtensionPreferenceExtensions || []) {
+          broadcastExtensionPreferencesUpdated(extensionName);
+        }
+        if (result.aiChats.found > 0) {
+          broadcastAiChatsUpdated();
+        }
+        const latestSettings = loadSettings();
+        const windowsToNotify = [mainWindow, settingsWindow, extensionStoreWindow, promptWindow]
+          .filter(Boolean) as Array<InstanceType<typeof BrowserWindow>>;
+        for (const win of windowsToNotify) {
+          if (win.isDestroyed()) continue;
+          try {
+            win.webContents.send('settings-updated', latestSettings);
+          } catch {}
+        }
+      }
+      return result;
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
+  ipcMain.handle('rayconfig-preview', async (event: any) => {
+    suppressBlurHide = true;
+    try {
+      return await previewRaycastConfigImport(getDialogParentWindow(event));
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
+  ipcMain.handle('rayconfig-import-apply', async (_event: any, options: any) => {
+    const sender = _event.sender;
+    const reportProgress = (payload: RaycastImportProgress) => {
+      try {
+        sender.send('rayconfig-import-progress', payload);
+      } catch {}
+    };
+    const result = await executeRaycastConfigImport(options, (payload) => {
+      reportProgress({
+        sessionId: String(options?.sessionId || ''),
+        ...payload,
+      });
+    });
+    if (!result.canceled) {
+      invalidateScriptCommandsCache();
+      invalidateCache();
+      broadcastCommandsUpdated();
+      for (const extensionName of result.importedExtensionPreferenceExtensions || []) {
+        broadcastExtensionPreferencesUpdated(extensionName);
+      }
+      if (result.aiChats.found > 0) {
+        broadcastAiChatsUpdated();
+      }
+      const latestSettings = loadSettings();
+      const windowsToNotify = [mainWindow, settingsWindow, extensionStoreWindow, promptWindow]
+        .filter(Boolean) as Array<InstanceType<typeof BrowserWindow>>;
+      for (const win of windowsToNotify) {
+        if (win.isDestroyed()) continue;
+        try {
+          win.webContents.send('settings-updated', latestSettings);
+        } catch {}
+      }
+    }
+    return result;
+  });
+
+  ipcMain.handle('get-extension-preferences-snapshot', () => {
+    return getExtensionPreferencesSnapshot();
+  });
+
+  ipcMain.handle('get-ai-chat-snapshot', () => {
+    return getAiChatSnapshot();
+  });
+
+  ipcMain.handle('upsert-ai-chat-conversation', (_event: any, conversation: any) => {
+    const result = upsertAiChatConversation(conversation);
+    if (result) {
+      broadcastAiChatsUpdated();
+    }
+    return result;
+  });
+
+  ipcMain.handle('delete-ai-chat-conversation', (_event: any, id: string) => {
+    const removed = deleteAiChatConversation(id);
+    if (removed) {
+      broadcastAiChatsUpdated();
+    }
+    return removed;
+  });
+
+  ipcMain.handle('merge-ai-chat-snapshot', (_event: any, snapshot: any) => {
+    const result = mergeAiChatSnapshot(snapshot);
+    broadcastAiChatsUpdated();
+    return result;
+  });
+
+  ipcMain.handle('get-extension-preferences', (_event: any, extName: string, cmdName?: string) => {
+    return getExtensionPreferences(extName, cmdName);
+  });
+
+  ipcMain.handle(
+    'set-extension-preference',
+    (_event: any, extName: string, preferenceName: string, value: any, cmdName?: string) => {
+      const result = setExtensionPreferenceValue(extName, preferenceName, value, cmdName);
+      broadcastExtensionPreferencesUpdated(extName);
+      return result;
+    }
+  );
+
+  ipcMain.handle(
+    'set-extension-preferences',
+    (_event: any, extName: string, values: Record<string, any>, cmdName?: string) => {
+      const result = setExtensionPreferences(extName, values, cmdName);
+      broadcastExtensionPreferencesUpdated(extName);
+      return result;
+    }
+  );
+
+  ipcMain.handle('merge-extension-preferences-snapshot', (_event: any, snapshot: any) => {
+    const result = mergeExtensionPreferencesSnapshot(snapshot);
+    for (const extensionName of Object.keys(snapshot?.extensions || {})) {
+      broadcastExtensionPreferencesUpdated(extensionName);
+    }
+    for (const commandKey of Object.keys(snapshot?.commands || {})) {
+      const extensionName = String(commandKey || '').split('/')[0] || '';
+      if (extensionName) broadcastExtensionPreferencesUpdated(extensionName);
+    }
+    return result;
+  });
 
   ipcMain.handle('get-all-commands', async () => {
     // Return ALL commands (ignoring disabled filter) for the settings page
@@ -11312,6 +13779,7 @@ app.whenReady().then(async () => {
       }
 
       saveSettings({ disabledCommands: disabled, enabledCommands: explicitlyEnabled });
+      broadcastCommandsUpdated();
       return true;
     }
   );
@@ -11336,7 +13804,9 @@ app.whenReady().then(async () => {
   ipcMain.handle('open-custom-scripts-folder', async () => {
     try {
       const ensured = ensureSampleScriptCommand();
-      await shell.openPath(ensured.scriptsDir);
+      void shell.openPath(ensured.scriptsDir).catch((error: unknown) => {
+        console.error('Failed to open custom scripts folder:', error);
+      });
       return {
         success: true,
         folderPath: ensured.scriptsDir,
@@ -11380,70 +13850,34 @@ app.whenReady().then(async () => {
 
   // ─── IPC: Open URL (for extensions) ─────────────────────────────
 
+  ipcMain.handle('quit-app', async (_event: any, appPath: string, force?: boolean) => {
+    if (!appPath) return false;
+    const { execFileSync } = require('child_process') as typeof import('child_process');
+    try {
+      const appName = String(appPath).split('/').pop()?.replace('.app', '') || '';
+      if (!appName) return false;
+      try { execFileSync('/usr/bin/pgrep', ['-x', appName], { encoding: 'utf8' }); } catch { return false; }
+      if (force) {
+        execFileSync('/usr/bin/killall', ['-9', appName], { encoding: 'utf8' });
+      } else {
+        execFileSync('/usr/bin/osascript', ['-e', `quit app "${appName}"`], { encoding: 'utf8' });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  });
+
   ipcMain.handle('open-url', async (_event: any, target: string, application?: string) => {
     if (!target) return false;
     const rawTarget = String(target).trim();
     if (!rawTarget) return false;
     const appName = typeof application === 'string' ? application.trim() : '';
 
-    if (rawTarget.startsWith('raycast://')) {
-      const deepLink = parseRaycastDeepLink(rawTarget);
-      if (!deepLink) {
-        console.warn(`Unsupported Raycast deep link: ${rawTarget}`);
-        return false;
-      }
-
-      if (deepLink.type === 'scriptCommand') {
-        const script = getScriptCommandBySlug(deepLink.commandName);
-        if (!script) {
-          console.warn(`Script command deeplink target not found: ${deepLink.commandName}`);
-          return false;
-        }
-        try {
-          await showWindow();
-          const payload = JSON.stringify({
-            commandId: script.id,
-            arguments: deepLink.arguments || [],
-            source: 'deeplink',
-          });
-          await mainWindow?.webContents.executeJavaScript(
-            `window.dispatchEvent(new CustomEvent('sc-run-script-command', { detail: ${payload} }));`,
-            true
-          );
-          return true;
-        } catch (e) {
-          console.error(`Failed to launch script command deeplink: ${rawTarget}`, e);
-          return false;
-        }
-      }
-
-      try {
-        const bundle = await buildLaunchBundle({
-          extensionName: deepLink.extensionName,
-          commandName: deepLink.commandName,
-          args: deepLink.arguments,
-          type: deepLink.launchType || 'userInitiated',
-          fallbackText: deepLink.fallbackText || null,
-        });
-        await showWindow();
-        const payload = JSON.stringify({
-          bundle,
-          launchOptions: { type: bundle.launchType || 'userInitiated' },
-          source: {
-            commandMode: 'deeplink',
-            extensionName: bundle.extensionName,
-            commandName: bundle.commandName,
-          },
-        });
-        await mainWindow?.webContents.executeJavaScript(
-          `window.dispatchEvent(new CustomEvent('sc-launch-extension-bundle', { detail: ${payload} }));`,
-          true
-        );
-        return true;
-      } catch (e) {
-        console.error(`Failed to launch Raycast deep link: ${rawTarget}`, e);
-        return false;
-      }
+    if (isCommandDeepLink(rawTarget)) {
+      const launched = await launchCommandDeepLink(rawTarget);
+      if (launched) return true;
+      return false;
     }
 
     return await openTargetWithApplication(rawTarget, appName);
@@ -12318,13 +14752,28 @@ return appURL's |path|() as text`,
   });
 
   // Run AppleScript
-  ipcMain.handle('run-applescript', async (_event: any, script: string) => {
+  ipcMain.handle('run-applescript', async (_event: any, script: string, options?: { language?: string; humanReadableOutput?: boolean; timeout?: number }) => {
     try {
       const { spawnSync } = require('child_process');
-      const proc = spawnSync('/usr/bin/osascript', ['-l', 'AppleScript'], {
+      const rawLanguage = String(options?.language || 'AppleScript').trim();
+      const language = /^javascript$/i.test(rawLanguage) ? 'JavaScript' : 'AppleScript';
+      const args = ['-l', language];
+      if (options?.humanReadableOutput === false) {
+        args.push('-s', 's');
+      }
+      const timeout = typeof options?.timeout === 'number' && Number.isFinite(options.timeout)
+        ? Math.max(1, Math.min(options.timeout, 5 * 60 * 1000))
+        : undefined;
+
+      const proc = spawnSync('/usr/bin/osascript', args, {
         input: script,
         encoding: 'utf-8',
+        timeout,
       });
+
+      if (proc.error) {
+        throw proc.error;
+      }
 
       if (proc.status !== 0) {
         const stderr = (proc.stderr || '').trim() || 'AppleScript execution failed';
@@ -12379,6 +14828,154 @@ return appURL's |path|() as text`,
         console.error(`Failed to trash ${p}:`, e);
       }
     }
+  });
+
+  // App uninstall: scan for remnants
+  ipcMain.handle('app-uninstall-scan', async (_event: any, appPath: string) => {
+    try {
+      return await scanAppRemnants(appPath);
+    } catch (e) {
+      console.error('[app-uninstall-scan] Error:', e);
+      return { appName: path.basename(appPath, '.app'), bundleId: '', appPath, appIconDataUrl: '', remnants: [], totalSizeBytes: 0 };
+    }
+  });
+
+  // App uninstall: execute (move paths to trash)
+  ipcMain.handle('app-uninstall-execute', async (_event: any, paths: string[]) => {
+    const home = app.getPath('home');
+    const allowedPrefixes = [
+      '/Applications/',
+      path.join(home, 'Applications') + '/',
+      path.join(home, 'Library') + '/',
+      '/Library/LaunchAgents/',
+      '/Library/LaunchDaemons/',
+    ];
+
+    // Validate all paths — must be absolute and under known directories
+    const validPaths = paths.filter(p => {
+      if (!path.isAbsolute(p)) return false;
+      // Reject paths with traversal
+      if (p.includes('/../') || p.endsWith('/..')) return false;
+      return allowedPrefixes.some(prefix => p.startsWith(prefix));
+    });
+
+    const errors: string[] = [];
+    const needsElevation: string[] = [];
+
+    for (const p of validPaths) {
+      try {
+        await shell.trashItem(p);
+      } catch (e: any) {
+        if (e.message?.includes('permission') || e.message?.includes('EACCES') || e.message?.includes('Operation not permitted')) {
+          needsElevation.push(p);
+        } else {
+          errors.push(`${p}: ${e.message || e}`);
+        }
+      }
+    }
+
+    // Retry failed paths with AppleScript elevation (prompts for admin password)
+    // Uses Finder's native "move to trash" via AppleScript — no shell interpolation
+    if (needsElevation.length > 0) {
+      try {
+        const { execFile } = require('child_process');
+        const { promisify } = require('util');
+        const execFileAsync = promisify(execFile);
+
+        // Use Finder's native trash via AppleScript — safe, no shell injection
+        const posixItems = needsElevation.map(p => `(POSIX file "${p.replace(/["\\]/g, '\\$&')}") as alias`).join(', ');
+        const script = `tell application "Finder" to delete {${posixItems}}`;
+
+        await execFileAsync('/usr/bin/osascript', ['-e', script], { timeout: 30000 });
+      } catch (e: any) {
+        for (const p of needsElevation) {
+          errors.push(`${p}: Permission denied`);
+        }
+      }
+    }
+
+    return { success: errors.length === 0, errors };
+  });
+
+  // ─── Auto Quit ─────────────────────────────────────────────────────────────
+  const autoQuitManager = require('./auto-quit-manager') as typeof import('./auto-quit-manager');
+
+  // Initialize auto-quit if there are apps configured
+  const initialAutoQuitApps = (loadSettings() as AppSettings).autoQuitApps || [];
+  if (initialAutoQuitApps.length > 0) {
+    autoQuitManager.startAutoQuit(initialAutoQuitApps);
+  }
+
+  ipcMain.handle('auto-quit-get-apps', () => {
+    return (loadSettings() as AppSettings).autoQuitApps || [];
+  });
+
+  ipcMain.handle('auto-quit-add-app', async (_event: any, entry: { appPath: string; appName: string; timeoutSeconds: number }) => {
+    // Validate inputs
+    if (!entry || typeof entry.appPath !== 'string' || typeof entry.appName !== 'string' || typeof entry.timeoutSeconds !== 'number') return;
+
+    // Validate appPath: must be absolute, end with .app, under known app directories, no traversal
+    const resolvedPath = path.resolve(entry.appPath);
+    if (resolvedPath !== entry.appPath) return; // reject relative or traversal paths
+    if (!resolvedPath.endsWith('.app')) return;
+    const allowedAppPrefixes = ['/Applications', '/System/Applications', path.join(os.homedir(), 'Applications')];
+    if (!allowedAppPrefixes.some(prefix => resolvedPath.startsWith(prefix + '/'))) return;
+
+    // Validate appName: strip anything suspicious, max 200 chars
+    const safeName = String(entry.appName).replace(/[^\w\s\-().]/g, '').slice(0, 200);
+    if (!safeName) return;
+
+    // Validate timeoutSeconds: clamp to 30–3600
+    const safeTimeout = Math.max(30, Math.min(3600, Math.floor(entry.timeoutSeconds)));
+    if (!Number.isFinite(safeTimeout)) return;
+
+    // Resolve bundle ID from app path
+    let bundleId = '';
+    try {
+      const plistPath = path.join(resolvedPath, 'Contents', 'Info.plist');
+      bundleId = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', plistPath], {
+        encoding: 'utf-8',
+        timeout: 3000,
+      }).trim();
+    } catch {
+      // Fallback: use app name as identifier
+      bundleId = 'supercmd.autoquit.' + safeName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    }
+    if (!bundleId) return;
+
+    // Validate bundle ID to prevent AppleScript injection
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9.\-]*$/.test(bundleId) || bundleId.length > 255) return;
+
+    const resolved = { bundleId, appName: safeName, appPath: resolvedPath, timeoutSeconds: safeTimeout };
+    const settings = loadSettings() as AppSettings;
+    const apps = [...(settings.autoQuitApps || [])];
+    const idx = apps.findIndex(a => a.bundleId === bundleId);
+    if (idx >= 0) {
+      apps[idx] = resolved;
+    } else {
+      apps.push(resolved);
+    }
+    saveSettings({ autoQuitApps: apps } as Partial<AppSettings>);
+    autoQuitManager.updateAutoQuitApps(apps);
+    return bundleId;
+  });
+
+  ipcMain.handle('auto-quit-remove-app', (_event: any, appPath: string) => {
+    if (typeof appPath !== 'string' || !path.isAbsolute(appPath)) return;
+    const settings = loadSettings() as AppSettings;
+    const apps = (settings.autoQuitApps || []).filter((a: any) => a.appPath !== appPath);
+    saveSettings({ autoQuitApps: apps } as Partial<AppSettings>);
+    autoQuitManager.updateAutoQuitApps(apps);
+  });
+
+  ipcMain.handle('auto-quit-get-default-timeout', () => {
+    return ((loadSettings() as AppSettings).autoQuitDefaultTimeoutSeconds) ?? 180;
+  });
+
+  ipcMain.handle('auto-quit-set-default-timeout', (_event: any, seconds: number) => {
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return;
+    const clamped = Math.max(30, Math.min(3600, Math.floor(seconds)));
+    saveSettings({ autoQuitDefaultTimeoutSeconds: clamped } as Partial<AppSettings>);
   });
 
   // File system operations for extensions
@@ -12491,6 +15088,43 @@ return appURL's |path|() as text`,
     }
   });
 
+  // Get .app bundle icon by reading its .icns file directly (avoids template-image transparency issues)
+  ipcMain.handle('get-app-icon-data-url', async (_event: any, appPath: string, size = 32) => {
+    try {
+      const plistPath = path.join(appPath, 'Contents', 'Info.plist');
+      if (!fs.existsSync(plistPath)) return null;
+
+      let iconFileName = '';
+      try {
+        iconFileName = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIconFile', plistPath], {
+          encoding: 'utf-8',
+          timeout: 3000,
+        }).trim();
+      } catch { return null; }
+
+      if (!iconFileName) return null;
+      if (!iconFileName.endsWith('.icns')) iconFileName += '.icns';
+
+      const icnsPath = path.join(appPath, 'Contents', 'Resources', iconFileName);
+      if (!fs.existsSync(icnsPath)) return null;
+
+      // Convert .icns to PNG via sips, return as base64 data URL (avoid nativeImage crash)
+      const os = require('os');
+      const tmpPng = path.join(os.tmpdir(), `sc-icon-${Date.now()}.png`);
+      try {
+        execFileSync('/usr/bin/sips', ['-s', 'format', 'png', '-z', String(size * 2), String(size * 2), icnsPath, '--out', tmpPng], {
+          timeout: 5000,
+        });
+        const pngBuf = fs.readFileSync(tmpPng);
+        return `data:image/png;base64,${pngBuf.toString('base64')}`;
+      } finally {
+        try { fs.unlinkSync(tmpPng); } catch {}
+      }
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle('file-search-query', async (_event: any, query: string, options?: { limit?: number }) => {
     return await searchIndexedFiles(query, { limit: Number(options?.limit) || undefined });
   });
@@ -12576,6 +15210,9 @@ return appURL's |path|() as text`,
       // Invalidate command cache so new extensions appear in the launcher
       invalidateCache();
       broadcastExtensionsUpdated();
+      // Record the install in synced settings so the user's other Macs
+      // auto-install on their next launch.
+      addInstalledExtensionToSettings(name);
       return true;
     }
   );
@@ -12587,7 +15224,14 @@ return appURL's |path|() as text`,
       if (success) {
         // Invalidate command cache so removed extensions disappear
         invalidateCache();
+        // Tell the launcher renderer to tear down any live runners (menu-bar
+        // tray, background no-view loop, interval re-runner) for this
+        // extension before its bundle keeps trying to re-mount itself.
+        broadcastExtensionUninstalled(name);
         broadcastExtensionsUpdated();
+        // Record the uninstall in synced settings so other Macs don't
+        // re-install it on their next launch.
+        removeInstalledExtensionFromSettings(name);
       }
       return success;
     }
@@ -12666,6 +15310,20 @@ return appURL's |path|() as text`,
   });
 
   ipcMain.handle('clipboard-paste-item', async (_event: any, id: string) => {
+    // If the AI prompt window is open, redirect text into its textarea instead.
+    if (promptWindow && !promptWindow.isDestroyed() && promptWindow.isVisible()) {
+      const item = getClipboardItemById(id);
+      if (item && (item.type === 'text' || item.type === 'url')) {
+        const text = String(item.content || '');
+        if (text) {
+          if (isVisible) hideWindow();
+          promptWindow.webContents.send('prompt-insert-text', text);
+          promptWindow.focus();
+          return true;
+        }
+      }
+    }
+
     const success = copyItemToClipboard(id);
     if (!success) return false;
 
@@ -12897,6 +15555,69 @@ if let tiff = image?.tiffRepresentation {
     }
   });
 
+  // ─── IPC: Browser Search ────────────────────────────────────────
+
+  ipcMain.handle('browser-search:open', async (_event: any, input: string) => {
+    const result = await bsOpen(String(input || ''));
+    if (result.ok) {
+      try {
+        broadcastBrowserSearchHistoryChanged();
+      } catch {}
+    }
+    return {
+      ok: result.ok,
+      type: result.resolved?.type ?? null,
+      url: result.resolved?.url ?? null,
+    };
+  });
+
+  ipcMain.handle('browser-search:resolve', (_event: any, input: string) => {
+    const resolved = bsResolveInput(String(input || ''));
+    if (!resolved) return null;
+    return { type: resolved.type, url: resolved.url, host: resolved.host };
+  });
+
+  ipcMain.handle('browser-search:list-entries', () => {
+    return bsListEntries();
+  });
+
+  ipcMain.handle('browser-search:autocomplete', (_event: any, input: string) => {
+    return bsGetAutocomplete(String(input || ''));
+  });
+
+  ipcMain.handle('browser-search:suggest', async (_event: any, input: string) => {
+    return await bsFetchSearchSuggestion(String(input || ''));
+  });
+
+  ipcMain.handle('browser-search:clear-history', () => {
+    bsClearHistory();
+    try {
+      broadcastBrowserSearchHistoryChanged();
+    } catch {}
+    return true;
+  });
+
+  ipcMain.handle('browser-search:list-browsers', () => {
+    return bsListImportableBrowsers().map((b) => ({
+      id: b.id,
+      name: b.name,
+      available: b.available,
+    }));
+  });
+
+  ipcMain.handle('browser-search:import', async (_event: any, browserId: BrowserSearchSource) => {
+    const result = await bsImportFromBrowser(browserId);
+    try {
+      broadcastBrowserSearchHistoryChanged();
+    } catch {}
+    return result;
+  });
+
+  // Run a retention prune on startup so out-of-window entries don't linger.
+  try {
+    bsPruneByRetention();
+  } catch {}
+
   ipcMain.handle('get-selected-text', async () => {
     const fresh = String(await getSelectedTextForSpeak() || '');
     if (fresh.trim().length > 0) {
@@ -13008,17 +15729,47 @@ if let tiff = image?.tiffRepresentation {
   });
 
   ipcMain.handle('snippet-paste', async (_event: any, id: string) => {
-    const success = copySnippetToClipboard(id);
-    if (!success) return false;
+    // If the AI prompt window is open, redirect text into its textarea instead.
+    if (promptWindow && !promptWindow.isDestroyed() && promptWindow.isVisible()) {
+      const text = renderSnippetById(id);
+      if (text) {
+        if (isVisible) hideWindow();
+        promptWindow.webContents.send('prompt-insert-text', text);
+        promptWindow.focus();
+        return true;
+      }
+    }
 
-    return await hideAndPaste();
+    const text = renderSnippetById(id);
+    if (text == null) return false;
+
+    // Hide the launcher so the paste lands in the previously focused app.
+    if (isVisible) hideWindow();
+
+    // pasteTextToActiveApp saves the user's clipboard, writes the snippet,
+    // pastes it via the active app, then restores the original clipboard —
+    // so the snippet text doesn't linger on the pasteboard.
+    return await pasteTextToActiveApp(text);
   });
 
   ipcMain.handle('snippet-paste-resolved', async (_event: any, id: string, dynamicValues?: Record<string, string>) => {
-    const success = copySnippetToClipboardResolved(id, dynamicValues);
-    if (!success) return false;
+    // If the AI prompt window is open, redirect text into its textarea instead.
+    if (promptWindow && !promptWindow.isDestroyed() && promptWindow.isVisible()) {
+      const text = renderSnippetById(id, dynamicValues);
+      if (text) {
+        if (isVisible) hideWindow();
+        promptWindow.webContents.send('prompt-insert-text', text);
+        promptWindow.focus();
+        return true;
+      }
+    }
 
-    return await hideAndPaste();
+    const text = renderSnippetById(id, dynamicValues);
+    if (text == null) return false;
+
+    if (isVisible) hideWindow();
+
+    return await pasteTextToActiveApp(text);
   });
 
   ipcMain.handle('snippet-import', async (event: any) => {
@@ -13370,6 +16121,10 @@ if let tiff = image?.tiffRepresentation {
       return { typed: false, fallbackClipboard: false };
     }
 
+    if (await insertTextIntoWhisperSuperCmdTarget(nextText)) {
+      return { typed: true, fallbackClipboard: false };
+    }
+
     await activateLastFrontmostApp();
     await new Promise((resolve) => setTimeout(resolve, 70));
     let typed = await pasteTextToActiveApp(nextText);
@@ -13398,26 +16153,23 @@ if let tiff = image?.tiffRepresentation {
     const nextText = String(payload?.nextText || '');
     if (!nextText.trim()) return false;
 
-    // Ensure prompt window is closed before typing/replacing so text is not inserted back into prompt UI.
+    // Close the prompt window before typing so keystrokes land in the original app.
     hidePromptWindow();
     await activateLastFrontmostApp();
     await new Promise((resolve) => setTimeout(resolve, 70));
 
+    let applied: boolean;
     if (previousText.trim()) {
       // Use paste-based replacement first to preserve all newlines exactly.
-      let replaced = await replaceTextViaBackspaceAndPaste(previousText, nextText);
-      if (!replaced) {
-        replaced = await replaceTextDirectly(previousText, nextText);
-      }
-      return replaced;
+      applied = await replaceTextViaBackspaceAndPaste(previousText, nextText);
+      if (!applied) applied = await replaceTextDirectly(previousText, nextText);
+    } else {
+      // Paste first so multiline responses keep exact line breaks.
+      applied = await pasteTextToActiveApp(nextText);
+      if (!applied) applied = await typeTextDirectly(nextText);
     }
 
-    // Paste first so multiline responses keep exact line breaks.
-    let typed = await pasteTextToActiveApp(nextText);
-    if (!typed) {
-      typed = await typeTextDirectly(nextText);
-    }
-    return typed;
+    return applied;
   });
 
   ipcMain.on('whisper-debug-log', (_event: any, payload: { tag?: string; message?: string; data?: any }) => {
@@ -13492,6 +16244,64 @@ if let tiff = image?.tiffRepresentation {
       activeAIRequests.delete(requestId);
     }
   });
+
+  ipcMain.handle(
+    'ai-chat',
+    async (
+      event: any,
+      requestId: string,
+      messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+      options?: { model?: string; creativity?: number; systemPrompt?: string }
+    ) => {
+      const s = loadSettings();
+      if (s.ai?.llmEnabled === false) {
+        event.sender.send('ai-stream-error', { requestId, error: 'LLM is disabled in Settings → AI.' });
+        return;
+      }
+      if (!isAIAvailable(s.ai)) {
+        event.sender.send('ai-stream-error', { requestId, error: 'AI is not configured. Please set up an API key in Settings → AI.' });
+        return;
+      }
+
+      const controller = new AbortController();
+      activeAIRequests.set(requestId, controller);
+
+      try {
+        const latestUser = [...(messages || [])].reverse().find((m) => m.role === 'user');
+        const memoryContextSystemPrompt = await buildMemoryContextSystemPrompt(
+          s,
+          String(latestUser?.content || ''),
+          { limit: 6 }
+        );
+        const mergedSystemPrompt = [options?.systemPrompt, memoryContextSystemPrompt]
+          .filter((part) => typeof part === 'string' && part.trim().length > 0)
+          .join('\n\n');
+
+        const gen = streamAIChat(s.ai, {
+          messages: (messages || []).map((m) => ({ role: m.role, content: String(m.content || '') })),
+          model: options?.model,
+          creativity: options?.creativity,
+          systemPrompt: mergedSystemPrompt || undefined,
+          signal: controller.signal,
+        });
+
+        for await (const chunk of gen) {
+          if (controller.signal.aborted) break;
+          event.sender.send('ai-stream-chunk', { requestId, chunk });
+        }
+
+        if (!controller.signal.aborted) {
+          event.sender.send('ai-stream-done', { requestId });
+        }
+      } catch (e: any) {
+        if (!controller.signal.aborted) {
+          event.sender.send('ai-stream-error', { requestId, error: e?.message || 'AI request failed' });
+        }
+      } finally {
+        activeAIRequests.delete(requestId);
+      }
+    }
+  );
 
   ipcMain.handle('ai-is-available', () => {
     const s = loadSettings();
@@ -13578,7 +16388,7 @@ if let tiff = image?.tiffRepresentation {
       }
 
       // Parse speechToTextModel to a concrete provider/model pair.
-      let provider: 'parakeet' | 'qwen3' | 'whispercpp' | 'openai' | 'elevenlabs' = 'whispercpp';
+      let provider: 'parakeet' | 'qwen3' | 'whispercpp' | 'openai' | 'elevenlabs' | 'mistral' = 'whispercpp';
       let model = `ggml-${WHISPERCPP_MODEL_NAME}`;
       const sttModel = s.ai.speechToTextModel || '';
       if (sttModel === 'parakeet') {
@@ -13600,6 +16410,9 @@ if let tiff = image?.tiffRepresentation {
       } else if (sttModel.startsWith('elevenlabs-')) {
         provider = 'elevenlabs';
         model = resolveElevenLabsSttModel(sttModel);
+      } else if (sttModel.startsWith('mistral-')) {
+        provider = 'mistral';
+        model = sttModel.slice('mistral-'.length) || 'voxtral-mini-latest';
       } else if (sttModel) {
         model = sttModel;
       }
@@ -13610,6 +16423,10 @@ if let tiff = image?.tiffRepresentation {
       const elevenLabsApiKey = getElevenLabsApiKey(s);
       if (provider === 'elevenlabs' && !elevenLabsApiKey) {
         throw new Error('ElevenLabs API key not configured. Set it in Settings -> AI (or ELEVENLABS_API_KEY env var).');
+      }
+      const mistralApiKey = getMistralApiKey(s);
+      if (provider === 'mistral' && !mistralApiKey) {
+        throw new Error('Mistral API key not configured. Set it in Settings -> AI (or MISTRAL_API_KEY env var).');
       }
 
       const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
@@ -13646,6 +16463,14 @@ if let tiff = image?.tiffRepresentation {
                 language,
                 mimeType,
               })
+            : provider === 'mistral'
+              ? await transcribeAudioWithMistralVoxtral({
+                  audioBuffer,
+                  apiKey: mistralApiKey,
+                  model,
+                  language,
+                  mimeType,
+                })
             : await transcribeAudio({
                 audioBuffer,
                 apiKey: s.ai.openaiApiKey,
@@ -14296,6 +17121,191 @@ if let tiff = image?.tiffRepresentation {
     }
   });
 
+  // ─── IPC: Native Keyboard Lock (clean-keyboard extension bridge) ─
+
+  ipcMain.handle('keyboard-lock:start', async (_event: any, durationSec: number) => {
+    const fsNative = require('fs');
+    const { spawn, execFileSync } = require('child_process');
+    const binaryPath = getNativeBinaryPath('keyboard-lock');
+
+    // Build on demand in development when binary artifacts are missing.
+    if (!fsNative.existsSync(binaryPath)) {
+      try {
+        const sourceCandidates = [
+          path.join(app.getAppPath(), 'src', 'native', 'keyboard-lock.swift'),
+          path.join(process.cwd(), 'src', 'native', 'keyboard-lock.swift'),
+          path.join(__dirname, '..', '..', 'src', 'native', 'keyboard-lock.swift'),
+        ];
+        const sourcePath = sourceCandidates.find((candidate: string) => fsNative.existsSync(candidate));
+        if (!sourcePath) {
+          return { ok: false, error: 'keyboard-lock binary and source file not found' };
+        }
+        fsNative.mkdirSync(path.dirname(binaryPath), { recursive: true });
+        execFileSync('swiftc', ['-O', '-o', binaryPath, sourcePath, '-framework', 'CoreGraphics', '-framework', 'Foundation']);
+      } catch (error: any) {
+        console.error('[KeyboardLock] Failed to compile native helper:', error);
+        return { ok: false, error: String(error?.message || error) };
+      }
+    }
+
+    // If a previous lock is still running, stop it first.
+    if (keyboardLockProcess) {
+      try { keyboardLockProcess.stdin?.write('stop\n'); } catch {}
+      try { keyboardLockProcess.kill('SIGTERM'); } catch {}
+      keyboardLockProcess = null;
+    }
+
+    const safeDuration = Number.isFinite(durationSec) && durationSec > 0
+      ? Math.min(3600, Math.round(durationSec))
+      : 15;
+
+    return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      let settled = false;
+      const child = spawn(binaryPath, [String(safeDuration)], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      keyboardLockProcess = child;
+
+      let stdoutBuffer = '';
+      let stderrBuffer = '';
+
+      child.stdout?.on('data', (chunk: Buffer) => {
+        stdoutBuffer += chunk.toString('utf8');
+        if (!settled && stdoutBuffer.includes('ready')) {
+          settled = true;
+          resolve({ ok: true });
+        }
+      });
+
+      child.stderr?.on('data', (chunk: Buffer) => {
+        stderrBuffer += chunk.toString('utf8');
+      });
+
+      child.on('exit', (code: number | null) => {
+        if (keyboardLockProcess === child) {
+          keyboardLockProcess = null;
+        }
+        // Wake any pending stop() callers.
+        const resolvers = keyboardLockReleaseResolvers.slice();
+        keyboardLockReleaseResolvers = [];
+        for (const fn of resolvers) {
+          try { fn(); } catch {}
+        }
+        if (!settled) {
+          settled = true;
+          const message = stderrBuffer.trim() || `keyboard-lock exited with code ${code}`;
+          resolve({ ok: false, error: message });
+        }
+      });
+
+      child.on('error', (error: Error) => {
+        if (!settled) {
+          settled = true;
+          resolve({ ok: false, error: error.message });
+        }
+      });
+    });
+  });
+
+  ipcMain.handle('keyboard-lock:stop', async () => {
+    const child = keyboardLockProcess;
+    if (!child) return { ok: true };
+
+    return await new Promise<{ ok: boolean }>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok: true });
+      };
+
+      keyboardLockReleaseResolvers.push(finish);
+
+      try {
+        child.stdin?.write('stop\n');
+      } catch {
+        // stdin may already be closed; SIGTERM as fallback below
+      }
+
+      // Belt-and-suspenders: if the child doesn't exit promptly, force it.
+      setTimeout(() => {
+        if (settled) return;
+        try { child.kill('SIGTERM'); } catch {}
+      }, 250);
+      setTimeout(() => {
+        if (settled) return;
+        try { child.kill('SIGKILL'); } catch {}
+        finish();
+      }, 1500);
+    });
+  });
+
+  // ─── IPC: Native Screen OCR (screenocr extension bridge) ─────────
+
+  ipcMain.handle('screen-ocr:run', async (_event: any, mode: 'recognize' | 'barcode', options: any) => {
+    const fsNative = require('fs');
+    const { execFile, execFileSync } = require('child_process');
+    const binaryPath = getNativeBinaryPath('screen-ocr');
+
+    if (!fsNative.existsSync(binaryPath)) {
+      try {
+        const sourceCandidates = [
+          path.join(app.getAppPath(), 'src', 'native', 'screen-ocr.swift'),
+          path.join(process.cwd(), 'src', 'native', 'screen-ocr.swift'),
+          path.join(__dirname, '..', '..', 'src', 'native', 'screen-ocr.swift'),
+        ];
+        const sourcePath = sourceCandidates.find((candidate: string) => fsNative.existsSync(candidate));
+        if (!sourcePath) {
+          return { ok: false, error: 'screen-ocr binary and source file not found' };
+        }
+        fsNative.mkdirSync(path.dirname(binaryPath), { recursive: true });
+        execFileSync('swiftc', [
+          '-O', '-o', binaryPath, sourcePath,
+          '-framework', 'AppKit',
+          '-framework', 'CoreGraphics',
+          '-framework', 'Foundation',
+          '-framework', 'Vision',
+        ]);
+      } catch (error: any) {
+        console.error('[ScreenOCR] Failed to compile native helper:', error);
+        return { ok: false, error: String(error?.message || error) };
+      }
+    }
+
+    if (mode !== 'recognize' && mode !== 'barcode') {
+      return { ok: false, error: `unknown mode '${mode}'` };
+    }
+
+    const optionsJson = JSON.stringify(options || {});
+
+    // Keep the launcher hidden while screencapture's interactive selection is up.
+    suppressBlurHide = true;
+    try {
+      return await new Promise<{ ok: boolean; text?: string; error?: string }>((resolve) => {
+        // Use a generous buffer — recognized OCR text can be large.
+        execFile(binaryPath, [mode, optionsJson], { maxBuffer: 8 * 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+          if (error) {
+            resolve({ ok: false, error: stderr?.trim() || error.message });
+            return;
+          }
+          const trimmed = String(stdout || '').trim();
+          if (!trimmed) {
+            resolve({ ok: false, error: 'screen-ocr returned empty output' });
+            return;
+          }
+          try {
+            const parsed = JSON.parse(trimmed);
+            resolve(parsed);
+          } catch (e: any) {
+            resolve({ ok: false, error: `failed to parse screen-ocr output: ${e?.message || e}` });
+          }
+        });
+      });
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
   // ─── IPC: Native File Picker (for Form.FilePicker) ───────────────
   ipcMain.handle(
     'pick-files',
@@ -14361,6 +17371,63 @@ if let tiff = image?.tiffRepresentation {
     }
   });
 
+  // ─── IPC: Settings Folder Location ──────────────────────────────
+
+  ipcMain.handle('get-settings-location', () => {
+    return {
+      path: loadSettingsLocation(),
+      defaultPath: getDefaultSettingsPath(),
+    };
+  });
+
+  ipcMain.handle('pick-settings-folder', async (event: any) => {
+    suppressBlurHide = true;
+    try {
+      const result = await dialog.showOpenDialog(getDialogParentWindow(event), {
+        properties: ['openDirectory', 'createDirectory', 'dontAddToRecent'],
+        buttonLabel: 'Choose',
+        message: 'Choose a folder to store SuperCmd settings',
+        defaultPath: app.getPath('home'),
+      });
+      if (result.canceled) return null;
+      const selectedPath = String(result.filePaths?.[0] || '').trim();
+      if (!selectedPath) return null;
+      const candidate = path.join(selectedPath, 'settings.json');
+      let hasExisting = false;
+      try {
+        hasExisting = settingsFileExistsOrICloudPlaceholder(candidate);
+      } catch {
+        hasExisting = false;
+      }
+      return { path: selectedPath, hasExisting };
+    } catch (error: any) {
+      console.error('pick-settings-folder failed:', error);
+      return null;
+    } finally {
+      suppressBlurHide = false;
+    }
+  });
+
+  ipcMain.handle(
+    'relocate-settings',
+    async (_event: any, args: { targetDir: string; mode: RelocateMode }) => {
+      const mode: RelocateMode = args?.mode === 'adopt' || args?.mode === 'replace' ? args.mode : 'move';
+      const result = relocateSettingsFile(String(args?.targetDir || ''), mode);
+      if (result.ok && result.settings) {
+        broadcastSettingsToAllWindows(result.settings);
+      }
+      return result;
+    }
+  );
+
+  ipcMain.handle('reset-settings-location', async () => {
+    const result = resetSettingsLocation();
+    if (result.ok && result.settings) {
+      broadcastSettingsToAllWindows(result.settings);
+    }
+    return result;
+  });
+
   // ─── IPC: Menu Bar (Tray) Extensions ────────────────────────────
 
   // Get all menu-bar extension bundles so the renderer can run them
@@ -14396,18 +17463,39 @@ if let tiff = image?.tiffRepresentation {
 
   // Update / create a menu-bar Tray when the renderer sends menu structure
   ipcMain.on('menubar-update', (_event: any, data: any) => {
-    const { extId, iconPath, iconDataUrl, iconEmoji, iconTemplate, fallbackIconDataUrl, title, tooltip, items } = data;
+    const { extId, iconPath, iconDataUrl, iconEmoji, iconTemplate, iconBitmapScale, fallbackIconDataUrl, title, tooltip, items } = data;
 
     let tray = menuBarTrays.get(extId);
 
-    const createNativeImageFromMenuIcon = (payload: { pathValue?: string; dataUrlValue?: string }, size: number) => {
+    const createNativeImageFromMenuIcon = (
+      payload: { pathValue?: string; dataUrlValue?: string; bitmapScale?: number },
+      size: number,
+    ) => {
       try {
         const fs = require('fs');
         let image: any;
         const dataUrlValue = String(payload?.dataUrlValue || '').trim();
         const pathValue = String(payload?.pathValue || '').trim();
+        const requestedScale = Number(payload?.bitmapScale);
+        const bitmapScale = Number.isFinite(requestedScale) && requestedScale >= 1 ? requestedScale : 1;
+
         if (dataUrlValue.startsWith('data:')) {
-          image = nativeImage.createFromDataURL(dataUrlValue);
+          // For raster PNG data URLs that the renderer pre-rasterized at higher
+          // DPR (bitmapScale > 1), reconstruct via createFromBuffer with the
+          // matching scaleFactor so the Tray treats it as a retina rep instead
+          // of stretching a low-res bitmap.
+          const isRasterPng = dataUrlValue.startsWith('data:image/png');
+          if (isRasterPng && bitmapScale > 1) {
+            const commaIdx = dataUrlValue.indexOf(',');
+            const base64Body = commaIdx >= 0 ? dataUrlValue.slice(commaIdx + 1) : '';
+            const buf = base64Body ? Buffer.from(base64Body, 'base64') : null;
+            if (buf && buf.length > 0) {
+              image = nativeImage.createFromBuffer(buf, { scaleFactor: bitmapScale });
+            }
+          }
+          if (!image || image.isEmpty?.()) {
+            image = nativeImage.createFromDataURL(dataUrlValue);
+          }
         } else {
           if (!pathValue || !fs.existsSync(pathValue)) return null;
           image = nativeImage.createFromPath(pathValue);
@@ -14418,19 +17506,33 @@ if let tiff = image?.tiffRepresentation {
           }
         }
         if (!image || image.isEmpty()) return null;
-        return image.resize({ width: size, height: size });
+
+        // When the source already carries a retina backing (scaleFactor > 1),
+        // resizing to logical px would discard the @2x rep — keep it intact.
+        const currentSize = image.getSize?.() || { width: 0, height: 0 };
+        if (bitmapScale > 1 && currentSize.width === size && currentSize.height === size) {
+          return image;
+        }
+        return image.resize({ width: size, height: size, quality: 'best' });
       } catch {
         return null;
       }
     };
 
     let lastResolvedTrayIconOk = false;
+    const hasEmojiIcon = typeof iconEmoji === 'string' && iconEmoji.trim().length > 0;
     const resolveTrayIcon = () => {
-      const primaryImg = createNativeImageFromMenuIcon({ pathValue: iconPath, dataUrlValue: iconDataUrl }, 18);
+      const primaryImg = createNativeImageFromMenuIcon(
+        { pathValue: iconPath, dataUrlValue: iconDataUrl, bitmapScale: iconBitmapScale },
+        18,
+      );
       const usingPrimary = Boolean(primaryImg);
+      // When the extension supplies an emoji as its tray icon (e.g. "🎉"), we render that
+      // emoji as the tray title and leave the tray image empty. Falling back to the
+      // extension's package icon here would produce two visuals side-by-side in one slot.
       const img =
         primaryImg ||
-        createNativeImageFromMenuIcon({ dataUrlValue: fallbackIconDataUrl }, 18);
+        (hasEmojiIcon ? null : createNativeImageFromMenuIcon({ dataUrlValue: fallbackIconDataUrl }, 18));
       lastResolvedTrayIconOk = Boolean(img);
       if (img) {
         // Raycast icon tokens are serialized as data URLs and should be template images
@@ -14597,9 +17699,31 @@ if let tiff = image?.tiffRepresentation {
 
   // ─── Window + Shortcuts ─────────────────────────────────────────
 
+  if (settings.hasSeenOnboarding) {
+    enterOverlayMacActivationPolicy();
+  } else {
+    enterRegularMacActivationPolicy();
+  }
+
+  // Load persisted commands from disk so the launcher is instant on next open.
+  // This populates cachedCommands with cacheTimestamp=0 (stale), so the first
+  // getAvailableCommands() call serves the disk cache immediately and kicks off
+  // a silent background refresh.
+  initCommandsCache();
+
   createWindow();
+
+  // Kick off background discovery right away.  When it finishes, broadcast so
+  // the renderer picks up fresh data (icons, newly-installed apps, etc.).
+  void getAvailableCommands().then(async () => {
+    const inflight = getInflightDiscovery();
+    if (inflight) {
+      try { await inflight; } catch {}
+    }
+    broadcastCommandsUpdated();
+  });
+
   startInstalledAppsWatchers();
-  schedulePromptWindowPrewarm();
   registerGlobalShortcut(settings.globalShortcut);
   registerCommandHotkeys(settings.commandHotkeys);
   registerDevToolsShortcut();
@@ -14611,6 +17735,7 @@ if let tiff = image?.tiffRepresentation {
     if (focusedWindow === mainWindow) return;
     if (suppressBlurHide) return;
     if (oauthBlurHideSuppressionDepth > 0) return;
+    if (isWhisperOverlayActiveOrOpening()) return;
     if (launcherMode !== 'default') return;
     hideWindow();
   });
@@ -14676,7 +17801,12 @@ app.on('window-all-closed', () => {
   }
 });
 
+app.on('before-quit', () => {
+  prepareWindowsForAppQuit();
+});
+
 app.on('will-quit', () => {
+  prepareWindowsForAppQuit();
   stopInstalledAppsWatchers();
   globalShortcut.unregisterAll();
   if (windowManagerWorkerRestartTimer) {
@@ -14696,7 +17826,9 @@ app.on('will-quit', () => {
   stopSpeakSession({ resetStatus: false });
   stopClipboardMonitor();
   stopSnippetExpander();
+  stopEmojiTriggerMonitor();
   stopFileSearchIndexing();
+  try { soulverCalculator.shutdown(); } catch {}
   if (appTray) {
     try { appTray.destroy(); } catch {}
     appTray = null;

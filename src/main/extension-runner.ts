@@ -14,6 +14,7 @@
  */
 
 import { app } from 'electron';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -21,6 +22,7 @@ import {
   isCommandPlatformCompatible,
   isManifestPlatformCompatible,
 } from './extension-platform';
+import { getExtensionPreferences } from './extension-preferences-store';
 import { loadSettings } from './settings-store';
 
 /**
@@ -84,6 +86,7 @@ export interface ExtensionCommandInfo {
   extensionTitle: string;
   extName: string;
   cmdName: string;
+  owner?: string;
   description: string;
   mode: string;
   interval?: string;
@@ -212,6 +215,22 @@ function resolveInstalledExtensionPath(extName: string): string | null {
 
 // ─── Icon extraction ────────────────────────────────────────────────
 
+// Session-level cache: absolute icon path → stable data URL string.
+// Prevents re-reading and re-encoding the same icon file on every getCommands() call.
+const _extensionIconCache = new Map<string, string>();
+
+function resizeIconWithSips(inputPath: string): Buffer | null {
+  const tmp = path.join(os.tmpdir(), `sc-icon-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+  try {
+    execFileSync('/usr/bin/sips', ['-s', 'format', 'png', '-z', '64', '64', inputPath, '--out', tmp], { stdio: 'ignore' });
+    return fs.readFileSync(tmp);
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(tmp); } catch {}
+  }
+}
+
 function getExtensionIconDataUrl(
   extPath: string,
   iconFile: string
@@ -223,17 +242,26 @@ function getExtensionIconDataUrl(
 
   for (const p of candidates) {
     if (!fs.existsSync(p)) continue;
+
+    const cached = _extensionIconCache.get(p);
+    if (cached !== undefined) return cached;
+
     try {
       const ext = path.extname(p).toLowerCase();
       const data = fs.readFileSync(p);
       if (data.length < 50) continue;
-      const mime =
-        ext === '.svg'
-          ? 'image/svg+xml'
-          : ext === '.jpg' || ext === '.jpeg'
-            ? 'image/jpeg'
-            : 'image/png';
-      return `data:${mime};base64,${data.toString('base64')}`;
+
+      let result: string;
+      if (ext === '.svg') {
+        result = `data:image/svg+xml;base64,${data.toString('base64')}`;
+      } else {
+        const resized = resizeIconWithSips(p);
+        const finalData = resized ?? data;
+        result = `data:image/png;base64,${finalData.toString('base64')}`;
+      }
+
+      _extensionIconCache.set(p, result);
+      return result;
     } catch {}
   }
   return undefined;
@@ -292,6 +320,8 @@ export function discoverInstalledExtensionCommands(): ExtensionCommandInfo[] {
         extPath,
         pkg.icon || 'icon.png'
       );
+      const ownerRaw = pkg.owner || pkg.author || '';
+      const owner = (typeof ownerRaw === 'object' ? ownerRaw?.name || '' : String(ownerRaw || '')).trim();
 
       for (const cmd of pkg.commands || []) {
         if (!cmd.name) continue;
@@ -302,6 +332,7 @@ export function discoverInstalledExtensionCommands(): ExtensionCommandInfo[] {
           extensionTitle: pkg.title || extName,
           extName,
           cmdName: cmd.name,
+          owner: owner || undefined,
           description: cmd.description || '',
           mode: cmd.mode || 'view',
           interval: typeof cmd.interval === 'string' ? cmd.interval : undefined,
@@ -434,12 +465,63 @@ function extensionRequiresNodeModules(pkg: any): boolean {
   return getInstallableRuntimeDeps(pkg).length > 0;
 }
 
+/**
+ * Parse a tsconfig.json that may contain JSONC features (comments, trailing commas).
+ * TypeScript itself accepts these, and many Raycast extensions ship them
+ * (e.g. library-genesis has a trailing comma after `paths`).
+ */
+function parseJsonc(source: string): any {
+  // Strip block comments, then line comments, then trailing commas before } or ].
+  // String-aware: skip over double-quoted string contents so we don't mangle them.
+  let out = '';
+  let i = 0;
+  const n = source.length;
+  while (i < n) {
+    const ch = source[i];
+    // String literal — copy verbatim, honoring escapes
+    if (ch === '"') {
+      out += ch;
+      i++;
+      while (i < n) {
+        const c = source[i];
+        out += c;
+        i++;
+        if (c === '\\' && i < n) {
+          out += source[i];
+          i++;
+          continue;
+        }
+        if (c === '"') break;
+      }
+      continue;
+    }
+    // Line comment
+    if (ch === '/' && source[i + 1] === '/') {
+      i += 2;
+      while (i < n && source[i] !== '\n') i++;
+      continue;
+    }
+    // Block comment
+    if (ch === '/' && source[i + 1] === '*') {
+      i += 2;
+      while (i < n && !(source[i] === '*' && source[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  // Strip trailing commas: `,` followed by optional whitespace and `}` or `]`.
+  out = out.replace(/,(\s*[}\]])/g, '$1');
+  return JSON.parse(out);
+}
+
 function getExtensionCompilerOptions(extPath: string): Record<string, any> {
   const tsconfigPath = path.join(extPath, 'tsconfig.json');
   if (!fs.existsSync(tsconfigPath)) return {};
 
   try {
-    const parsed = JSON.parse(fs.readFileSync(tsconfigPath, 'utf-8'));
+    const parsed = parseJsonc(fs.readFileSync(tsconfigPath, 'utf-8'));
     const compilerOptions =
       parsed && typeof parsed === 'object' && parsed.compilerOptions && typeof parsed.compilerOptions === 'object'
         ? parsed.compilerOptions
@@ -637,69 +719,74 @@ export async function buildAllCommands(extName: string, extPathOverride?: string
     try {
       console.log(`  Building ${extName}/${cmd.name}…`);
 
-      await esbuild.build({
-        entryPoints: [entryFile],
-        absWorkingDir: extPath,
-        bundle: true,
-        format: 'cjs',
-        platform: 'node',
-        outfile: outFile,
-        plugins: [
-          // Mark swift: imports as external so fakeRequire can handle them at runtime
-          {
-            name: 'swift-external',
-            setup(build: any) {
-              build.onResolve({ filter: /^swift:/ }, (args: any) => ({
-                path: args.path,
-                external: true,
-              }));
+      await runEsbuildBuild(
+        esbuild,
+        {
+          entryPoints: [entryFile],
+          absWorkingDir: extPath,
+          bundle: true,
+          format: 'cjs',
+          platform: 'node',
+          outfile: outFile,
+          plugins: [
+            // Mark swift:/rust: imports as external so fakeRequire can handle them at runtime
+            {
+              name: 'native-scheme-external',
+              setup(build: any) {
+                build.onResolve({ filter: /^(swift|rust):/ }, (args: any) => ({
+                  path: args.path,
+                  external: true,
+                }));
+              },
             },
+          ],
+          external: [
+            // React — provided by the renderer at runtime
+            'react',
+            'react-dom',
+            'react-dom/*',
+            'react/jsx-runtime',
+            'react/jsx-dev-runtime',
+            // Raycast — provided by our shim
+            '@raycast/api',
+            '@raycast/utils',
+            // Native C++ addons — cannot be bundled, we stub them at runtime
+            're2',
+            'better-sqlite3',
+            'fsevents',
+            // Cross-extension calls — not supported, stubbed
+            'raycast-cross-extension',
+            // Fetch libs — use runtime shims in renderer instead of bundling Node internals
+            'node-fetch',
+            'undici',
+            'undici/*',
+            // HTTP / file-download / archive packages — must be kept external so our renderer
+            // shim can intercept them and route file I/O through the main process (which has
+            // real filesystem access). Bundling them inline breaks binary downloads because the
+            // browser renderer cannot do streaming file writes or archive extraction natively.
+            'axios',
+            'tar',
+            'extract-zip',
+            'sha256-file',
+            // Respect extension-defined externals from manifest
+            ...manifestExternal,
+            // Node.js built-ins — stubbed at runtime in the renderer
+            ...nodeBuiltins,
+          ],
+          nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
+          target: 'es2020',
+          jsx: 'automatic',
+          jsxImportSource: 'react',
+          tsconfigRaw: getEsbuildTsconfigRaw(extPath),
+          define: {
+            'process.env.NODE_ENV': '"production"',
+            'global': 'globalThis',
           },
-        ],
-        external: [
-          // React — provided by the renderer at runtime
-          'react',
-          'react-dom',
-          'react-dom/*',
-          'react/jsx-runtime',
-          'react/jsx-dev-runtime',
-          // Raycast — provided by our shim
-          '@raycast/api',
-          '@raycast/utils',
-          // Native C++ addons — cannot be bundled, we stub them at runtime
-          're2',
-          'better-sqlite3',
-          'fsevents',
-          // Cross-extension calls — not supported, stubbed
-          'raycast-cross-extension',
-          // Fetch libs — use runtime shims in renderer instead of bundling Node internals
-          'node-fetch',
-          'undici',
-          'undici/*',
-          // HTTP / file-download / archive packages — must be kept external so our renderer
-          // shim can intercept them and route file I/O through the main process (which has
-          // real filesystem access). Bundling them inline breaks binary downloads because the
-          // browser renderer cannot do streaming file writes or archive extraction natively.
-          'axios',
-          'tar',
-          'extract-zip',
-          'sha256-file',
-          // Respect extension-defined externals from manifest
-          ...manifestExternal,
-          // Node.js built-ins — stubbed at runtime in the renderer
-          ...nodeBuiltins,
-        ],
-        nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
-        target: 'es2020',
-        jsx: 'automatic',
-        jsxImportSource: 'react',
-        tsconfigRaw: getEsbuildTsconfigRaw(extPath),
-        define: {
-          'process.env.NODE_ENV': '"production"',
-          'global': 'globalThis',
+          logLevel: 'warning',
         },
-        logLevel: 'warning',
-      });
+        extPath,
+        `${extName}/${cmd.name}`
+      );
 
       if (fs.existsSync(outFile)) {
         built++;
@@ -924,49 +1011,125 @@ export async function buildSingleCommand(extName: string, cmdName: string): Prom
   try {
     const esbuild = requireEsbuild();
     console.log(`  On-demand building ${extName}/${cmdName}…`);
-    await esbuild.build({
-      entryPoints: [entryFile],
-      absWorkingDir: extPath,
-      bundle: true,
-      format: 'cjs',
-      platform: 'node',
-      outfile: outFile,
-      plugins: [
-        {
-          name: 'swift-external',
-          setup(build: any) {
-            build.onResolve({ filter: /^swift:/ }, (args: any) => ({
-              path: args.path,
-              external: true,
-            }));
+    await runEsbuildBuild(
+      esbuild,
+      {
+        entryPoints: [entryFile],
+        absWorkingDir: extPath,
+        bundle: true,
+        format: 'cjs',
+        platform: 'node',
+        outfile: outFile,
+        plugins: [
+          {
+            name: 'native-scheme-external',
+            setup(build: any) {
+              build.onResolve({ filter: /^(swift|rust):/ }, (args: any) => ({
+                path: args.path,
+                external: true,
+              }));
+            },
           },
+        ],
+        external: [
+          'react', 'react-dom', 'react-dom/*', 'react/jsx-runtime', 'react/jsx-dev-runtime',
+          '@raycast/api', '@raycast/utils',
+          're2', 'better-sqlite3', 'fsevents',
+          'raycast-cross-extension',
+          'node-fetch', 'undici', 'undici/*',
+          'axios', 'tar', 'extract-zip', 'sha256-file',
+          ...manifestExternal,
+          ...nodeBuiltins,
+        ],
+        nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
+        target: 'es2020',
+        jsx: 'automatic',
+        jsxImportSource: 'react',
+        tsconfigRaw: getEsbuildTsconfigRaw(extPath),
+        define: {
+          'process.env.NODE_ENV': '"production"',
+          'global': 'globalThis',
         },
-      ],
-      external: [
-        'react', 'react-dom', 'react-dom/*', 'react/jsx-runtime', 'react/jsx-dev-runtime',
-        '@raycast/api', '@raycast/utils',
-        're2', 'better-sqlite3', 'fsevents',
-        'raycast-cross-extension',
-        'node-fetch', 'undici', 'undici/*',
-        'axios', 'tar', 'extract-zip', 'sha256-file',
-        ...manifestExternal,
-        ...nodeBuiltins,
-      ],
-      nodePaths: fs.existsSync(extNodeModules) ? [extNodeModules] : [],
-      target: 'es2020',
-      jsx: 'automatic',
-      jsxImportSource: 'react',
-      tsconfigRaw: getEsbuildTsconfigRaw(extPath),
-      define: {
-        'process.env.NODE_ENV': '"production"',
-        'global': 'globalThis',
+        logLevel: 'warning',
       },
-      logLevel: 'warning',
-    });
+      extPath,
+      `${extName}/${cmdName}`
+    );
     return fs.existsSync(outFile);
-  } catch (e) {
+  } catch (e: any) {
     console.error(`  On-demand esbuild failed for ${extName}/${cmdName}:`, e);
+    lastBuildError.set(`${extName}/${cmdName}`, e?.message || String(e));
     return false;
+  }
+}
+
+// Records the most recent build error per extension/command so that
+// getExtensionBundle can surface the real cause to the user instead of
+// the generic "On-demand build failed" message.
+const lastBuildError = new Map<string, string>();
+
+/**
+ * Parse an esbuild BuildFailure and return the list of bare-import package
+ * names it could not resolve. Some Raycast extensions import packages (e.g.
+ * `fast-glob`) without declaring them in their manifest — Raycast's `ray build`
+ * provides them implicitly, but esbuild bails out. When this returns a
+ * non-empty list the caller can install them and retry.
+ */
+function extractMissingBareImports(error: any): string[] {
+  const errors = Array.isArray(error?.errors) ? error.errors : [];
+  const found = new Set<string>();
+  for (const err of errors) {
+    const text = String(err?.text || '');
+    const match = text.match(/Could not resolve\s+"([^"]+)"/);
+    if (!match) continue;
+    const specifier = match[1];
+    // Only bare imports — ignore relative/absolute paths and scheme URLs
+    if (
+      !specifier ||
+      specifier.startsWith('.') ||
+      specifier.startsWith('/') ||
+      specifier.includes(':')
+    ) {
+      continue;
+    }
+    // Bare-package name: optional @scope/ then name. Drop any subpath.
+    const parts = specifier.split('/');
+    const pkgName = specifier.startsWith('@')
+      ? parts.slice(0, 2).join('/')
+      : parts[0];
+    if (!pkgName) continue;
+    // Skip things that are already external (shouldn't appear, but defensive)
+    if (nodeBuiltins.includes(pkgName)) continue;
+    if (pkgName.startsWith('@raycast/')) continue;
+    found.add(pkgName);
+  }
+  return [...found];
+}
+
+async function runEsbuildBuild(
+  esbuild: any,
+  options: any,
+  extPath: string,
+  label: string
+): Promise<void> {
+  try {
+    await esbuild.build(options);
+  } catch (error: any) {
+    const missing = extractMissingBareImports(error);
+    if (missing.length === 0) throw error;
+    console.log(
+      `  Missing packages for ${label} (${missing.join(', ')}); installing and retrying…`
+    );
+    const { installSpecificPackages } = require('./extension-registry');
+    try {
+      await installSpecificPackages(extPath, missing);
+    } catch (installError: any) {
+      console.error(
+        `  Failed to install missing packages for ${label}: ${installError?.message || installError}`
+      );
+      throw error;
+    }
+    await esbuild.build(options);
   }
 }
 
@@ -1001,6 +1164,42 @@ export async function getExtensionBundle(
       }
     }
 
+    // Detect "incomplete bundle" scenario: an S3 pre-built bundle dropped
+    // .sc-build/ on disk for some commands but didn't ship the matching
+    // source files for others. resolveEntryFile() returns null, the build
+    // can never produce outFile, and the user is stuck. Re-run the install
+    // from the source-download path (skipBundle: true) and retry the build.
+    if (!fs.existsSync(outFile)) {
+      let entryMissing = false;
+      try {
+        const pkgPath = path.join(extPath, 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        const cmd = (Array.isArray(pkg?.commands) ? pkg.commands : []).find((c: any) => c?.name === cmdName);
+        if (cmd && !resolveEntryFile(extPath, cmd)) entryMissing = true;
+      } catch {}
+
+      if (entryMissing) {
+        console.log(`Source missing for ${normalizedExtName}/${cmdName}; re-installing from source to recover…`);
+        try {
+          const { installExtension } = require('./extension-registry');
+          const reinstalled = await installExtension(normalizedExtName, { skipBundle: true });
+          if (reinstalled) {
+            // Retry building now that source should be present.
+            const rebuilt = await buildSingleCommand(normalizedExtName, cmdName);
+            if (!rebuilt || !fs.existsSync(outFile)) {
+              try {
+                await buildAllCommands(normalizedExtName);
+              } catch (e) {
+                console.warn(`Post-recovery full rebuild failed for ${normalizedExtName}:`, e);
+              }
+            }
+          }
+        } catch (recoveryError) {
+          console.warn(`Source-reinstall recovery failed for ${normalizedExtName}:`, recoveryError);
+        }
+      }
+    }
+
     if (!fs.existsSync(outFile)) {
       let diagnostic = '';
       try {
@@ -1023,7 +1222,9 @@ export async function getExtensionBundle(
         }
       } catch {}
 
-      const msg = `On-demand build failed for ${normalizedExtName}/${cmdName}. Extension path: ${extPath}. Expected output: ${outFile}.${diagnostic}`;
+      const underlying = lastBuildError.get(`${normalizedExtName}/${cmdName}`);
+      const underlyingSuffix = underlying ? ` Underlying error: ${underlying}` : '';
+      const msg = `On-demand build failed for ${normalizedExtName}/${cmdName}. Extension path: ${extPath}. Expected output: ${outFile}.${diagnostic}${underlyingSuffix}`;
       console.error(msg);
       throw new Error(msg);
     }
@@ -1083,8 +1284,10 @@ export async function getExtensionBundle(
     owner = typeof rawOwner === 'object' ? (rawOwner as any).name || '' : rawOwner;
 
     const { extensionPrefs, commandPrefs, definitions } = parsePreferences(pkg, cmdName);
-    preferences = extensionPrefs;
-    commandPreferences = commandPrefs;
+    const storedExtensionPrefs = getExtensionPreferences(normalizedExtName);
+    const storedCommandPrefs = getExtensionPreferences(normalizedExtName, cmdName);
+    preferences = { ...extensionPrefs, ...storedExtensionPrefs };
+    commandPreferences = { ...commandPrefs, ...storedCommandPrefs };
     preferenceDefinitions = definitions;
     commandArgumentDefinitions = Array.isArray(cmd?.arguments)
       ? cmd.arguments

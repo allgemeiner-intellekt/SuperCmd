@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import type { Note, NoteTheme } from '../types/electron';
 import ExtensionActionFooter from './components/ExtensionActionFooter';
+import ConfirmDeleteDialog from './components/ConfirmDeleteDialog';
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -1268,6 +1269,7 @@ interface EditorViewProps {
   onNavigateForward: () => void;
   onDuplicate: () => void;
   onTogglePin: () => void;
+  onDelete: () => void;
   showFind: boolean;
   setShowFind: (v: boolean) => void;
 }
@@ -1275,7 +1277,7 @@ interface EditorViewProps {
 const EditorView: React.FC<EditorViewProps> = ({
   note, onSave, onBack, onBrowse, onNewNote, onShowActions,
   onNavigateBack, onNavigateForward,
-  onDuplicate, onTogglePin, showFind, setShowFind,
+  onDuplicate, onTogglePin, onDelete, showFind, setShowFind,
 }) => {
   const [icon, setIcon] = useState(note?.icon || '');
   const [content, setContent] = useState(note?.content || '');
@@ -1302,9 +1304,10 @@ const EditorView: React.FC<EditorViewProps> = ({
     if (showFind) setTimeout(() => findInputRef.current?.focus(), 50);
   }, [showFind]);
 
-  // Auto-save debounce
+  // Auto-save debounce. Runs even when `note` is null (draft / new-note
+  // path) so the first keystroke triggers a create; handleEditorSave gates
+  // whether to actually persist based on non-empty content.
   useEffect(() => {
-    if (!note) return;
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
       onSave({ title, icon, content, theme });
@@ -1322,8 +1325,12 @@ const EditorView: React.FC<EditorViewProps> = ({
       if (e.key === 'Escape') {
         if (showFind) { setShowFind(false); e.preventDefault(); return; }
         if (showToolbar) { setShowToolbar(false); e.preventDefault(); return; }
-        // Save and close the window
-        if (note) onSave({ title: title || 'Untitled', icon, content, theme });
+        // Save and close the window — but only persist if there's real
+        // content. Empty drafts are discarded rather than saved as Untitled.
+        // `title` comes from extractTitleFromContent and falls back to 'Untitled',
+        // so we can't rely on it — only check `content`.
+        const hasContent = (content || '').trim().length > 0;
+        if (hasContent) onSave({ title: title || 'Untitled', icon, content, theme });
         e.preventDefault();
         window.close();
         return;
@@ -1333,6 +1340,12 @@ const EditorView: React.FC<EditorViewProps> = ({
       if (meta && !shift && !alt && e.key === 'p') { e.preventDefault(); onBrowse(); return; }
       if (meta && shift && e.key === 'p') { e.preventDefault(); onTogglePin(); return; }
       if (meta && !shift && !alt && e.key === 'd') { e.preventDefault(); onDuplicate(); return; }
+      // Control+X (not Cmd+X — that is cut) deletes the current note.
+      if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && (e.key === 'x' || e.key === 'X')) {
+        e.preventDefault();
+        onDelete();
+        return;
+      }
       if (meta && !shift && !alt && e.key === 'f') {
         e.preventDefault();
         setShowFind(true);
@@ -1348,7 +1361,7 @@ const EditorView: React.FC<EditorViewProps> = ({
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showToolbar, showFind, note, title, icon, content, theme, onBack, onNewNote, onBrowse, onShowActions, onNavigateBack, onNavigateForward, onDuplicate, onTogglePin, setShowFind]);
+  }, [showToolbar, showFind, note, title, icon, content, theme, onBack, onNewNote, onBrowse, onShowActions, onNavigateBack, onNavigateForward, onDuplicate, onTogglePin, onDelete, setShowFind]);
 
   const formatWrap = useCallback((prefix: string, suffix: string) => {
     blockEditorRef.current?.wrapSelection(prefix, suffix);
@@ -2022,19 +2035,31 @@ const NotesManager: React.FC<NotesManagerProps> = ({ initialView }) => {
   // ─── Handlers ────────────────────────────────────────────────────
 
   const handleNewNote = useCallback(async () => {
-    const newNote = await window.electron.noteCreate({ title: 'Untitled' });
-    setCurrentNote(newNote);
+    // Don't pre-create the note — we want an in-memory draft so that if the
+    // user closes the editor without typing anything, nothing gets persisted.
+    // The actual DB row is created by handleEditorSave below when the first
+    // auto-save fires with non-empty content.
+    setCurrentNote(null);
     setViewMode('editor');
-    pushToHistory(newNote.id);
-    loadNotes();
-  }, [loadNotes, pushToHistory]);
+  }, []);
 
   const handleEditorSave = useCallback(async (data: { title: string; icon: string; content: string; theme: NoteTheme }) => {
+    // Don't save empty notes — applies to both draft creation and existing-note
+    // updates. If the user clears an existing note to empty, we simply skip
+    // the auto-save so we don't persist empty content.
+    // NOTE: `data.title` is derived from `data.content` via extractTitleFromContent
+    // and falls back to 'Untitled', so it's NEVER empty. Only gate on content.
+    const hasContent = (data.content || '').trim().length > 0;
     if (currentNote) {
+      if (!hasContent) return;
       await window.electron.noteUpdate(currentNote.id, { title: data.title, icon: data.icon, content: data.content, theme: data.theme });
       setCurrentNote(prev => prev ? { ...prev, ...data } : null);
     } else {
-      const created = await window.electron.noteCreate({ title: data.title, icon: data.icon, content: data.content, theme: data.theme });
+      // Draft path: only persist once the user has typed something. An empty
+      // draft (no title and no content) is intentionally discarded so we
+      // don't leave "Untitled" stubs behind.
+      if (!hasContent) return;
+      const created = await window.electron.noteCreate({ title: data.title || 'Untitled', icon: data.icon, content: data.content, theme: data.theme });
       setCurrentNote(created);
       pushToHistory(created.id);
     }
@@ -2094,6 +2119,7 @@ const NotesManager: React.FC<NotesManagerProps> = ({ initialView }) => {
     if (targetNote) a.push({ title: targetNote.pinned ? 'Unpin Note' : 'Pin Note', icon: targetNote.pinned ? <PinOff size={14} /> : <Pin size={14} />, shortcut: ['⇧', '⌘', 'P'], section: 'settings', execute: () => handleTogglePin() });
     a.push({ title: 'Import Notes', icon: <Download size={14} />, section: 'settings', execute: async () => { await window.electron.noteImport(); loadNotes(); setShowActions(false); } });
     a.push({ title: 'Export All Notes', icon: <Upload size={14} />, section: 'settings', execute: async () => { await window.electron.noteExport(); setShowActions(false); } });
+    if (targetNote) a.push({ title: 'Delete Note', icon: <Trash2 size={14} />, shortcut: ['⌃', 'X'], section: 'danger', style: 'destructive', execute: () => { setConfirmDelete(true); setShowActions(false); } });
     return a;
   }, [targetNote, viewMode, loadNotes, handleNewNote, handleDuplicate, handleTogglePin, handleExport, notes]);
 
@@ -2103,6 +2129,7 @@ const NotesManager: React.FC<NotesManagerProps> = ({ initialView }) => {
     if (viewMode !== 'search') return;
     const handler = (e: KeyboardEvent) => {
       if (showActions || showBrowse) return;
+      if (e.key === 'Escape') { e.preventDefault(); window.close(); return; }
       if (e.key === 'k' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); setShowActions(true); return; }
       if (e.key === 'n' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); handleNewNote(); return; }
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIndex(i => Math.min(i + 1, notes.length - 1)); return; }
@@ -2122,6 +2149,12 @@ const NotesManager: React.FC<NotesManagerProps> = ({ initialView }) => {
       if (meta && e.shiftKey && e.key === 'p') { e.preventDefault(); handleTogglePin(); return; }
       if (meta && e.shiftKey && e.key === 'e') { e.preventDefault(); handleExport(); return; }
       if (meta && e.shiftKey && e.key === 'c' && targetNote) { e.preventDefault(); window.electron.noteCopyToClipboard(targetNote.id, 'markdown'); return; }
+      // Control+X (not Cmd+X — that is cut) opens the delete confirmation.
+      if (e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && (e.key === 'x' || e.key === 'X') && targetNote) {
+        e.preventDefault();
+        setConfirmDelete(true);
+        return;
+      }
       if (meta && !e.shiftKey && !e.altKey && e.key >= '0' && e.key <= '9') {
         const idx = e.key === '0' ? 0 : parseInt(e.key) - 1;
         if (pinnedNotes[idx]) { e.preventDefault(); handleOpenNote(pinnedNotes[idx]); }
@@ -2192,6 +2225,7 @@ const NotesManager: React.FC<NotesManagerProps> = ({ initialView }) => {
           onNavigateForward={navigateForward}
           onDuplicate={handleDuplicate}
           onTogglePin={handleTogglePin}
+          onDelete={() => { if (currentNote) setConfirmDelete(true); }}
           showFind={showFind}
           setShowFind={setShowFind}
         />
@@ -2226,36 +2260,25 @@ const NotesManager: React.FC<NotesManagerProps> = ({ initialView }) => {
       {showActions && <ActionsOverlay actions={actions} onClose={() => setShowActions(false)} />}
 
       {confirmDelete && targetNote && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.5)' }}>
-          <div className="w-[320px] rounded-xl shadow-2xl overflow-hidden"
-            style={{ background: 'var(--card-bg)', backdropFilter: 'blur(40px)', border: '1px solid var(--border-primary)' }}>
-            <div className="px-5 pt-5 pb-3">
-              <h3 className="text-[14px] font-semibold text-[var(--text-primary)] mb-1.5">Delete Note</h3>
-              <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">
-                Are you sure you want to delete "<span className="text-[var(--text-secondary)]">{targetNote.title || 'Untitled'}</span>"? This action cannot be undone.
-              </p>
-            </div>
-            <div className="flex items-center justify-end gap-2 px-5 pb-4 pt-2">
-              <button onClick={() => setConfirmDelete(false)}
-                className="px-3 py-1.5 rounded-md text-[12px] text-[var(--text-muted)] hover:bg-[var(--bg-secondary)] transition-colors">
-                Cancel
-              </button>
-              <button onClick={async () => {
-                await window.electron.noteDelete(targetNote.id);
-                setConfirmDelete(false);
-                if (viewMode === 'editor') { setCurrentNote(null); window.close(); }
-                else { setSelectedIndex(i => Math.max(0, i - 1)); loadNotes(); }
-              }}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] text-white bg-red-400/70 hover:bg-red-400/90 transition-colors">
-                Delete
-                <kbd className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-white/15 text-[10px] font-medium">↩</kbd>
-              </button>
-            </div>
-          </div>
-        </div>
+        <ConfirmDeleteDialog
+          title="Delete Note"
+          target={targetNote.title || 'Untitled'}
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={async () => {
+            await window.electron.noteDelete(targetNote.id);
+            setConfirmDelete(false);
+            if (viewMode === 'editor') { setCurrentNote(null); window.close(); }
+            else { setSelectedIndex(i => Math.max(0, i - 1)); loadNotes(); }
+          }}
+        />
       )}
     </div>
   );
 };
 
 export default NotesManager;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (ConfirmDeleteDialog moved to components/ConfirmDeleteDialog.tsx for reuse)
+// ─────────────────────────────────────────────────────────────────────────────
+

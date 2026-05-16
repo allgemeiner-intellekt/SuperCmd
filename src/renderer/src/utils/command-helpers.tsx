@@ -13,7 +13,7 @@
  */
 
 import React from 'react';
-import { Search, Power, Settings, Puzzle, Sparkles, FileText, Mic, Volume2, Brain, TerminalSquare, RefreshCw, LayoutGrid } from 'lucide-react';
+import { Search, Power, Settings, Puzzle, Sparkles, FileText, Mic, Volume2, Brain, TerminalSquare, RefreshCw, LayoutGrid, Lock, Trash2, Store, Globe } from 'lucide-react';
 import type { CommandInfo, EdgeTtsVoice } from '../../types/electron';
 import supercmdLogo from '../../../../supercmd.svg';
 import IconCalendar from '../icons/Calendar';
@@ -24,8 +24,10 @@ import IconLink from '../icons/QuickLinks';
 import IconCodeEditor from '../icons/Snippet';
 import IconNotes from '../icons/Notes';
 import IconPen from '../icons/Pen';
+import IconMagicWand from '../icons/MagicWand';
 import { formatShortcutForDisplay } from './hyper-key';
 import { renderQuickLinkIconGlyph } from './quicklink-icons';
+import { getTranslitVariant } from './transliterate';
 
 export interface LauncherAction {
   id: string;
@@ -33,7 +35,32 @@ export interface LauncherAction {
   shortcut?: string;
   style?: 'default' | 'destructive';
   enabled?: boolean;
+  icon?: React.ReactNode;
+  separatorBefore?: boolean;
   execute: () => void | Promise<void>;
+}
+
+/**
+ * Match a keyboard event against a LauncherAction shortcut string.
+ * Shortcut format: 'Cmd+N', 'Ctrl+X', 'Cmd+Shift+P', 'Enter', 'Cmd+Delete', etc.
+ */
+export function matchesLauncherShortcut(
+  e: React.KeyboardEvent | KeyboardEvent,
+  shortcut: string,
+): boolean {
+  const parts = shortcut.split('+');
+  const key = parts[parts.length - 1];
+  const mods = parts.slice(0, -1).map((m) => m.toLowerCase());
+
+  if ((mods.includes('cmd')) !== e.metaKey) return false;
+  if ((mods.includes('ctrl')) !== e.ctrlKey) return false;
+  if ((mods.includes('alt')) !== e.altKey) return false;
+  if ((mods.includes('shift')) !== e.shiftKey) return false;
+
+  // Single character keys — compare case-insensitively
+  if (key.length === 1) return e.key.toLowerCase() === key.toLowerCase();
+  // Special keys (Enter, Escape, Delete, ArrowUp, etc.)
+  return e.key === key;
 }
 
 export type MemoryFeedback = {
@@ -174,6 +201,61 @@ function bestTermScore(term: string, candidates: SearchCandidate[]): number {
   return best;
 }
 
+// Compute a relevance score for a single (query, command-candidates) pair.
+// Returns 0 if the command doesn't match the query at all.
+function computeCommandScore(
+  normalizedQuery: string,
+  queryTerms: string[],
+  title: string,
+  subtitle: string,
+  normalizedAlias: string,
+  candidates: SearchCandidate[],
+  keywordTokens: string[],
+): number {
+  let score = 0;
+
+  if (Boolean(normalizedAlias) && normalizedAlias === normalizedQuery) {
+    score += 1200;
+  } else if (title === normalizedQuery) {
+    score += 420;
+  } else if (title.startsWith(normalizedQuery)) {
+    score += 320;
+  } else if (title.includes(normalizedQuery)) {
+    score += 260;
+  } else if (normalizedAlias && normalizedAlias.startsWith(normalizedQuery)) {
+    score += 240;
+  } else if (normalizedAlias && normalizedAlias.includes(normalizedQuery)) {
+    score += 200;
+  } else if (keywordTokens.includes(normalizedQuery)) {
+    score += 225;
+  } else if (keywordTokens.some((keyword) => keyword.includes(normalizedQuery))) {
+    score += 180;
+  } else if (subtitle.includes(normalizedQuery)) {
+    score += 145;
+  }
+
+  let termScoreSum = 0;
+  for (const term of queryTerms) {
+    const termScore = bestTermScore(term, candidates);
+    if (termScore <= 0) return 0;
+    termScoreSum += termScore;
+  }
+
+  score += termScoreSum;
+
+  if (normalizedQuery.length >= 3) {
+    const compactQuery = normalizedQuery.replace(/\s+/g, '');
+    const compactTitle = title.replace(/\s+/g, '');
+    if (compactQuery && compactTitle && isSubsequenceMatch(compactQuery, compactTitle)) {
+      score += 18;
+    }
+  }
+
+  score += Math.max(0, 12 - Math.max(0, title.length - normalizedQuery.length));
+
+  return score;
+}
+
 /**
  * Filter and sort commands based on search query
  */
@@ -183,11 +265,24 @@ export function filterCommands(
   aliasLookup: Record<string, string> = {}
 ): CommandInfo[] {
   const normalizedQuery = normalizeSearchText(query);
+
+  // Always-on-top commands (e.g. update banner) are pinned above the list
+  // when there is no active query. With a query they are scored normally and
+  // only shown if they match — but always sorted before other results.
+  const alwaysOnTop = commands.filter((c) => c.alwaysOnTop);
+  const rest = commands.filter((c) => !c.alwaysOnTop);
+
   if (!normalizedQuery) {
-    return commands;
+    return [...alwaysOnTop, ...rest];
   }
 
   const queryTerms = tokenizeSearchText(normalizedQuery);
+
+  // Transliteration: when the query contains non-Latin script (Cyrillic, Devanagari, CJK, etc.),
+  // also score against the phonetically-normalized Latin equivalent so users can search
+  // English-named commands from any keyboard/script.
+  const translitVariant = getTranslitVariant(query, normalizedQuery);
+  const transliteratedTerms = translitVariant.isVariant ? tokenizeSearchText(translitVariant.query) : [];
 
   const scored = commands
     .map((cmd) => {
@@ -211,55 +306,19 @@ export function filterCommands(
         return null;
       }
 
-      let score = 0;
+      const primaryScore = computeCommandScore(normalizedQuery, queryTerms, title, subtitle, normalizedAlias, candidates, keywordTokens);
+      const translitScore = translitVariant.isVariant
+        ? computeCommandScore(translitVariant.query, transliteratedTerms, title, subtitle, normalizedAlias, candidates, keywordTokens)
+        : 0;
+      const score = Math.max(primaryScore, translitScore);
 
-      if (hasExactAliasMatch) {
-        score += 1200;
-      } else if (title === normalizedQuery) {
-        score += 420;
-      } else if (title.startsWith(normalizedQuery)) {
-        score += 320;
-      } else if (title.includes(normalizedQuery)) {
-        score += 260;
-      } else if (normalizedAlias && normalizedAlias.startsWith(normalizedQuery)) {
-        score += 240;
-      } else if (normalizedAlias && normalizedAlias.includes(normalizedQuery)) {
-        score += 200;
-      } else if (keywordTokens.includes(normalizedQuery)) {
-        score += 225;
-      } else if (keywordTokens.some((keyword) => keyword.includes(normalizedQuery))) {
-        score += 180;
-      } else if (subtitle.includes(normalizedQuery)) {
-        score += 145;
-      }
-
-      let termScoreSum = 0;
-      for (const term of queryTerms) {
-        const termScore = bestTermScore(term, candidates);
-        if (termScore <= 0) {
-          return null;
-        }
-        termScoreSum += termScore;
-      }
-
-      score += termScoreSum;
-
-      if (normalizedQuery.length >= 3) {
-        const compactQuery = normalizedQuery.replace(/\s+/g, '');
-        const compactTitle = title.replace(/\s+/g, '');
-        if (compactQuery && compactTitle && isSubsequenceMatch(compactQuery, compactTitle)) {
-          score += 18;
-        }
-      }
-
-      // Favor concise titles when scores are close.
-      score += Math.max(0, 12 - Math.max(0, title.length - normalizedQuery.length));
+      if (score <= 0) return null;
 
       return { cmd, score, title, hasExactAliasMatch };
     })
     .filter(
       (entry): entry is { cmd: CommandInfo; score: number; title: string; hasExactAliasMatch: boolean } =>
-        Boolean(entry) && entry.score > 0
+        entry !== null
     )
     .sort((a, b) => {
       if (a.hasExactAliasMatch !== b.hasExactAliasMatch) {
@@ -269,7 +328,9 @@ export function filterCommands(
       return a.title.localeCompare(b.title);
     });
 
-  return scored.map(({ cmd }) => cmd);
+  const matchedTop = scored.filter(({ cmd }) => cmd.alwaysOnTop).map(({ cmd }) => cmd);
+  const matchedRest = scored.filter(({ cmd }) => !cmd.alwaysOnTop).map(({ cmd }) => cmd);
+  return [...matchedTop, ...matchedRest];
 }
 
 /**
@@ -728,7 +789,7 @@ function renderWindowManagementGlyph(glyphId: WindowManagementGlyphId): JSX.Elem
           rx={1}
           stroke="currentColor"
           strokeWidth={1}
-          strokeOpacity={0.5}
+          strokeOpacity={0.72}
         />,
         <rect
           key="display-right"
@@ -739,7 +800,7 @@ function renderWindowManagementGlyph(glyphId: WindowManagementGlyphId): JSX.Elem
           rx={1}
           stroke="currentColor"
           strokeWidth={1}
-          strokeOpacity={0.5}
+          strokeOpacity={0.72}
         />,
         renderGlyphArrow('display-next', 8.4, 7, 11.6, 7)
       );
@@ -755,7 +816,7 @@ function renderWindowManagementGlyph(glyphId: WindowManagementGlyphId): JSX.Elem
           rx={1}
           stroke="currentColor"
           strokeWidth={1}
-          strokeOpacity={0.5}
+          strokeOpacity={0.72}
         />,
         <rect
           key="display-right"
@@ -766,7 +827,7 @@ function renderWindowManagementGlyph(glyphId: WindowManagementGlyphId): JSX.Elem
           rx={1}
           stroke="currentColor"
           strokeWidth={1}
-          strokeOpacity={0.5}
+          strokeOpacity={0.72}
         />,
         renderGlyphArrow('display-prev', 11.6, 7, 8.4, 7)
       );
@@ -832,8 +893,8 @@ function renderWindowManagementGlyph(glyphId: WindowManagementGlyphId): JSX.Elem
           height={12.5}
           rx={2}
           stroke="currentColor"
-          strokeWidth={1}
-          strokeOpacity={0.5}
+          strokeWidth={1.1}
+          strokeOpacity={0.75}
         />
       ) : null}
       {cells.map((cell, index) => (
@@ -845,13 +906,18 @@ function renderWindowManagementGlyph(glyphId: WindowManagementGlyphId): JSX.Elem
           height={cell.h}
           rx={1}
           fill="currentColor"
-          fillOpacity={0.62}
+          fillOpacity={0.92}
         />
       ))}
       {overlays}
     </svg>
   );
 }
+
+const WM_ICON_BG: React.CSSProperties = {
+  background: 'linear-gradient(135deg, rgba(99,102,241,0.62) 0%, rgba(67,56,202,0.56) 100%)',
+  boxShadow: 'inset 0 0 0 1px rgba(129,140,248,0.45)',
+};
 
 function renderWindowManagementCommandIcon(commandId: string): React.ReactNode | null {
   const glyphId = resolveWindowManagementGlyphId(commandId);
@@ -860,13 +926,13 @@ function renderWindowManagementCommandIcon(commandId: string): React.ReactNode |
   }
   if (glyphId === 'panel') {
     return (
-      <div className="w-5 h-5 rounded bg-cyan-500/20 flex items-center justify-center">
-        <LayoutGrid className="w-3 h-3 text-cyan-200" />
+      <div className="w-5 h-5 rounded flex items-center justify-center" style={WM_ICON_BG}>
+        <LayoutGrid className="w-3 h-3 text-indigo-200" />
       </div>
     );
   }
   return (
-    <div className="w-5 h-5 rounded bg-cyan-500/20 flex items-center justify-center text-cyan-100">
+    <div className="w-5 h-5 rounded flex items-center justify-center text-indigo-200" style={WM_ICON_BG}>
       {renderWindowManagementGlyph(glyphId)}
     </div>
   );
@@ -933,8 +999,28 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
 
   if (commandId === 'system-cursor-prompt') {
     return (
-      <div className="w-5 h-5 rounded bg-violet-500/20 flex items-center justify-center">
-        <Sparkles className="w-3 h-3 text-violet-300" />
+      <div className="w-5 h-5 flex items-center justify-center">
+        <IconMagicWand
+          size="16px"
+          aria-hidden="true"
+          style={buildCoreIconStyle('#38bdf8', '#0369a1', '#bae6fdb8', '#38bdf890')}
+        />
+      </div>
+    );
+  }
+
+  if (commandId === 'browser-search-action-open-url') {
+    return (
+      <div className="w-5 h-5 rounded bg-sky-500/20 flex items-center justify-center">
+        <Globe className="w-3 h-3 text-sky-300" />
+      </div>
+    );
+  }
+
+  if (commandId === 'browser-search-action-perform-search') {
+    return (
+      <div className="w-5 h-5 rounded bg-emerald-500/20 flex items-center justify-center">
+        <Search className="w-3 h-3 text-emerald-300" />
       </div>
     );
   }
@@ -1091,6 +1177,14 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
     );
   }
 
+  if (commandId === 'system-open-extension-store') {
+    return (
+      <div className="w-5 h-5 rounded bg-purple-500/20 flex items-center justify-center">
+        <Store className="w-3 h-3 text-purple-300" />
+      </div>
+    );
+  }
+
   if (commandId === 'system-camera') {
     return (
       <div className="w-5 h-5 flex items-center justify-center">
@@ -1116,6 +1210,22 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
     );
   }
 
+  if (commandId === 'system-lock-screen') {
+    return (
+      <div className="w-5 h-5 rounded bg-slate-500/20 flex items-center justify-center">
+        <Lock className="w-3 h-3 text-slate-300" />
+      </div>
+    );
+  }
+
+  if (commandId === 'system-empty-trash') {
+    return (
+      <div className="w-5 h-5 rounded bg-orange-500/20 flex items-center justify-center">
+        <Trash2 className="w-3 h-3 text-orange-300" />
+      </div>
+    );
+  }
+
   return (
     <div className="w-5 h-5 rounded bg-red-500/20 flex items-center justify-center">
       <Power className="w-3 h-3 text-red-400" />
@@ -1126,6 +1236,36 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
 export function renderShortcutLabel(shortcut?: string): string {
   if (!shortcut) return '';
   return formatShortcutForDisplay(shortcut).replace(/ \+ /g, ' ');
+}
+
+/**
+ * Split a hotkey string (e.g. "Command+Shift+L") into individual display symbols
+ * (e.g. ["⌘", "⇧", "L"]) so each part can be rendered as a separate kbd badge.
+ */
+export function getShortcutDisplayParts(shortcut: string): string[] {
+  if (!shortcut) return [];
+  const parts = String(shortcut).split('+').map((token) => {
+    const value = String(token || '').trim();
+    if (!value) return '';
+    if (/^hyper$/i.test(value) || value === '✦') return '✦';
+    if (/^(command|cmd)$/i.test(value)) return '⌘';
+    if (/^(control|ctrl)$/i.test(value)) return '⌃';
+    if (/^(alt|option)$/i.test(value)) return '⌥';
+    if (/^shift$/i.test(value)) return '⇧';
+    if (/^(function|fn)$/i.test(value)) return 'fn';
+    if (/^arrowup$/i.test(value)) return '↑';
+    if (/^arrowdown$/i.test(value)) return '↓';
+    if (/^arrowleft$/i.test(value)) return '←';
+    if (/^arrowright$/i.test(value)) return '→';
+    if (/^(backspace|delete)$/i.test(value)) return '⌫';
+    if (/^period$/i.test(value)) return '.';
+    if (/^return$/i.test(value)) return '↩';
+    if (/^escape$/i.test(value)) return '⎋';
+    if (/^space$/i.test(value)) return '␣';
+    if (/^tab$/i.test(value)) return '⇥';
+    return value.length === 1 ? value.toUpperCase() : value;
+  });
+  return parts.filter(Boolean);
 }
 
 export function parseIntervalToMs(interval?: string): number | null {

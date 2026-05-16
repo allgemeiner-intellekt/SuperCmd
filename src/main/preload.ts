@@ -12,7 +12,23 @@ import { contextBridge, ipcRenderer } from 'electron';
 const _homeDir = process.env.HOME || process.env.USERPROFILE || '/tmp';
 const _platform = process.platform;
 
-contextBridge.exposeInMainWorld('electron', {
+// The launcher window runs with contextIsolation: false so that Raycast
+// extensions can use real Node classes (EventEmitter, Buffer, etc.) without
+// going through contextBridge's class-mangling serialization. Other windows
+// still run contextIsolated. Use the right exposure mechanism for each.
+//
+// contextBridge.exposeInMainWorld() THROWS when contextIsolation is off,
+// so we must branch.
+const _contextIsolated = (process as any).contextIsolated !== false;
+function exposeToRenderer(name: string, value: any): void {
+  if (_contextIsolated) {
+    contextBridge.exposeInMainWorld(name, value);
+  } else {
+    (globalThis as any)[name] = value;
+  }
+}
+
+const electronAPI = {
   // ─── System Info ────────────────────────────────────────────────
   homeDir: _homeDir,
   platform: _platform,
@@ -20,6 +36,15 @@ contextBridge.exposeInMainWorld('electron', {
   // ─── Lifecycle ──────────────────────────────────────────────────
   /** Signal main process that the renderer React app has mounted. */
   rendererReady: (): void => { ipcRenderer.send('renderer-ready'); },
+
+  // ─── Calculator (SoulverCore) ───────────────────────────────────
+  calculatorEvaluate: (expression: string): Promise<{
+    id: number;
+    value: string | null;
+    raw: number | null;
+    type: string;
+    error: string | null;
+  }> => ipcRenderer.invoke('calculator-evaluate', expression),
 
   // ─── Launcher ───────────────────────────────────────────────────
   getCommands: (): Promise<any[]> => ipcRenderer.invoke('get-commands'),
@@ -30,6 +55,14 @@ contextBridge.exposeInMainWorld('electron', {
   executeCommandFromWidget: (commandId: string): Promise<boolean> =>
     ipcRenderer.invoke('execute-command-from-widget', commandId),
   hideWindow: (): Promise<void> => ipcRenderer.invoke('hide-window'),
+  resizeLauncherWindow: (expanded: boolean): Promise<void> => ipcRenderer.invoke('resize-launcher-window', expanded),
+  showWindow: (): Promise<void> => ipcRenderer.invoke('show-window'),
+  activateLastFrontmostApp: (): Promise<void> => ipcRenderer.invoke('activate-last-frontmost-app'),
+  reportNoViewStatus: (variant: 'processing' | 'success' | 'error', text: string): Promise<void> =>
+    ipcRenderer.invoke('no-view-status', variant, text),
+  showConfetti: (): Promise<void> => ipcRenderer.invoke('show-confetti'),
+  dismissUpdateBanner: (): Promise<void> => ipcRenderer.invoke('dismiss-update-banner'),
+  resetLauncherPosition: (): Promise<void> => ipcRenderer.invoke('reset-launcher-position'),
   openDevTools: (): Promise<boolean> => ipcRenderer.invoke('open-devtools'),
   closePromptWindow: (): Promise<void> => ipcRenderer.invoke('close-prompt-window'),
   setLauncherMode: (mode: 'default' | 'onboarding' | 'whisper' | 'speak' | 'prompt'): Promise<void> =>
@@ -64,6 +97,13 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.on('commands-updated', listener);
     return () => {
       ipcRenderer.removeListener('commands-updated', listener);
+    };
+  },
+  onAiChatsUpdated: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('ai-chats-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('ai-chats-updated', listener);
     };
   },
   onRunSystemCommand: (callback: (commandId: string) => void) => {
@@ -173,7 +213,7 @@ contextBridge.exposeInMainWorld('electron', {
     ok: boolean;
   }> => ipcRenderer.invoke('get-global-shortcut-status'),
   appUpdaterGetStatus: (): Promise<{
-    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'restarting' | 'error';
     supported: boolean;
     currentVersion: string;
     latestVersion?: string;
@@ -186,7 +226,7 @@ contextBridge.exposeInMainWorld('electron', {
     message?: string;
   }> => ipcRenderer.invoke('app-updater-get-status'),
   appUpdaterCheckForUpdates: (): Promise<{
-    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'restarting' | 'error';
     supported: boolean;
     currentVersion: string;
     latestVersion?: string;
@@ -199,7 +239,7 @@ contextBridge.exposeInMainWorld('electron', {
     message?: string;
   }> => ipcRenderer.invoke('app-updater-check-for-updates'),
   appUpdaterDownloadUpdate: (): Promise<{
-    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'restarting' | 'error';
     supported: boolean;
     currentVersion: string;
     latestVersion?: string;
@@ -216,7 +256,7 @@ contextBridge.exposeInMainWorld('electron', {
   appUpdaterCheckAndInstall: (): Promise<{ success: boolean; error?: string; message?: string; state?: string }> =>
     ipcRenderer.invoke('app-updater-check-and-install'),
   onAppUpdaterStatus: (callback: (payload: {
-    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+    state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'restarting' | 'error';
     supported: boolean;
     currentVersion: string;
     latestVersion?: string;
@@ -236,6 +276,37 @@ contextBridge.exposeInMainWorld('electron', {
   },
   saveSettings: (patch: any): Promise<any> =>
     ipcRenderer.invoke('save-settings', patch),
+  previewRaycastConfigImport: (): Promise<any> =>
+    ipcRenderer.invoke('rayconfig-preview'),
+  applyRaycastConfigImport: (options: any): Promise<any> =>
+    ipcRenderer.invoke('rayconfig-import-apply', options),
+  importRaycastConfig: (): Promise<any> =>
+    ipcRenderer.invoke('rayconfig-import'),
+  onRaycastImportProgress: (callback: (payload: any) => void) => {
+    const listener = (_event: any, payload: any) => callback(payload);
+    ipcRenderer.on('rayconfig-import-progress', listener);
+    return () => {
+      ipcRenderer.removeListener('rayconfig-import-progress', listener);
+    };
+  },
+  getAiChatSnapshot: (): Promise<any> =>
+    ipcRenderer.invoke('get-ai-chat-snapshot'),
+  upsertAiChatConversation: (conversation: any): Promise<any> =>
+    ipcRenderer.invoke('upsert-ai-chat-conversation', conversation),
+  deleteAiChatConversation: (id: string): Promise<boolean> =>
+    ipcRenderer.invoke('delete-ai-chat-conversation', id),
+  mergeAiChatSnapshot: (snapshot: any): Promise<any> =>
+    ipcRenderer.invoke('merge-ai-chat-snapshot', snapshot),
+  getExtensionPreferencesSnapshot: (): Promise<any> =>
+    ipcRenderer.invoke('get-extension-preferences-snapshot'),
+  getExtensionPreferences: (extName: string, cmdName?: string): Promise<Record<string, any>> =>
+    ipcRenderer.invoke('get-extension-preferences', extName, cmdName),
+  setExtensionPreference: (extName: string, preferenceName: string, value: any, cmdName?: string): Promise<Record<string, any>> =>
+    ipcRenderer.invoke('set-extension-preference', extName, preferenceName, value, cmdName),
+  setExtensionPreferences: (extName: string, values: Record<string, any>, cmdName?: string): Promise<Record<string, any>> =>
+    ipcRenderer.invoke('set-extension-preferences', extName, values, cmdName),
+  mergeExtensionPreferencesSnapshot: (snapshot: any): Promise<any> =>
+    ipcRenderer.invoke('merge-extension-preferences-snapshot', snapshot),
   getAllCommands: (): Promise<any[]> =>
     ipcRenderer.invoke('get-all-commands'),
   updateGlobalShortcut: (shortcut: string): Promise<boolean> =>
@@ -291,6 +362,13 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.removeListener('settings-updated', listener);
     };
   },
+  onExtensionPreferencesUpdated: (callback: (payload: { extensionName: string }) => void) => {
+    const listener = (_event: any, payload: { extensionName: string }) => callback(payload);
+    ipcRenderer.on('extension-preferences-updated', listener);
+    return () => {
+      ipcRenderer.removeListener('extension-preferences-updated', listener);
+    };
+  },
 
   // ─── Extension Runner ────────────────────────────────────────────
   runExtension: (extName: string, cmdName: string): Promise<any> =>
@@ -311,6 +389,10 @@ contextBridge.exposeInMainWorld('electron', {
   // Update command metadata (for updateCommandMetadata API)
   updateCommandMetadata: (commandId: string, metadata: { subtitle?: string | null }): Promise<void> =>
     ipcRenderer.invoke('update-command-metadata', commandId, metadata),
+
+  // ─── App Management ────────────────────────────────────────────
+  quitApp: (appPath: string, force?: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('quit-app', appPath, force),
 
   // ─── Open URL (for extensions) ────────────────────────────────────
   openUrl: (url: string, application?: string): Promise<boolean> =>
@@ -341,6 +423,16 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.on('extensions-updated', listener);
     return () => {
       ipcRenderer.removeListener('extensions-updated', listener);
+    };
+  },
+  onExtensionUninstalled: (callback: (extensionName: string) => void): (() => void) => {
+    const listener = (_event: any, payload: { extensionName?: string }) => {
+      const name = String(payload?.extensionName || '').trim();
+      if (name) callback(name);
+    };
+    ipcRenderer.on('extension-uninstalled', listener);
+    return () => {
+      ipcRenderer.removeListener('extension-uninstalled', listener);
     };
   },
   onExtensionInstallStatus: (callback: (message: string) => void): (() => void) => {
@@ -437,8 +529,8 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('get-frontmost-application'),
 
   // Run AppleScript
-  runAppleScript: (script: string): Promise<string> =>
-    ipcRenderer.invoke('run-applescript', script),
+  runAppleScript: (script: string, options?: { language?: string; humanReadableOutput?: boolean; timeout?: number }): Promise<string> =>
+    ipcRenderer.invoke('run-applescript', script, options),
 
   // Calendar
   ensureCalendarAccess: (options?: { prompt?: boolean }): Promise<any> =>
@@ -449,6 +541,24 @@ contextBridge.exposeInMainWorld('electron', {
   // Move to trash
   moveToTrash: (paths: string[]): Promise<void> =>
     ipcRenderer.invoke('move-to-trash', paths),
+
+  // App uninstall
+  appUninstallScan: (appPath: string) =>
+    ipcRenderer.invoke('app-uninstall-scan', appPath),
+  appUninstallExecute: (paths: string[]) =>
+    ipcRenderer.invoke('app-uninstall-execute', paths),
+
+  // Auto Quit
+  autoQuitGetApps: (): Promise<{ bundleId: string; appName: string; timeoutSeconds: number }[]> =>
+    ipcRenderer.invoke('auto-quit-get-apps'),
+  autoQuitAddApp: (entry: { appPath: string; appName: string; timeoutSeconds: number }): Promise<string | void> =>
+    ipcRenderer.invoke('auto-quit-add-app', entry),
+  autoQuitRemoveApp: (appPath: string): Promise<void> =>
+    ipcRenderer.invoke('auto-quit-remove-app', appPath),
+  autoQuitGetDefaultTimeout: (): Promise<number> =>
+    ipcRenderer.invoke('auto-quit-get-default-timeout'),
+  autoQuitSetDefaultTimeout: (seconds: number): Promise<void> =>
+    ipcRenderer.invoke('auto-quit-set-default-timeout', seconds),
 
   // Read file (for extensions that need filesystem access)
   readFile: (filePath: string): Promise<string> =>
@@ -476,6 +586,8 @@ contextBridge.exposeInMainWorld('electron', {
 
   getFileIconDataUrl: (filePath: string, size = 20): Promise<string | null> =>
     ipcRenderer.invoke('get-file-icon-data-url', filePath, size),
+  getAppIconDataUrl: (appPath: string, size = 32): Promise<string | null> =>
+    ipcRenderer.invoke('get-app-icon-data-url', appPath, size),
   searchIndexedFiles: (
     query: string,
     options?: { limit?: number }
@@ -541,6 +653,34 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('clipboard-write', payload),
   clipboardReadText: (): Promise<string> =>
     ipcRenderer.invoke('clipboard-read-text'),
+
+  // ─── Browser Search ───────────────────────────────────────────────
+  browserSearchOpen: (input: string): Promise<{ ok: boolean; type: 'url' | 'search' | null; url: string | null }> =>
+    ipcRenderer.invoke('browser-search:open', input),
+  browserSearchResolve: (input: string): Promise<{ type: 'url' | 'search'; url: string; host: string } | null> =>
+    ipcRenderer.invoke('browser-search:resolve', input),
+  browserSearchListEntries: (): Promise<any[]> =>
+    ipcRenderer.invoke('browser-search:list-entries'),
+  browserSearchAutocomplete: (input: string): Promise<{ completion: string; suffix: string; entry: any } | null> =>
+    ipcRenderer.invoke('browser-search:autocomplete', input),
+  browserSearchSuggest: (input: string): Promise<string | null> =>
+    ipcRenderer.invoke('browser-search:suggest', input),
+  browserSearchClearHistory: (): Promise<boolean> =>
+    ipcRenderer.invoke('browser-search:clear-history'),
+  browserSearchListBrowsers: (): Promise<{ id: string; name: string; available: boolean }[]> =>
+    ipcRenderer.invoke('browser-search:list-browsers'),
+  browserSearchImport: (
+    browserId: string
+  ): Promise<{ imported: number; skipped: number; total: number; reason?: string }> =>
+    ipcRenderer.invoke('browser-search:import', browserId),
+  onBrowserSearchHistoryChanged: (callback: () => void): (() => void) => {
+    const listener = (_event: any) => callback();
+    ipcRenderer.on('browser-search-history-changed', listener);
+    return () => {
+      ipcRenderer.removeListener('browser-search-history-changed', listener);
+    };
+  },
+
   getSelectedText: (): Promise<string> =>
     ipcRenderer.invoke('get-selected-text'),
   getSelectedTextStrict: (): Promise<string> =>
@@ -726,6 +866,12 @@ contextBridge.exposeInMainWorld('electron', {
   // ─── Native Helpers ─────────────────────────────────────────────
   nativePickColor: (): Promise<{ red: number; green: number; blue: number; alpha: number; colorSpace: string } | null> =>
     ipcRenderer.invoke('native-pick-color'),
+  keyboardLockStart: (durationSec: number): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('keyboard-lock:start', durationSec),
+  keyboardLockStop: (): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('keyboard-lock:stop'),
+  screenOcrRun: (mode: 'recognize' | 'barcode', options: any): Promise<{ ok: boolean; text?: string; error?: string }> =>
+    ipcRenderer.invoke('screen-ocr:run', mode, options),
   pickFiles: (options?: {
     allowMultipleSelection?: boolean;
     canChooseDirectories?: boolean;
@@ -735,6 +881,28 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('pick-files', options),
   pickLauncherBackgroundImage: (): Promise<string | null> =>
     ipcRenderer.invoke('pick-launcher-background-image'),
+
+  // ─── Extension Preferences (synced) ────────────────────────────
+  saveExtensionPreferences: (
+    args: { extName: string; cmdName?: string; extPrefs?: Record<string, unknown>; cmdPrefs?: Record<string, unknown> }
+  ): Promise<any> =>
+    ipcRenderer.invoke('save-extension-preferences', args),
+  saveExtensionCommandArguments: (
+    args: { extName: string; cmdName: string; values: Record<string, unknown> }
+  ): Promise<any> =>
+    ipcRenderer.invoke('save-extension-command-arguments', args),
+
+  // ─── Settings Folder Location ──────────────────────────────────
+  getSettingsLocation: (): Promise<{ path: string | null; defaultPath: string }> =>
+    ipcRenderer.invoke('get-settings-location'),
+  pickSettingsFolder: (): Promise<{ path: string; hasExisting: boolean } | null> =>
+    ipcRenderer.invoke('pick-settings-folder'),
+  relocateSettings: (
+    args: { targetDir: string; mode: 'move' | 'adopt' | 'replace' }
+  ): Promise<{ ok: boolean; settings?: any; path?: string; error?: string }> =>
+    ipcRenderer.invoke('relocate-settings', args),
+  resetSettingsLocation: (): Promise<{ ok: boolean; settings?: any; path?: string; error?: string }> =>
+    ipcRenderer.invoke('reset-settings-location'),
 
   // ─── Menu Bar (Tray) Extensions ────────────────────────────────
   getMenuBarExtensions: (): Promise<any[]> =>
@@ -750,6 +918,8 @@ contextBridge.exposeInMainWorld('electron', {
   // ─── AI ────────────────────────────────────────────────────────
   aiAsk: (requestId: string, prompt: string, options?: { model?: string; creativity?: number; systemPrompt?: string }): Promise<void> =>
     ipcRenderer.invoke('ai-ask', requestId, prompt, options),
+  aiChat: (requestId: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>, options?: { model?: string; creativity?: number; systemPrompt?: string }): Promise<void> =>
+    ipcRenderer.invoke('ai-chat', requestId, messages, options),
   aiCancel: (requestId: string): Promise<void> =>
     ipcRenderer.invoke('ai-cancel', requestId),
   aiIsAvailable: (): Promise<boolean> =>
@@ -823,13 +993,24 @@ contextBridge.exposeInMainWorld('electron', {
     return () => { ipcRenderer.removeListener('whisper-native-chunk', listener); };
   },
   onAIStreamChunk: (callback: (data: { requestId: string; chunk: string }) => void) => {
-    ipcRenderer.on('ai-stream-chunk', (_event: any, data: any) => callback(data));
+    const listener = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('ai-stream-chunk', listener);
+    return () => { ipcRenderer.removeListener('ai-stream-chunk', listener); };
   },
   onAIStreamDone: (callback: (data: { requestId: string }) => void) => {
-    ipcRenderer.on('ai-stream-done', (_event: any, data: any) => callback(data));
+    const listener = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('ai-stream-done', listener);
+    return () => { ipcRenderer.removeListener('ai-stream-done', listener); };
   },
   onAIStreamError: (callback: (data: { requestId: string; error: string }) => void) => {
-    ipcRenderer.on('ai-stream-error', (_event: any, data: any) => callback(data));
+    const listener = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('ai-stream-error', listener);
+    return () => { ipcRenderer.removeListener('ai-stream-error', listener); };
+  },
+  onPromptInsertText: (callback: (text: string) => void) => {
+    const listener = (_event: any, text: string) => callback(text);
+    ipcRenderer.on('prompt-insert-text', listener);
+    return () => { ipcRenderer.removeListener('prompt-insert-text', listener); };
   },
 
   // ─── Ollama Model Management ────────────────────────────────────
@@ -877,4 +1058,31 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('window-management-set-window-layout', items),
   getWindowManagementSnapshot: (): Promise<any> =>
     ipcRenderer.invoke('window-management-snapshot'),
-});
+};
+
+exposeToRenderer('electron', electronAPI);
+
+// ─── Real Node require for extensions ───────────────────────────
+// Windows that run Raycast extensions (currently: the main launcher) have
+// `sandbox: false` + `nodeIntegration: true` + `contextIsolation: false`.
+// In that configuration, `require`, `process`, `Buffer`, etc. are already
+// present on the main world — extensions get real Node natively, no bridge
+// needed. For safety (and for any future window that opts into sandboxed
+// extension execution), we still expose a guarded passthrough.
+{
+  const maybeRequire: ((id: string) => any) | undefined =
+    typeof (globalThis as any).require === 'function'
+      ? (globalThis as any).require
+      : undefined;
+
+  exposeToRenderer('__scNodeRequire', (name: string): any => {
+    if (!maybeRequire) {
+      throw new Error('Node require is not available in this window (sandboxed).');
+    }
+    return maybeRequire(name);
+  });
+
+  // Flag so the renderer can detect whether real Node is available without
+  // having to catch on every call.
+  exposeToRenderer('__scHasRealNode', Boolean(maybeRequire));
+}

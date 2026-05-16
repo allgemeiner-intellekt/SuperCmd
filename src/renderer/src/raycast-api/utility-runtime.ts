@@ -77,7 +77,7 @@ export async function runAppleScript(script: string, options?: any): Promise<str
   if (!electron?.runAppleScript) {
     throw new Error('runAppleScript is not available');
   }
-  return await electron.runAppleScript(script);
+  return await electron.runAppleScript(script, options);
 }
 
 export async function showFailureToast(error: Error | string | unknown, options?: { title?: string; message?: string; primaryAction?: any }): Promise<void> {

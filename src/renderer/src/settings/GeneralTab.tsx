@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { Keyboard, Info, RefreshCw, Download, RotateCcw, Type, Sun, Moon, SunMoon, Sparkles, Image, Trash2, SlidersHorizontal, ChevronDown, ChevronUp, Power } from 'lucide-react';
+import { Keyboard, Info, RefreshCw, Download, RotateCcw, Type, Sun, Moon, SunMoon, Sparkles, Image, Trash2, SlidersHorizontal, ChevronDown, ChevronUp, Power, PanelTop } from 'lucide-react';
 import HotkeyRecorder from './HotkeyRecorder';
 import type { AppSettings, AppUpdaterStatus } from '../../types/electron';
 import { applyAppFontSize, getDefaultAppFontSize } from '../utils/font-size';
@@ -90,6 +90,7 @@ const GeneralTab: React.FC = () => {
   const [shortcutStatus, setShortcutStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [themePreference, setThemePreference] = useState<ThemePreference>(() => getThemePreference());
   const [uiStyle, setUiStyle] = useState<UiStylePreference>('default');
+  const [launcherViewMode, setLauncherViewMode] = useState<'expanded' | 'compact'>('expanded');
   const [launcherBackgroundBusy, setLauncherBackgroundBusy] = useState(false);
   const [launcherBackgroundControlsExpanded, setLauncherBackgroundControlsExpanded] = useState(false);
 
@@ -102,6 +103,7 @@ const GeneralTab: React.FC = () => {
         fontSize: normalizedFontSize,
       });
       setUiStyle(normalizeUiStyle(nextSettings.uiStyle));
+      setLauncherViewMode(nextSettings.launcherViewMode || 'expanded');
     });
   }, []);
 
@@ -113,6 +115,7 @@ const GeneralTab: React.FC = () => {
         fontSize: normalizedFontSize,
       });
       setUiStyle(normalizeUiStyle(nextSettings.uiStyle));
+      setLauncherViewMode(nextSettings.launcherViewMode || 'expanded');
     });
     return cleanup;
   }, []);
@@ -139,6 +142,7 @@ const GeneralTab: React.FC = () => {
     });
     return disposeThemeListener;
   }, []);
+
 
   const handleShortcutChange = async (newShortcut: string) => {
     if (!newShortcut) return;
@@ -210,12 +214,19 @@ const GeneralTab: React.FC = () => {
 
   const handleRestartToInstall = async () => {
     setUpdaterActionError('');
+    setUpdaterStatus((prev) => prev ? {
+      ...prev,
+      state: 'restarting',
+      message: t('settings.general.updates.restarting'),
+    } : prev);
     try {
       const ok = await window.electron.appUpdaterQuitAndInstall();
       if (!ok) {
+        setUpdaterStatus((prev) => prev ? { ...prev, state: 'downloaded' } : prev);
         setUpdaterActionError(t('settings.general.updates.error'));
       }
     } catch (error: any) {
+      setUpdaterStatus((prev) => prev ? { ...prev, state: 'downloaded' } : prev);
       setUpdaterActionError(String(error?.message || error || t('settings.general.updates.failed')));
     }
   };
@@ -225,6 +236,16 @@ const GeneralTab: React.FC = () => {
   const updaterSupported = updaterStatus?.supported !== false;
   const currentVersion = updaterStatus?.currentVersion || '1.0.0';
   const updaterAction = useMemo(() => {
+    if (updaterState === 'restarting') {
+      return {
+        label: t('settings.general.updates.restartingButton'),
+        onClick: handleRestartToInstall,
+        icon: RotateCcw,
+        disabled: true,
+        className:
+          'border border-emerald-400/30 bg-[var(--ui-segment-bg)] text-emerald-200',
+      };
+    }
     if (updaterState === 'downloaded') {
       return {
         label: t('settings.general.updates.restart'),
@@ -273,6 +294,8 @@ const GeneralTab: React.FC = () => {
         return t('settings.general.updates.downloading');
       case 'downloaded':
         return t('settings.general.updates.downloaded');
+      case 'restarting':
+        return updaterStatus.message || t('settings.general.updates.restarting');
       case 'error':
         return t('settings.general.updates.error');
       default:
@@ -376,8 +399,8 @@ const GeneralTab: React.FC = () => {
     settings.launcherBackgroundImageOpacityPercent,
     DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT
   );
-
   return (
+    <>
     <div className="w-full max-w-[980px] mx-auto space-y-3">
       <h2 className="text-[0.9375rem] font-semibold text-[var(--text-primary)]">{t('settings.general.title')}</h2>
 
@@ -491,6 +514,46 @@ const GeneralTab: React.FC = () => {
                   key={option.id}
                   type="button"
                   onClick={() => void handleUiStyleChange(option.id)}
+                  className={`px-3 py-1.5 rounded-md text-[0.75rem] font-semibold transition-colors ${
+                    active
+                      ? 'bg-[var(--ui-segment-active-bg)] text-[var(--text-primary)]'
+                      : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--ui-segment-hover-bg)]'
+                  }`}
+                >
+                  {option.label}
+                </button>
+              );
+            })}
+          </div>
+        </SettingsRow>
+
+        <SettingsRow
+          icon={<PanelTop className="w-4 h-4" />}
+          title={t('settings.general.launcherMode.title')}
+          description={t('settings.general.launcherMode.description')}
+        >
+          <div className="inline-flex items-center gap-0.5 rounded-lg border border-[var(--ui-divider)] bg-[var(--ui-segment-bg)] p-0.5">
+            {([
+              { id: 'expanded' as const, label: t('settings.general.launcherMode.expanded') },
+              { id: 'compact' as const, label: t('settings.general.launcherMode.compact') },
+            ]).map((option) => {
+              const active = launcherViewMode === option.id;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  onClick={async () => {
+                    if (!settings) return;
+                    const prev = launcherViewMode;
+                    setLauncherViewMode(option.id);
+                    setSettings((s) => (s ? { ...s, launcherViewMode: option.id } : s));
+                    try {
+                      await window.electron.saveSettings({ launcherViewMode: option.id });
+                    } catch {
+                      setLauncherViewMode(prev);
+                      setSettings((s) => (s ? { ...s, launcherViewMode: prev } : s));
+                    }
+                  }}
                   className={`px-3 py-1.5 rounded-md text-[0.75rem] font-semibold transition-colors ${
                     active
                       ? 'bg-[var(--ui-segment-active-bg)] text-[var(--text-primary)]'
@@ -690,7 +753,9 @@ const GeneralTab: React.FC = () => {
                       ? 'animate-spin'
                       : updaterState === 'downloading'
                         ? 'animate-pulse'
-                        : ''
+                        : updaterState === 'restarting'
+                          ? 'animate-spin'
+                          : ''
                   }`}
                 />
                 {updaterAction.label}
@@ -711,6 +776,8 @@ const GeneralTab: React.FC = () => {
         </SettingsRow>
       </div>
     </div>
+
+    </>
   );
 };
 

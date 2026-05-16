@@ -16,6 +16,8 @@ export interface CommandInfo {
   interval?: string;
   disabledByDefault?: boolean;
   needsConfirmation?: boolean;
+  /** Always shown at the top of the list, even during search. */
+  alwaysOnTop?: boolean;
   commandArgumentDefinitions?: Array<{
     name: string;
     required?: boolean;
@@ -24,6 +26,8 @@ export interface CommandInfo {
     title?: string;
     data?: Array<{ title?: string; value?: string }>;
   }>;
+  /** SuperCmd deeplink (e.g. `supercmd://extensions/<owner>/<ext>/<cmd>`). Set for extension and script commands. */
+  deeplink?: string;
 }
 
 export interface IndexedFileSearchResult {
@@ -155,11 +159,12 @@ export interface ExtensionBundle {
 }
 
 export interface AISettings {
-  provider: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible';
+  provider: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'lm-studio' | 'openai-compatible';
   openaiApiKey: string;
   anthropicApiKey: string;
   geminiApiKey: string;
   elevenlabsApiKey: string;
+  mistralApiKey: string;
   supermemoryApiKey: string;
   supermemoryClient: string;
   supermemoryBaseUrl: string;
@@ -175,10 +180,15 @@ export interface AISettings {
   enabled: boolean;
   llmEnabled: boolean;
   whisperEnabled: boolean;
+  whisperAutoClose: boolean;
   readEnabled: boolean;
+  openaiCompatibleAppendV1: boolean;
   openaiCompatibleBaseUrl: string;
   openaiCompatibleApiKey: string;
   openaiCompatibleModel: string;
+  lmStudioBaseUrl: string;
+  lmStudioModel: string;
+  lmStudioApiKey: string;
 }
 
 export interface EdgeTtsVoice {
@@ -225,7 +235,7 @@ export interface Qwen3ModelStatus {
 }
 
 export interface AppUpdaterStatus {
-  state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+  state: 'idle' | 'unsupported' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'restarting' | 'error';
   supported: boolean;
   currentVersion: string;
   latestVersion?: string;
@@ -257,24 +267,192 @@ export interface HyperKeySettings {
   capsLockTapBehavior: HyperKeyCapsLockTapBehavior;
 }
 
+export type AppNavigationStyle = 'vim' | 'macos';
+
+export interface BrowserSearchSettings {
+  enabled: boolean;
+  historyRetentionDays: number | null;
+}
+
+export type BrowserSearchEntryType = 'url' | 'search';
+
+export type BrowserSearchSource =
+  | 'user'
+  | 'chrome'
+  | 'arc'
+  | 'brave'
+  | 'edge'
+  | 'vivaldi'
+  | 'safari'
+  | 'firefox';
+
+export interface BrowserSearchEntry {
+  id: string;
+  type: BrowserSearchEntryType;
+  query: string;
+  url: string;
+  host: string;
+  lastUsedAt: number;
+  useCount: number;
+  source: BrowserSearchSource;
+}
+
+export interface BrowserSearchAutocomplete {
+  completion: string;
+  suffix: string;
+  entry: BrowserSearchEntry;
+}
+
+export interface BrowserSearchImportableBrowser {
+  id: BrowserSearchSource;
+  name: string;
+  available: boolean;
+}
+
+export interface BrowserSearchImportResult {
+  imported: number;
+  skipped: number;
+  total: number;
+  reason?: string;
+}
+
+/** How to handle the situation when the chosen settings folder already
+ *  contains a settings.json. 'move' writes to an empty folder; 'replace'
+ *  overwrites the existing file with this Mac's settings; 'adopt' replaces
+ *  this Mac's settings with the existing file. */
+export type RelocateMode = 'move' | 'adopt' | 'replace';
+
+export interface RaycastImportBucketResult {
+  found: number;
+  imported: number;
+  skipped: number;
+  failed: number;
+}
+
+export interface AiChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: number;
+  cancelled?: boolean;
+}
+
+export interface AiChatConversation {
+  id: string;
+  title: string;
+  messages: AiChatMessage[];
+  createdAt: number;
+  updatedAt: number;
+  source?: 'local' | 'raycast';
+  sourceConversationId?: string;
+  metadata?: Record<string, any>;
+}
+
+export interface AiChatSnapshot {
+  version: 1;
+  conversations: AiChatConversation[];
+}
+
+export interface RaycastImportResult {
+  canceled: boolean;
+  filePath?: string;
+  raycastVersion?: string;
+  settingsImported: boolean;
+  disabledCommandsImported: number;
+  scriptCommandFoldersImported: number;
+  commandHotkeysImported: number;
+  commandAliasesImported: number;
+  pinnedCommandsImported: number;
+  aiChats: RaycastImportBucketResult;
+  quicklinks: RaycastImportBucketResult;
+  snippets: RaycastImportBucketResult;
+  notes: RaycastImportBucketResult;
+  extensions: RaycastImportBucketResult;
+  importedExtensionPreferenceExtensions: string[];
+  unsupported: string[];
+  warnings: string[];
+}
+
+export interface RaycastImportSelections {
+  settings: boolean;
+  disabledCommands: boolean;
+  scriptCommandFolders: boolean;
+  commandHotkeys: boolean;
+  commandAliases: boolean;
+  pinnedCommands: boolean;
+  aiChats: boolean;
+  quicklinks: boolean;
+  snippets: boolean;
+  notes: boolean;
+  extensions: boolean;
+  extensionPreferences: boolean;
+}
+
+export interface RaycastImportPreview {
+  canceled: boolean;
+  sessionId?: string;
+  filePath?: string;
+  raycastVersion?: string;
+  selections: RaycastImportSelections;
+  counts: {
+    settings: number;
+    disabledCommands: number;
+    scriptCommandFolders: number;
+    commandHotkeys: number;
+    commandAliases: number;
+    pinnedCommands: number;
+    aiChats: number;
+    quicklinks: number;
+    snippets: number;
+    notes: number;
+    extensions: number;
+    extensionPreferences: number;
+  };
+  unsupported: string[];
+  warnings: string[];
+}
+
+export interface RaycastImportProgress {
+  sessionId: string;
+  stage: 'starting' | 'category' | 'extension' | 'done';
+  category?: keyof RaycastImportSelections;
+  message: string;
+  completedSteps: number;
+  totalSteps: number;
+  currentItem?: number;
+  totalItems?: number;
+  extensionName?: string;
+  downloadedBytes?: number;
+  totalBytes?: number;
+}
+
+export interface ExtensionPreferencesSnapshot {
+  version: 1;
+  extensions: Record<string, Record<string, any>>;
+  commands: Record<string, Record<string, any>>;
+}
+
 export interface AppSettings {
   globalShortcut: string;
   openAtLogin: boolean;
   disabledCommands: string[];
   enabledCommands: string[];
   customExtensionFolders: string[];
+  scriptCommandFolders: string[];
   commandHotkeys: Record<string, string>;
   commandAliases: Record<string, string>;
   pinnedCommands: string[];
+  pinnedFiles: string[];
   recentCommands: string[];
   recentCommandLaunchCounts: Record<string, number>;
   hasSeenOnboarding: boolean;
   hasSeenWhisperOnboarding: boolean;
   fileSearchProtectedRootsEnabled: boolean;
+  disableFileSearchResults: boolean;
   ai: AISettings;
   commandMetadata?: Record<string, { subtitle?: string }>;
   debugMode: boolean;
-  appLanguage: 'system' | 'en' | 'zh-Hans' | 'zh-Hant' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'ru';
+  appLanguage: 'system' | 'en' | 'zh-Hans' | 'zh-Hant' | 'ja' | 'ko' | 'fr' | 'de' | 'es' | 'ru' | 'it';
   fontSize: 'extra-small' | 'small' | 'medium' | 'large' | 'extra-large';
   uiStyle: 'default' | 'glassy';
   baseColor: string;
@@ -283,11 +461,28 @@ export interface AppSettings {
   launcherBackgroundImageBlurPercent: number;
   launcherBackgroundImageOpacityPercent: number;
   appUpdaterLastCheckedAt: number;
+  updateBannerDismissedAt?: number;
+  updateBannerDismissedVersion?: string;
   hyperKey: HyperKeySettings;
+  launcherViewMode: 'expanded' | 'compact';
+  navigationStyle: AppNavigationStyle;
+  clipboardHistoryRetentionDays: number | null;
+  clipboardAppBlacklist: string[];
+  emojiPickerEnabled: boolean;
+  emojiPickerTriggerPrefix: string;
+  emojiPickerExcludedAppBundleIds: string[];
+  browserSearch: BrowserSearchSettings;
+  popToRootSearchTimeoutSeconds: number;
+  installedExtensions: string[];
+  extensionUninstallTombstones: Record<string, number>;
+  extensionPreferences: Record<string, Record<string, unknown>>;
+  extensionCommandPreferences: Record<string, Record<string, unknown>>;
+  extensionCommandArguments: Record<string, Record<string, unknown>>;
+  autoQuitApps: AutoQuitAppEntry[];
+  autoQuitDefaultTimeoutSeconds: number;
 }
 
-export interface CatalogEntry {
-  name: string;
+export interface CatalogEntry {  name: string;
   title: string;
   description: string;
   author: string;
@@ -315,6 +510,7 @@ export interface ClipboardItem {
     size?: number;
     format?: string;
     filename?: string;
+    sourcePath?: string;
   };
 }
 
@@ -403,15 +599,56 @@ export interface OllamaLocalModel {
   modifiedAt: string;
 }
 
+export interface SoulverResponse {
+  id: number;
+  value: string | null;
+  raw: number | null;
+  type: string;
+  error: string | null;
+}
+
+export interface AppRemnant {
+  path: string;
+  label: string;
+  location: string;
+  sizeBytes: number;
+  isAppBundle: boolean;
+}
+
+export interface AppUninstallScanResult {
+  appName: string;
+  bundleId: string;
+  appPath: string;
+  appIconDataUrl: string;
+  remnants: AppRemnant[];
+  totalSizeBytes: number;
+}
+
+export interface AutoQuitAppEntry {
+  bundleId: string;
+  appName: string;
+  appPath: string;
+  timeoutSeconds: number;
+}
+
 export interface ElectronAPI {
   // Lifecycle
   rendererReady: () => void;
+  // Calculator (SoulverCore)
+  calculatorEvaluate: (expression: string) => Promise<SoulverResponse>;
   // Launcher
   getCommands: () => Promise<CommandInfo[]>;
   executeCommand: (commandId: string) => Promise<boolean>;
   executeCommandAsHotkey: (commandId: string) => Promise<boolean>;
   executeCommandFromWidget: (commandId: string) => Promise<boolean>;
   hideWindow: () => Promise<void>;
+  resizeLauncherWindow: (expanded: boolean) => Promise<void>;
+  showWindow: () => Promise<void>;
+  activateLastFrontmostApp: () => Promise<void>;
+  reportNoViewStatus: (variant: 'processing' | 'success' | 'error', text: string) => Promise<void>;
+  showConfetti: () => Promise<void>;
+  dismissUpdateBanner: () => Promise<void>;
+  resetLauncherPosition: () => Promise<void>;
   openDevTools: () => Promise<boolean>;
   closePromptWindow: () => Promise<void>;
   setLauncherMode: (mode: 'default' | 'onboarding' | 'whisper' | 'speak' | 'prompt') => Promise<void>;
@@ -496,6 +733,23 @@ export interface ElectronAPI {
   appUpdaterCheckAndInstall: () => Promise<{ success: boolean; error?: string; message?: string; state?: string }>;
   onAppUpdaterStatus: (callback: (status: AppUpdaterStatus) => void) => (() => void);
   saveSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>;
+  previewRaycastConfigImport: () => Promise<RaycastImportPreview>;
+  applyRaycastConfigImport: (options: {
+    sessionId: string;
+    conflictMode: 'skip' | 'overwrite';
+    selections: RaycastImportSelections;
+  }) => Promise<RaycastImportResult>;
+  importRaycastConfig: () => Promise<RaycastImportResult>;
+  onRaycastImportProgress: (callback: (payload: RaycastImportProgress) => void) => (() => void);
+  getAiChatSnapshot: () => Promise<AiChatSnapshot>;
+  upsertAiChatConversation: (conversation: AiChatConversation) => Promise<AiChatConversation | null>;
+  deleteAiChatConversation: (id: string) => Promise<boolean>;
+  mergeAiChatSnapshot: (snapshot: AiChatSnapshot) => Promise<AiChatSnapshot>;
+  getExtensionPreferencesSnapshot: () => Promise<ExtensionPreferencesSnapshot>;
+  getExtensionPreferences: (extName: string, cmdName?: string) => Promise<Record<string, any>>;
+  setExtensionPreference: (extName: string, preferenceName: string, value: any, cmdName?: string) => Promise<Record<string, any>>;
+  setExtensionPreferences: (extName: string, values: Record<string, any>, cmdName?: string) => Promise<Record<string, any>>;
+  mergeExtensionPreferencesSnapshot: (snapshot: ExtensionPreferencesSnapshot) => Promise<ExtensionPreferencesSnapshot>;
   getAllCommands: () => Promise<CommandInfo[]>;
   updateGlobalShortcut: (shortcut: string) => Promise<boolean>;
   setOpenAtLogin: (enabled: boolean) => Promise<boolean>;
@@ -541,6 +795,8 @@ export interface ElectronAPI {
     ) => void
   ) => void;
   onSettingsUpdated: (callback: (settings: AppSettings) => void) => (() => void);
+  onExtensionPreferencesUpdated: (callback: (payload: { extensionName: string }) => void) => (() => void);
+  onAiChatsUpdated: (callback: () => void) => (() => void);
 
   // Extension Runner
   runExtension: (extName: string, cmdName: string) => Promise<ExtensionBundle | null>;
@@ -553,6 +809,9 @@ export interface ElectronAPI {
 
   // Open URL
   openUrl: (url: string, application?: string) => Promise<boolean>;
+
+  // App Management
+  quitApp: (appPath: string, force?: boolean) => Promise<boolean>;
 
   // Store
   getCatalog: (forceRefresh?: boolean) => Promise<CatalogEntry[]>;
@@ -567,6 +826,7 @@ export interface ElectronAPI {
   getPopularExtensions: (limit?: number) => Promise<CatalogEntry[]>;
   getExtensionDetails: (name: string) => Promise<CatalogEntry | null>;
   onExtensionsChanged: (callback: () => void) => (() => void);
+  onExtensionUninstalled: (callback: (extensionName: string) => void) => (() => void);
   onExtensionInstallStatus: (callback: (message: string) => void) => (() => void);
 
   // Extension APIs (for @raycast/api compatibility)
@@ -606,15 +866,25 @@ export interface ElectronAPI {
   getApplications: (path?: string) => Promise<Array<{ name: string; path: string; bundleId?: string; iconDataUrl?: string }>>;
   getDefaultApplication: (filePath: string) => Promise<{ name: string; path: string; bundleId?: string }>;
   getFrontmostApplication: () => Promise<{ name: string; path: string; bundleId?: string } | null>;
-  runAppleScript: (script: string) => Promise<string>;
+  runAppleScript: (script: string, options?: { language?: string; humanReadableOutput?: boolean; timeout?: number }) => Promise<string>;
   ensureCalendarAccess: (options?: { prompt?: boolean }) => Promise<CalendarPermissionResult>;
   getCalendarEvents: (payload: { start: string; end: string }) => Promise<CalendarEventsResult>;
   moveToTrash: (paths: string[]) => Promise<void>;
+  appUninstallScan: (appPath: string) => Promise<AppUninstallScanResult>;
+  appUninstallExecute: (paths: string[]) => Promise<{ success: boolean; errors: string[] }>;
+
+  // Auto Quit
+  autoQuitGetApps: () => Promise<AutoQuitAppEntry[]>;
+  autoQuitAddApp: (entry: { appPath: string; appName: string; timeoutSeconds: number }) => Promise<string | void>;
+  autoQuitRemoveApp: (appPath: string) => Promise<void>;
+  autoQuitGetDefaultTimeout: () => Promise<number>;
+  autoQuitSetDefaultTimeout: (seconds: number) => Promise<void>;
   readFile: (filePath: string) => Promise<string>;
   writeFile: (filePath: string, content: string) => Promise<void>;
   fileExists: (filePath: string) => Promise<boolean>;
   readDir: (dirPath: string) => Promise<string[]>;
   getFileIconDataUrl: (filePath: string, size?: number) => Promise<string | null>;
+  getAppIconDataUrl: (appPath: string, size?: number) => Promise<string | null>;
   searchIndexedFiles: (query: string, options?: { limit?: number }) => Promise<IndexedFileSearchResult[]>;
   getFileSearchIndexStatus: () => Promise<FileSearchIndexStatus>;
   refreshFileSearchIndex: (reason?: string) => Promise<FileSearchIndexStatus>;
@@ -641,6 +911,18 @@ export interface ElectronAPI {
   clipboardSetEnabled: (enabled: boolean) => Promise<void>;
   clipboardWrite: (payload: { text?: string; html?: string; file?: string }) => Promise<boolean>;
   clipboardReadText: () => Promise<string>;
+
+  // Browser Search
+  browserSearchOpen: (input: string) => Promise<{ ok: boolean; type: BrowserSearchEntryType | null; url: string | null }>;
+  browserSearchResolve: (input: string) => Promise<{ type: BrowserSearchEntryType; url: string; host: string } | null>;
+  browserSearchListEntries: () => Promise<BrowserSearchEntry[]>;
+  browserSearchAutocomplete: (input: string) => Promise<BrowserSearchAutocomplete | null>;
+  browserSearchSuggest: (input: string) => Promise<string | null>;
+  browserSearchClearHistory: () => Promise<boolean>;
+  browserSearchListBrowsers: () => Promise<BrowserSearchImportableBrowser[]>;
+  browserSearchImport: (browserId: string) => Promise<BrowserSearchImportResult>;
+  onBrowserSearchHistoryChanged: (callback: () => void) => (() => void);
+
   getSelectedText: () => Promise<string>;
   getSelectedTextStrict: () => Promise<string>;
   memoryAdd: (payload: { text: string; userId?: string; source?: string; metadata?: Record<string, any> }) => Promise<{ success: boolean; memoryId?: string; error?: string }>;
@@ -741,6 +1023,9 @@ export interface ElectronAPI {
 
   // Native helpers
   nativePickColor: () => Promise<{ red: number; green: number; blue: number; alpha: number; colorSpace: string } | null>;
+  keyboardLockStart: (durationSec: number) => Promise<{ ok: boolean; error?: string }>;
+  keyboardLockStop: () => Promise<{ ok: boolean }>;
+  screenOcrRun: (mode: 'recognize' | 'barcode', options: any) => Promise<{ ok: boolean; text?: string; error?: string }>;
   pickFiles: (options?: {
     allowMultipleSelection?: boolean;
     canChooseDirectories?: boolean;
@@ -748,6 +1033,12 @@ export interface ElectronAPI {
     showHiddenFiles?: boolean;
   }) => Promise<string[]>;
   pickLauncherBackgroundImage: () => Promise<string | null>;
+  saveExtensionPreferences: (args: { extName: string; cmdName?: string; extPrefs?: Record<string, unknown>; cmdPrefs?: Record<string, unknown> }) => Promise<AppSettings>;
+  saveExtensionCommandArguments: (args: { extName: string; cmdName: string; values: Record<string, unknown> }) => Promise<AppSettings>;
+  getSettingsLocation: () => Promise<{ path: string | null; defaultPath: string }>;
+  pickSettingsFolder: () => Promise<{ path: string; hasExisting: boolean } | null>;
+  relocateSettings: (args: { targetDir: string; mode: RelocateMode }) => Promise<{ ok: boolean; settings?: any; path?: string; error?: string }>;
+  resetSettingsLocation: () => Promise<{ ok: boolean; settings?: any; path?: string; error?: string }>;
   getMenuBarExtensions: () => Promise<any[]>;
   updateMenuBar: (data: any) => void;
   removeMenuBar: (extId: string) => void;
@@ -755,11 +1046,13 @@ export interface ElectronAPI {
 
   // AI
   aiAsk: (requestId: string, prompt: string, options?: { model?: string; creativity?: number; systemPrompt?: string }) => Promise<void>;
+  aiChat: (requestId: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>, options?: { model?: string; creativity?: number; systemPrompt?: string }) => Promise<void>;
   aiCancel: (requestId: string) => Promise<void>;
   aiIsAvailable: () => Promise<boolean>;
-  onAIStreamChunk: (callback: (data: { requestId: string; chunk: string }) => void) => void;
-  onAIStreamDone: (callback: (data: { requestId: string }) => void) => void;
-  onAIStreamError: (callback: (data: { requestId: string; error: string }) => void) => void;
+  onAIStreamChunk: (callback: (data: { requestId: string; chunk: string }) => void) => (() => void);
+  onAIStreamDone: (callback: (data: { requestId: string }) => void) => (() => void);
+  onAIStreamError: (callback: (data: { requestId: string; error: string }) => void) => (() => void);
+  onPromptInsertText: (callback: (text: string) => void) => (() => void);
   whisperRefineTranscript: (
     transcript: string
   ) => Promise<{ correctedText: string; source: 'ai' | 'heuristic' | 'raw' }>;
@@ -820,5 +1113,15 @@ export interface ElectronAPI {
 declare global {
   interface Window {
     electron: ElectronAPI;
+    /**
+     * Real Node `require`, exposed by preload when the hosting window runs
+     * with `sandbox: false` + `nodeIntegration: true`. Available in the main
+     * launcher window (where Raycast extensions execute) so the extension
+     * loader can return real `node:*` built-ins instead of shims. May throw
+     * if called from a sandboxed window.
+     */
+    __scNodeRequire?: (name: string) => any;
+    /** Whether `__scNodeRequire` is usable in the current window. */
+    __scHasRealNode?: boolean;
   }
 }

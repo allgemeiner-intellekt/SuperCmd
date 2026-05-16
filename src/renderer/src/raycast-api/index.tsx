@@ -664,6 +664,18 @@ export class Toast {
   private refresh() {
     if (!this._el) return;
 
+    // Mirror live property changes (style, title) to the system badge while a
+    // no-view hotkey run is in progress. show() handles the initial report;
+    // refresh() handles subsequent mutations like toast.style = Success.
+    if ((window as any).__scNoViewStatusTracking) {
+      const variant =
+        this._style === ToastStyle.Failure ? 'error' as const :
+        this._style === ToastStyle.Animated ? 'processing' as const :
+        'success' as const;
+      void (window as any).electron?.reportNoViewStatus?.(variant, String(this._title || ''));
+      (window as any).__scNoViewStatusReported = true;
+    }
+
     this.updateActions();
     this.updateKeyboardHandler();
     this.renderToastBody();
@@ -679,6 +691,16 @@ export class Toast {
   }
 
   show() {
+    // When inside a hotkey-triggered no-view run, mirror status to the system badge.
+    if ((window as any).__scNoViewStatusTracking) {
+      const variant =
+        this._style === ToastStyle.Failure ? 'error' as const :
+        this._style === ToastStyle.Animated ? 'processing' as const :
+        'success' as const;
+      void (window as any).electron?.reportNoViewStatus?.(variant, String(this._title || ''));
+      (window as any).__scNoViewStatusReported = true;
+    }
+
     this.hide(); // clear any existing instance of this toast
     if (Toast._activeToast && Toast._activeToast !== this) {
       void Toast._activeToast.hide();
@@ -1779,8 +1801,48 @@ export function getPreferenceValues<Values extends PreferenceValues = Preference
   return merged as Values;
 }
 
+// Recent open() invocations — swallows duplicate calls for the same target
+// within a short window. Defends against extensions that fire open() during
+// render (StrictMode double-invokes, re-renders that race popToRoot()'s
+// unmount, etc.). The Perplexity extension is one such case: its Command
+// component calls handleSubmit during render, which calls open(url) — without
+// this guard, every re-render spawned a new tab.
+const _recentOpenCalls = new Map<string, number>();
+const _OPEN_DEDUPE_WINDOW_MS = 1500;
+
 export async function open(target: string, application?: string | Application): Promise<void> {
   const electron = (window as any).electron;
+
+  if (typeof target === 'string') {
+    const dedupeKey = `${target}::${typeof application === 'string' ? application : application?.name || ''}`;
+    const now = Date.now();
+    const lastAt = _recentOpenCalls.get(dedupeKey) || 0;
+    if (now - lastAt < _OPEN_DEDUPE_WINDOW_MS) {
+      console.warn(`[raycast-api] Suppressed duplicate open(${target}) within ${_OPEN_DEDUPE_WINDOW_MS}ms`);
+      return;
+    }
+    _recentOpenCalls.set(dedupeKey, now);
+    // Garbage-collect old entries opportunistically so the map can't grow.
+    if (_recentOpenCalls.size > 32) {
+      for (const [key, timestamp] of _recentOpenCalls) {
+        if (now - timestamp > _OPEN_DEDUPE_WINDOW_MS) _recentOpenCalls.delete(key);
+      }
+    }
+  }
+
+  // Intercept raycast://confetti deeplinks (used by the 1-click-confetti extension)
+  // and map them to SuperCmd's native confetti overlay.
+  if (typeof target === 'string') {
+    const normalized = target.trim().toLowerCase();
+    if (
+      normalized === 'raycast://confetti' ||
+      normalized === 'raycast://extensions/raycast/raycast/confetti'
+    ) {
+      try { await electron?.showConfetti?.(); } catch {}
+      return;
+    }
+  }
+
   if (application) {
     const appName = typeof application === 'string' ? application : application.name;
     if (electron?.openUrl) {
@@ -1885,7 +1947,32 @@ export async function getSelectedText(): Promise<string> {
 }
 
 export async function getSelectedFinderItems(): Promise<Array<{ path: string }>> {
-  return [];
+  const electron = (window as any).electron;
+  if (!electron?.runAppleScript) return [];
+  // Newline-separated POSIX paths so we don't have to guess at AppleScript
+  // record formatting. ASCII character 10 = LF.
+  const script = `
+    tell application "Finder"
+      set theSelection to selection
+      if theSelection is {} then return ""
+      set theOutput to ""
+      repeat with anItem in theSelection
+        set theOutput to theOutput & (POSIX path of (anItem as alias)) & ASCII character 10
+      end repeat
+      return theOutput
+    end tell
+  `;
+  try {
+    const raw = String((await electron.runAppleScript(script)) || '');
+    return raw
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((path) => ({ path }));
+  } catch (error) {
+    console.error('[getSelectedFinderItems]', error);
+    throw new Error('Could not get selected Finder items');
+  }
 }
 
 export async function getApplications(path?: string): Promise<Application[]> {

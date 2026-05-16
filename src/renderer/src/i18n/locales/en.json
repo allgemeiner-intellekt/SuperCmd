@@ -5,6 +5,7 @@
     "noResults": "No results",
     "search": "Search...",
     "save": "Save",
+    "saving": "Saving...",
     "cancel": "Cancel",
     "close": "Close",
     "continue": "Continue",
@@ -107,7 +108,8 @@
         "fr": "French",
         "de": "German",
         "es": "Spanish",
-        "ru": "Russian"
+        "ru": "Russian",
+        "it": "Italian"
       },
       "fontSize": {
         "title": "Font Size",
@@ -130,6 +132,12 @@
         "description": "Use Default look or enable a glassy macOS Tahoe-inspired style.",
         "default": "Default",
         "glassy": "Glassy"
+      },
+      "launcherMode": {
+        "title": "Launcher Mode",
+        "description": "Choose how the launcher appears when opened.",
+        "expanded": "Expanded",
+        "compact": "Compact"
       },
       "background": {
         "title": "Launcher Background Image",
@@ -154,11 +162,13 @@
         "notAvailable": "You are already on the latest version.",
         "downloading": "Downloading update...",
         "downloaded": "Update downloaded. Restart to install.",
+        "restarting": "Restarting to install update...",
         "error": "Could not complete the update action.",
         "check": "Check for Updates",
         "download": "Download Update",
         "downloadingButton": "Downloading Update...",
-        "restart": "Restart to Update",
+        "restart": "Update and Restart",
+        "restartingButton": "Restarting...",
         "currentVersion": "Current version: v{version}",
         "latestVersion": "Latest: v{version}",
         "progress": "{progress}% · {transferred} / {total}",
@@ -168,6 +178,13 @@
         "title": "About",
         "description": "Version information.",
         "version": "SuperCmd v{version}"
+      },
+      "autoQuit": {
+        "title": "Auto Quit",
+        "timeout": "Default Timeout",
+        "description": "Apps with Auto Quit enabled will quit after this duration of inactivity",
+        "minute": "minute",
+        "minutes": "minutes"
       }
     },
     "ai": {
@@ -252,6 +269,7 @@
           "anthropic": "Claude",
           "gemini": "Gemini",
           "ollama": "Ollama",
+          "lmStudio": "LM Studio",
           "openaiCompatible": "Custom (OpenAI-compatible)"
         },
         "providerDescriptions": {
@@ -259,6 +277,7 @@
           "anthropic": "Anthropic Claude models",
           "gemini": "Google Gemini models",
           "ollama": "Local models",
+          "lmStudio": "Local models via LM Studio",
           "openaiCompatible": "Any OpenAI-compatible API (OpenRouter, Together, etc.)"
         },
         "ollama": {
@@ -293,11 +312,23 @@
             "deepseekR1": "Reasoning-focused model (7B)"
           }
         },
+        "lmStudio": {
+          "baseUrl": {
+            "label": "Server URL",
+            "hint": "LM Studio's local server URL (default: http://127.0.0.1:1234/v1)"
+          },
+          "apiKey": {
+            "toggle": "Optional API Key",
+            "placeholder": "Leave empty if not required",
+            "hint": "Only needed if you have configured authentication in LM Studio."
+          }
+        },
         "openaiCompatible": {
           "baseUrl": {
             "label": "Base URL",
             "placeholder": "https://api.openrouter.ai/v1",
-            "hint": "Include /v1 if your provider uses it (e.g., https://api.openai.com/v1)"
+            "hint": "Include /v1 if your provider uses it (e.g., https://api.openai.com/v1)",
+            "appendV1": "Auto-append /v1 to base URL"
           },
           "apiKey": {
             "label": "API Key",
@@ -356,6 +387,10 @@
           "fnHint": "Use Set to Fn to restore the default hold-to-talk key.",
           "fnHintBefore": "Use",
           "fnHintAfter": "to restore the default hold-to-talk key."
+        },
+        "autoClose": {
+          "title": "Auto-Close After Dictation",
+          "description": "Automatically close the whisper bar when dictation finishes."
         },
         "smoothOutput": {
           "title": "Smooth Output",
@@ -489,7 +524,10 @@
       "search": {
         "placeholder": "Search...",
         "all": "All",
-        "commands": "Commands"
+        "commands": "Commands",
+        "statusAll": "All",
+        "enabled": "Enabled",
+        "disabled": "Disabled"
       },
       "install": {
         "button": "Install Extension",
@@ -521,7 +559,8 @@
         "extension": "Extension",
         "application": "Application",
         "command": "Command",
-        "menuBarCommand": "Menu Bar Command"
+        "menuBarCommand": "Menu Bar Command",
+        "quickLink": "Quick Link"
       },
       "alias": {
         "add": "Add Alias",
@@ -540,6 +579,16 @@
       "extensionPreferences": "Extension Preferences",
       "commandPreferences": "Command Preferences",
       "noPreferences": "No preferences",
+      "clipboardBlacklist": {
+        "title": "Ignored Applications",
+        "description": "Clipboard content copied while one of these apps is frontmost will not be saved to SuperCmd's clipboard history.",
+        "add": "Add Application",
+        "remove": "Remove",
+        "empty": "No applications blacklisted. Copies from every app are saved to clipboard history.",
+        "searchPlaceholder": "Search applications…",
+        "loading": "Loading applications…",
+        "noApps": "No applications found"
+      },
       "enabled": "Enabled",
       "logout": "Logout",
       "loggedIn": "Logged into {name}",
@@ -562,20 +611,144 @@
         "opened": "Opened custom scripts folder with sample script.",
         "openedExisting": "Opened custom scripts folder.",
         "failed": "Failed to open custom scripts folder."
+      },
+      "emojiPicker": {
+        "enabled": "Enable Emoji Picker",
+        "enabledDesc": "Show emoji suggestions when typing a trigger prefix followed by a name.",
+        "triggerPrefix": "Trigger Prefix",
+        "triggerPrefixDesc": "Character that starts an emoji search. Type this followed by a name (e.g. :fire).",
+        "triggerPrefixPlaceholder": "e.g. :",
+        "excludedApps": {
+          "title": "Excluded Applications",
+          "description": "The emoji picker will not appear when these apps are active. Useful for apps that have their own emoji picker (Slack, Telegram…).",
+          "add": "Add Application",
+          "remove": "Remove",
+          "empty": "No applications excluded. The picker triggers in every app.",
+          "searchPlaceholder": "Search applications…",
+          "loading": "Loading applications…",
+          "noApps": "No applications found"
+        }
       }
     },
     "advanced": {
       "title": "Advanced",
       "loading": "Loading advanced settings...",
+      "settingsFolder": {
+        "title": "Settings Folder",
+        "description": "Sync settings and extensions across Macs via iCloud Drive, Dropbox, or any folder.",
+        "defaultLabel": "Default location",
+        "chooseButton": "Choose Folder…",
+        "changeButton": "Change Folder…",
+        "resetButton": "Reset to Default",
+        "conflict": {
+          "title": "Settings already exist in this folder",
+          "body": "There's already a settings.json in {folder}. Which version would you like to use?",
+          "useExisting": "Use Existing Settings",
+          "useExistingHint": "Replace this Mac's settings with the synced copy.",
+          "replace": "Replace With Current Settings",
+          "replaceHint": "Overwrite the synced copy with this Mac's settings.",
+          "cancel": "Cancel"
+        },
+        "resetConfirm": {
+          "title": "Move settings back to default location?",
+          "body": "Your settings will be stored on this Mac only. The synced copy in your chosen folder won't be deleted.",
+          "confirm": "Reset to Default",
+          "cancel": "Cancel"
+        },
+        "status": {
+          "moved": "Settings folder updated.",
+          "adopted": "Synced settings adopted.",
+          "reset": "Settings moved back to default location.",
+          "failed": "Could not update settings folder."
+        }
+      },
+      "disableFileSearch": {
+        "title": "Disable File & Folder Search",
+        "description": "Hide file and folder results from the main launcher search.",
+        "label": "Disable file and folder search results"
+      },
+      "navigationStyle": {
+        "title": "Navigation Style",
+        "description": "Choose the keyboard shortcuts for navigating up, down, left, and right in the launcher.",
+        "option": {
+          "vim": "Vim Style (^J, ^K, ^H, ^L)",
+          "macos": "macOS Style (^N, ^P, ^B, ^F)"
+        }
+      },
+      "popToRootSearch": {
+        "title": "Pop to Root Search",
+        "description": "When you reopen SuperCmd, return to the root search after this delay. Otherwise, the previous extension or view stays open.",
+        "option": {
+          "immediately": "Immediately",
+          "5s": "After 5 seconds",
+          "15s": "After 15 seconds",
+          "30s": "After 30 seconds",
+          "60s": "After 60 seconds",
+          "90s": "After 90 seconds",
+          "120s": "After 120 seconds"
+        }
+      },
+      "clipboardRetention": {
+        "title": "Clipboard History Retention",
+        "description": "Auto-delete clipboard entries older than the selected duration. Pinned entries are always kept.",
+        "option": {
+          "1day": "1 day",
+          "7days": "7 days",
+          "1month": "1 month",
+          "3months": "3 months",
+          "6months": "6 months",
+          "1year": "1 year",
+          "never": "Never"
+        }
+      },
       "debugMode": {
         "title": "Debug Mode",
         "description": "Show detailed logs when extensions fail to load or build.",
         "label": "Enable debug mode"
+      },
+      "browserSearch": {
+        "title": "Browser Search",
+        "description": "Press Enter on a query to open it in your default browser. Inline autocomplete suggests sites from your history.",
+        "enableLabel": "Enable browser search",
+        "retention": {
+          "label": "History retention",
+          "option": {
+            "7d": "7 days",
+            "30d": "30 days",
+            "90d": "90 days",
+            "180d": "180 days",
+            "365d": "1 year",
+            "forever": "Forever"
+          }
+        },
+        "clearButton": "Clear browser search history",
+        "importLabel": "Import history from a browser",
+        "import": {
+          "action": "Import",
+          "running": "Importing…",
+          "noneFound": "No supported browsers detected"
+        },
+        "status": {
+          "cleared": "Browser search history cleared.",
+          "imported": "Imported {count} of {total} entries.",
+          "failed": "Action failed."
+        }
       }
     }
   },
   "launcher": {
     "searchPlaceholder": "Search for apps, commands, or ask AI...",
+    "browserSearch": {
+      "openUrl": "Open {url}",
+      "searchFor": "Search \"{query}\"",
+      "subtitle": {
+        "openUrl": "Default browser",
+        "search": "Web search"
+      }
+    },
+    "compact": {
+      "showMore": "Show More"
+    },
     "status": {
       "discoveringApps": "Discovering apps...",
       "noMatchingResults": "No matching results",
@@ -609,14 +782,19 @@
       "run": "Run",
       "copy": "Copy",
       "copyPath": "Copy Path",
+      "copyDeeplink": "Copy Deeplink",
       "copyToClipboard": "Copy to Clipboard",
       "paste": "Paste",
       "showDetails": "Show Details",
       "showInFinder": "Show in Finder",
       "revealInFinder": "Reveal in Finder",
       "getInfo": "Get Info",
-      "quit": "Quit",
-      "forceQuit": "Force Quit",
+      "quit": "Quit Application",
+      "forceQuit": "Force Quit Application",
+      "quitApp": "Quit {appName}",
+      "forceQuitApp": "Force quit {appName}",
+      "failedQuitting": "Failed quitting {appName}",
+      "forceQuitConfirm": "Force quit \"{appName}\"? Unsaved changes will be lost.",
       "hide": "Hide",
       "show": "Show",
       "preferences": "Preferences",
@@ -627,7 +805,11 @@
       "unpinExtension": "Unpin Extension",
       "disableCommand": "Disable Command",
       "moveUp": "Move Up",
-      "moveDown": "Move Down"
+      "moveDown": "Move Down",
+      "uninstallApplication": "Uninstall Application",
+      "enableAutoQuit": "Enable Auto Quit",
+      "disableAutoQuit": "Disable Auto Quit",
+      "disableApplication": "Disable Application"
     },
     "empty": {
       "noResults": "No results found",
@@ -641,7 +823,8 @@
     },
     "sections": {
       "selectedText": "Selected Text",
-      "pinned": "Pinned"
+      "pinned": "Pinned",
+      "results": "Results"
     },
     "calculator": {
       "pressEnterToCopy": "Press Enter to copy",
@@ -730,6 +913,48 @@
     },
     "actions": {
       "title": "Actions"
+    },
+    "errorBoundary": {
+      "title": "Something went wrong loading the extension store.",
+      "retry": "Try Again"
+    }
+  },
+  "canvas": {
+    "searchPlaceholder": "Search canvases...",
+    "untitled": "Untitled Canvas",
+    "modified": "Modified",
+    "count": "{count} canvas{plural}",
+    "time": {
+      "justNow": "Just now"
+    },
+    "actions": {
+      "new": "New Canvas",
+      "open": "Open Canvas",
+      "rename": "Rename",
+      "duplicate": "Duplicate",
+      "copyDeeplink": "Copy Deeplink",
+      "exportJson": "Export as JSON",
+      "pin": "Pin",
+      "unpin": "Unpin",
+      "delete": "Delete Canvas"
+    },
+    "empty": {
+      "title": "No canvases yet",
+      "description": "Create your first canvas to get started",
+      "noSearchResults": "No canvases found",
+      "shortcutHint": "or press ⌘N"
+    },
+    "preview": {
+      "empty": "No preview yet — save the canvas to generate one",
+      "selectPrompt": "Select a canvas to preview"
+    },
+    "rename": {
+      "title": "Rename Canvas",
+      "placeholder": "Canvas name..."
+    },
+    "delete": {
+      "title": "Delete \"{title}\"?",
+      "description": "This action cannot be undone."
     }
   },
   "clipboard": {
@@ -761,11 +986,39 @@
     "create": "Create Quick Link",
     "edit": "Edit Quick Link",
     "delete": "Delete Quick Link",
+    "confirmDelete": "Click again to confirm",
     "searchPlaceholder": "Search quick links...",
     "name": "Name",
     "url": "URL",
+    "urlHint": "Use {placeholder} to add dynamic values like clipboard or arguments.",
+    "openWith": "Open With",
+    "defaultBrowser": "Default Browser",
     "icon": "Icon",
-    "save": "Save Quick Link"
+    "save": "Save Quick Link",
+    "saved": "Saved",
+    "saveFailed": "Failed to save quick link.",
+    "deleteFailed": "Failed to delete quick link.",
+    "notFound": "Quick link not found.",
+    "nameRequired": "Name is required.",
+    "urlRequired": "URL is required."
+  },
+  "appUninstall": {
+    "title": "Uninstall {appName}",
+    "filesCount": "{count} Files",
+    "uninstallButton": "Uninstall Application",
+    "scanning": "Scanning for related files...",
+    "noRemnants": "No related files found",
+    "confirmMessage": "Move {count} files ({size}) to Trash?",
+    "filterPlaceholder": "Filter files and folders by name...",
+    "sortByPath": "Sort by Path",
+    "sortBySize": "Sort by Size",
+    "markKeep": "Mark File to Keep",
+    "markRemove": "Mark File to Remove",
+    "actions": "Actions",
+    "showInfo": "Show Info in Finder",
+    "trashErrors": "Some files could not be moved to Trash:\n{errors}",
+    "uninstallSuccess": "{appName} has been uninstalled",
+    "uninstallError": "Failed to uninstall {appName}"
   },
   "fileSearch": {
     "placeholder": "Search files...",

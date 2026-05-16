@@ -11,7 +11,7 @@
  */
 
 import { app } from 'electron';
-import { exec, execFile } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -24,6 +24,48 @@ import { loadSettings } from './settings-store';
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 let iconCounter = 0;
+
+function svgToBase64DataUrl(svg: string): string {
+  return `data:image/svg+xml;base64,${Buffer.from(svg, 'utf8').toString('base64')}`;
+}
+
+// Icons use lucide-react icon paths (24x24 viewBox) scaled and centered in a 64x64 styled background.
+// Transform "translate(18,18) scale(1.167)" maps the 24x24 lucide viewBox into a ~28px area centered in 64px.
+const QUIT_ALL_APPS_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="qaBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#fda4af" stop-opacity="0.7"/><stop offset="1" stop-color="#be123c" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#qaBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></g></svg>'
+);
+
+const SLEEP_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="slBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#c4b5fd" stop-opacity="0.7"/><stop offset="1" stop-color="#7c3aed" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#slBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></g></svg>'
+);
+
+const RESTART_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="rsBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#93c5fd" stop-opacity="0.7"/><stop offset="1" stop-color="#1d4ed8" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#rsBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></g></svg>'
+);
+
+const LOCK_SCREEN_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="lsBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#fcd34d" stop-opacity="0.7"/><stop offset="1" stop-color="#b45309" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#lsBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></g></svg>'
+);
+
+const LOGOUT_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="loBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#fdba74" stop-opacity="0.7"/><stop offset="1" stop-color="#ea580c" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#loBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></g></svg>'
+);
+
+const EMPTY_TRASH_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="etBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#6ee7b7" stop-opacity="0.7"/><stop offset="1" stop-color="#047857" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#etBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></g></svg>'
+);
+
+const RESET_POSITION_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="rpBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#7dd3fc" stop-opacity="0.7"/><stop offset="1" stop-color="#0369a1" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#rpBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></g></svg>'
+);
+
+const TOGGLE_APPEARANCE_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="taBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#cbd5e1" stop-opacity="0.7"/><stop offset="1" stop-color="#475569" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#taBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 1 0 20z" fill="rgba(255,255,255,0.92)"/></g></svg>'
+);
+
+const SHUTDOWN_ICON_DATA_URL = svgToBase64DataUrl(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" fill="none"><defs><linearGradient id="sdBg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse"><stop stop-color="#fca5a5" stop-opacity="0.7"/><stop offset="1" stop-color="#dc2626" stop-opacity="0.82"/></linearGradient></defs><rect x="8" y="8" width="48" height="48" rx="15" fill="url(#sdBg)"/><g transform="translate(18,18) scale(1.167)" stroke="rgba(255,255,255,0.92)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></g></svg>'
+);
 
 export interface CommandInfo {
   id: string;
@@ -44,6 +86,8 @@ export interface CommandInfo {
   disabledByDefault?: boolean;
   /** Whether user confirmation is required before execution */
   needsConfirmation?: boolean;
+  /** Always shown at the top of the command list, regardless of search query */
+  alwaysOnTop?: boolean;
   /** Argument definitions (used by script commands and extension no-view setup) */
   commandArgumentDefinitions?: Array<{
     name: string;
@@ -53,6 +97,8 @@ export interface CommandInfo {
     title?: string;
     data?: Array<{ title?: string; value?: string }>;
   }>;
+  /** SuperCmd deeplink (e.g. `supercmd://extensions/<owner>/<ext>/<cmd>`). Set for extension and script commands. */
+  deeplink?: string;
   /** Bundle path on disk (used for icon extraction) */
   _bundlePath?: string;
 }
@@ -60,11 +106,77 @@ export interface CommandInfo {
 // ─── Cache ──────────────────────────────────────────────────────────
 
 let cachedCommands: CommandInfo[] | null = null;
+let staleCommandsFallback: CommandInfo[] | null = null;
 let cacheTimestamp = 0;
 let inflightDiscovery: Promise<CommandInfo[]> | null = null;
 let lastStaleRefreshRequestAt = 0;
 const CACHE_TTL = 30 * 60_000; // 30 min
 const STALE_REFRESH_COOLDOWN_MS = 15_000;
+
+// ─── Commands Disk Cache ─────────────────────────────────────────────────────
+// Persists the discovered commands list across restarts so the launcher is
+// instant on the next cold start.  Icons are stored separately in icon-cache/
+// and are re-attached on load.  Bump the version when CommandInfo shape changes
+// in a breaking way.
+
+const COMMANDS_DISK_CACHE_VERSION = 1;
+let commandsDiskCachePath: string | null = null;
+
+function getCommandsDiskCachePath(): string {
+  if (!commandsDiskCachePath) {
+    commandsDiskCachePath = path.join(app.getPath('userData'), 'commands-disk-cache.json');
+  }
+  return commandsDiskCachePath;
+}
+
+function loadCommandsDiskCache(): CommandInfo[] | null {
+  try {
+    const raw = fs.readFileSync(getCommandsDiskCachePath(), 'utf-8');
+    const parsed = JSON.parse(raw) as { version: number; commands: CommandInfo[] };
+    if (parsed?.version !== COMMANDS_DISK_CACHE_VERSION) return null;
+    const cmds = parsed.commands;
+    // Re-attach icons from the per-app icon disk cache (fast file reads).
+    for (const cmd of cmds) {
+      if (cmd.path) {
+        const icon = getCachedIcon(cmd.path);
+        if (icon) cmd.iconDataUrl = icon;
+      }
+    }
+    return cmds;
+  } catch {
+    return null;
+  }
+}
+
+function saveCommandsDiskCache(commands: CommandInfo[]): void {
+  try {
+    // Strip icon data — icons are persisted separately in icon-cache/.
+    const stripped = commands.map(({ iconDataUrl: _drop, ...rest }) => rest);
+    fs.writeFileSync(
+      getCommandsDiskCachePath(),
+      JSON.stringify({ version: COMMANDS_DISK_CACHE_VERSION, commands: stripped }),
+      'utf-8'
+    );
+  } catch (error) {
+    console.warn('[Commands] Failed to save commands disk cache:', error);
+  }
+}
+
+/** Call once after app.whenReady() to pre-populate the in-memory cache from disk. */
+export function initCommandsCache(): void {
+  const cmds = loadCommandsDiskCache();
+  if (cmds) {
+    cachedCommands = cmds;
+    staleCommandsFallback = cmds;
+    cacheTimestamp = 0; // mark stale so the next getAvailableCommands() triggers a background refresh
+    console.log(`[Commands] Loaded ${cmds.length} commands from disk cache`);
+  }
+}
+
+/** Returns the current inflight background discovery promise, if any. */
+export function getInflightDiscovery(): Promise<CommandInfo[]> | null {
+  return inflightDiscovery;
+}
 
 // ─── Icon Disk Cache ────────────────────────────────────────────────
 
@@ -876,6 +988,7 @@ async function discoverApplications(): Promise<CommandInfo[]> {
     '/Applications',
     '/System/Applications',
     '/System/Applications/Utilities',
+    '/System/Library/CoreServices/Applications',
     path.join(process.env.HOME || '', 'Applications'),
   ];
 
@@ -912,7 +1025,13 @@ async function discoverApplications(): Promise<CommandInfo[]> {
         }
 
         const rawName = path.basename(appPath, '.app');
-        const name = canonicalAppTitle(rawName);
+        const fallbackDisplayName = String(info?.CFBundleDisplayName || info?.CFBundleName || '').trim();
+        const localizedDisplayName = await resolveLocalizedBundleDisplayName(
+          appPath,
+          'CFBundleDisplayName',
+          'CFBundleName'
+        );
+        const name = canonicalAppTitle(localizedDisplayName || fallbackDisplayName || rawName);
         const bundleId =
           typeof info?.CFBundleIdentifier === 'string'
             ? info.CFBundleIdentifier
@@ -1126,40 +1245,34 @@ async function discoverSystemSettings(): Promise<CommandInfo[]> {
 // ─── Command Execution ──────────────────────────────────────────────
 
 async function openAppByPath(appPath: string): Promise<void> {
-  await execAsync(`open "${appPath}"`);
+  // open(1) is supposed to return quickly after dispatching to
+  // LaunchServices, but can block 1-3s on first launch (Gatekeeper,
+  // sealed-package validation — Microsoft Office is a frequent offender).
+  // The launch is dispatched async either way, so fire-and-forget.
+  const child = spawn('/usr/bin/open', [appPath], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.on('error', (err) => {
+    console.error(`Failed to open app: ${appPath}`, err);
+  });
+  child.unref();
 }
 
 async function openSettingsPane(identifier: string): Promise<void> {
-  if (identifier.startsWith('com.apple.')) {
-    try {
-      await execAsync(`open "x-apple.systempreferences:${identifier}"`);
-      return;
-    } catch { /* fall through */ }
-  }
-
-  try {
-    await execAsync(
-      `open "x-apple.systempreferences:com.apple.settings.${identifier}"`
-    );
-    return;
-  } catch { /* fall through */ }
-
-  try {
-    await execAsync(
-      `open "x-apple.systempreferences:com.apple.preference.${identifier.toLowerCase()}"`
-    );
-    return;
-  } catch { /* fall through */ }
-
-  try {
-    await execAsync('open -a "System Settings"');
-  } catch {
-    try {
-      await execAsync('open -a "System Preferences"');
-    } catch (e) {
-      console.error('Could not open System Settings:', e);
-    }
-  }
+  // Fire-and-forget for the same reason as openAppByPath. The old
+  // sequential fallback chain was futile too: open(1) returns 0 for any
+  // well-formed x-apple.systempreferences URL, and macOS opens System
+  // Settings to its default pane on unknown URLs (matching the old
+  // bare fallback).
+  const url = identifier.startsWith('com.apple.')
+    ? `x-apple.systempreferences:${identifier}`
+    : `x-apple.systempreferences:com.apple.settings.${identifier}`;
+  const child = spawn('/usr/bin/open', [url], { detached: true, stdio: 'ignore' });
+  child.on('error', (err) => {
+    console.error(`Failed to open settings pane: ${url}`, err);
+  });
+  child.unref();
 }
 
 // ─── Public API ─────────────────────────────────────────────────────
@@ -1194,6 +1307,19 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       id: 'system-clipboard-manager',
       title: 'Clipboard History',
       keywords: ['clipboard', 'history', 'copy', 'paste', 'manager'],
+      category: 'system',
+    },
+    {
+      id: 'system-emoji-picker',
+      title: 'Emoji Picker',
+      keywords: ['emoji', 'picker', 'trigger', 'smiley', 'emoticon'],
+      category: 'system',
+    },
+    {
+      id: 'system-reset-launcher-position',
+      title: 'Reset Launcher Position',
+      keywords: ['reset', 'position', 'center', 'move', 'launcher', 'window', 'default'],
+      iconDataUrl: RESET_POSITION_ICON_DATA_URL,
       category: 'system',
     },
     {
@@ -1497,6 +1623,12 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       category: 'system',
     },
     {
+      id: 'system-open-extension-store',
+      title: 'Extension Store',
+      keywords: ['extension', 'store', 'browse', 'install', 'community', 'marketplace', 'supercmd'],
+      category: 'system',
+    },
+    {
       id: 'system-open-onboarding',
       title: 'SuperCmd Onboarding',
       keywords: ['welcome', 'onboarding', 'intro', 'setup', 'supercmd'],
@@ -1604,6 +1736,75 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       keywords: ['update', 'upgrade', 'version', 'download', 'install', 'supercmd'],
       category: 'system',
     },
+    {
+      id: 'system-close-all-apps',
+      title: 'Quit All Apps',
+      subtitle: 'Quit all running applications',
+      keywords: ['close', 'quit', 'all', 'apps', 'applications', 'exit', 'kill'],
+      iconDataUrl: QUIT_ALL_APPS_ICON_DATA_URL,
+      category: 'system',
+      needsConfirmation: true,
+    },
+    {
+      id: 'system-sleep',
+      title: 'Sleep',
+      subtitle: 'Put the Mac to sleep',
+      keywords: ['sleep', 'power', 'rest', 'suspend', 'hibernate'],
+      iconDataUrl: SLEEP_ICON_DATA_URL,
+      category: 'system',
+    },
+    {
+      id: 'system-restart',
+      title: 'Restart',
+      subtitle: 'Restart the Mac',
+      keywords: ['restart', 'reboot', 'power', 'reset'],
+      iconDataUrl: RESTART_ICON_DATA_URL,
+      category: 'system',
+      needsConfirmation: true,
+    },
+    {
+      id: 'system-lock-screen',
+      title: 'Lock Screen',
+      subtitle: 'Lock the screen',
+      keywords: ['lock', 'screen', 'security', 'password', 'suspend'],
+      iconDataUrl: LOCK_SCREEN_ICON_DATA_URL,
+      category: 'system',
+    },
+    {
+      id: 'system-logout',
+      title: 'Log Out',
+      subtitle: 'Log out of the current user session',
+      keywords: ['logout', 'log out', 'sign out', 'session', 'user'],
+      iconDataUrl: LOGOUT_ICON_DATA_URL,
+      category: 'system',
+      needsConfirmation: true,
+    },
+    {
+      id: 'system-empty-trash',
+      title: 'Empty Trash',
+      subtitle: 'Permanently delete items in the Trash',
+      keywords: ['trash', 'empty', 'delete', 'bin', 'garbage', 'clean', 'recycle'],
+      iconDataUrl: EMPTY_TRASH_ICON_DATA_URL,
+      category: 'system',
+      needsConfirmation: true,
+    },
+    {
+      id: 'system-toggle-appearance',
+      title: 'Toggle System Appearance',
+      subtitle: 'Switch between dark and light mode',
+      keywords: ['dark', 'light', 'mode', 'appearance', 'theme', 'toggle', 'system', 'display', 'contrast'],
+      iconDataUrl: TOGGLE_APPEARANCE_ICON_DATA_URL,
+      category: 'system',
+    },
+    {
+      id: 'system-shutdown',
+      title: 'Shutdown',
+      subtitle: 'Shut down the Mac',
+      keywords: ['shutdown', 'shut down', 'power off', 'turn off', 'halt', 'power'],
+      iconDataUrl: SHUTDOWN_ICON_DATA_URL,
+      category: 'system',
+      needsConfirmation: true,
+    },
   ];
 
   // Installed community extensions
@@ -1621,6 +1822,9 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       interval: ext.interval,
       disabledByDefault: ext.disabledByDefault,
       commandArgumentDefinitions: ext.commandArgumentDefinitions || [],
+      deeplink: ext.owner
+        ? `supercmd://extensions/${encodeURIComponent(ext.owner)}/${encodeURIComponent(ext.extName)}/${encodeURIComponent(ext.cmdName)}`
+        : `supercmd://extensions/${encodeURIComponent(ext.extName)}/${encodeURIComponent(ext.cmdName)}`,
     }));
   } catch (e) {
     console.error('Failed to discover installed extensions:', e);
@@ -1649,6 +1853,9 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
         title: arg.placeholder,
         data: arg.data,
       })),
+      deeplink: script.slug
+        ? `supercmd://script-commands/${encodeURIComponent(script.slug)}`
+        : undefined,
     }));
   } catch (e) {
     console.error('Failed to discover script commands:', e);
@@ -1728,6 +1935,16 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
     delete cmd._bundlePath;
   }
 
+  // Assign a universal deeplink to any launcher command that doesn't already
+  // have one (extensions + scripts keep their owner/slug-based schemes above).
+  // This lets apps, settings, system, and quick-link commands be copied and
+  // re-invoked via `supercmd://commands/<id>`.
+  for (const cmd of allCommands) {
+    if (!cmd.deeplink && cmd.id) {
+      cmd.deeplink = `supercmd://commands/${encodeURIComponent(cmd.id)}`;
+    }
+  }
+
   // Runtime metadata overlays (used by updateCommandMetadata and inline scripts).
   try {
     const loadedSettings = loadSettings();
@@ -1749,10 +1966,14 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
 
   cachedCommands = allCommands;
   cacheTimestamp = Date.now();
+  staleCommandsFallback = allCommands;
 
   console.log(
     `Discovered ${apps.length} apps, ${settings.length} settings panes, ${extensionCommands.length} extension commands, ${scriptCommands.length} script commands, ${quickLinkCommands.length} quick links in ${Date.now() - t0}ms`
   );
+
+  // Persist to disk so the next startup can serve commands instantly.
+  saveCommandsDiskCache(allCommands);
 
   return cachedCommands;
 }
@@ -1786,6 +2007,21 @@ export async function getAvailableCommands(): Promise<CommandInfo[]> {
     return cachedCommands;
   }
 
+  // cachedCommands was invalidated (e.g. FSWatcher fired) but staleCommandsFallback
+  // still has good data.  Return it immediately and kick off a background refresh
+  // so the launcher never blocks on discovery after an invalidation event.
+  if (staleCommandsFallback) {
+    if (!inflightDiscovery) {
+      inflightDiscovery = discoverAndBuildCommands()
+        .catch((error) => {
+          console.warn('[Commands] Background refresh failed:', error);
+          return staleCommandsFallback || [];
+        })
+        .finally(() => { inflightDiscovery = null; });
+    }
+    return staleCommandsFallback;
+  }
+
   // Deduplicate concurrent cold-start calls.
   if (inflightDiscovery) {
     return inflightDiscovery;
@@ -1805,7 +2041,29 @@ export async function executeCommand(id: string): Promise<boolean> {
     return true;
   }
 
-  const commands = await getAvailableCommands();
+  if (id === 'system-lock-screen') {
+    try {
+      await execAsync(`osascript -e 'tell application "System Events" to keystroke "q" using {command down, control down}'`);
+      return true;
+    } catch (error) {
+      console.error('Failed to lock screen:', error);
+      return false;
+    }
+  }
+
+  if (id === 'system-empty-trash') {
+    try {
+      await execAsync(`osascript -e 'tell application "Finder" to empty trash'`);
+      return true;
+    } catch (error) {
+      console.error('Failed to empty trash:', error);
+      return false;
+    }
+  }
+
+  // Use stale fallback when available to avoid blocking on a fresh discovery
+  // while the cache is being rebuilt in the background.
+  const commands = cachedCommands ?? staleCommandsFallback ?? await getAvailableCommands();
   const command = commands.find((c) => c.id === id);
   if (!command?.path) {
     console.error(`Command not found: ${id}`);
@@ -1826,6 +2084,9 @@ export async function executeCommand(id: string): Promise<boolean> {
 }
 
 export function invalidateCache(): void {
+  if (cachedCommands) {
+    staleCommandsFallback = cachedCommands;
+  }
   cachedCommands = null;
   cacheTimestamp = 0;
   lastStaleRefreshRequestAt = 0;

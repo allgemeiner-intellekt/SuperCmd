@@ -7,8 +7,10 @@
 
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ExtractedAction } from './action-runtime';
+import { transliterateForSearch } from '../utils/transliterate';
 import { createGridItemsRuntime } from './grid-runtime-items';
 import { groupGridItems, useGridRegistry } from './grid-runtime-hooks';
+import { useI18n } from '../i18n';
 
 interface GridRuntimeDeps {
   ExtensionInfoReactContext: React.Context<any>;
@@ -62,6 +64,7 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
     throttle,
     actions: gridActions,
   }: any) {
+    const { t } = useI18n();
     const extInfo = useContext(ExtensionInfoReactContext);
     const [internalSearch, setInternalSearch] = useState(() => controlledSearch ?? '');
     const [selectedIdx, setSelectedIdx] = useState(0);
@@ -81,10 +84,28 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
     const filteredItems = useMemo(() => {
       if (onSearchTextChange || filtering === false || !internalSearch.trim()) return allItems;
       const query = internalSearch.toLowerCase();
+      const translitQuery = transliterateForSearch(internalSearch);
+      const hasTranslitQuery = translitQuery !== query && translitQuery.length > 0;
       return allItems.filter((item) => {
-        const title = (item.props.title || '').toLowerCase();
-        const subtitle = (item.props.subtitle || '').toLowerCase();
-        return title.includes(query) || subtitle.includes(query) || item.props.keywords?.some((keyword: string) => keyword.toLowerCase().includes(query));
+        const rawTitle = item.props.title || '';
+        const rawSubtitle = item.props.subtitle || '';
+        const title = rawTitle.toLowerCase();
+        const subtitle = rawSubtitle.toLowerCase();
+        if (title.includes(query) || subtitle.includes(query) || item.props.keywords?.some((keyword: string) => keyword.toLowerCase().includes(query))) {
+          return true;
+        }
+        if (hasTranslitQuery && (title.includes(translitQuery) || subtitle.includes(translitQuery))) {
+          return true;
+        }
+        const titleTranslit = transliterateForSearch(rawTitle);
+        const subtitleTranslit = transliterateForSearch(rawSubtitle);
+        if (
+          (titleTranslit !== title && titleTranslit.includes(query)) ||
+          (subtitleTranslit !== subtitle && subtitleTranslit.includes(query))
+        ) {
+          return true;
+        }
+        return false;
       });
     }, [allItems, filtering, internalSearch, onSearchTextChange]);
 
@@ -153,12 +174,11 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
         else if (event.key === 'ArrowDown') setSelectedIdx((value) => Math.min(value + cols, filteredItems.length - 1));
         else if (event.key === 'ArrowUp') setSelectedIdx((value) => Math.max(value - cols, 0));
         else if (event.key === 'Enter' && !event.repeat) primaryAction?.execute();
-        else if (event.key === 'Escape') pop();
         else return;
 
         event.preventDefault();
       },
-      [cols, filteredItems.length, isMetaK, matchesShortcut, pop, primaryAction, selectedActions, showActions],
+      [cols, filteredItems.length, isMetaK, matchesShortcut, primaryAction, selectedActions, showActions],
     );
 
     useEffect(() => {
@@ -201,19 +221,19 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
         </div>
 
         <div className="flex flex-col h-full" onKeyDown={handleKeyDown}>
-          <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--ui-divider)]">
+          <div className="drag-region flex items-center gap-2 px-4 py-3 border-b border-[var(--ui-divider)]">
             <button onClick={pop} className="sc-back-button text-[var(--text-subtle)] hover:text-[var(--text-muted)] transition-colors flex-shrink-0 p-0.5">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 19l-7-7 7-7" /></svg>
             </button>
-            <input ref={inputRef} data-supercmd-search-input="true" type="text" placeholder={searchBarPlaceholder || 'Search…'} value={internalSearch} onChange={(event) => handleSearchChange(event.target.value)} className="flex-1 bg-transparent border-none outline-none text-[var(--text-primary)] placeholder:text-[color:var(--text-subtle)] text-[14px] font-light" autoFocus />
+            <input ref={inputRef} data-supercmd-search-input="true" type="text" placeholder={searchBarPlaceholder || t('common.search')} value={internalSearch} onChange={(event) => handleSearchChange(event.target.value)} className="flex-1 bg-transparent border-none outline-none text-[var(--text-primary)] placeholder:text-[color:var(--text-subtle)] text-[14px] font-light" autoFocus />
             {searchBarAccessory && <div className="flex-shrink-0">{searchBarAccessory}</div>}
           </div>
 
           <div ref={gridRef} className="flex-1 overflow-y-auto p-2">
             {isLoading && filteredItems.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-[var(--text-muted)]"><p className="text-sm">Loading…</p></div>
+              <div className="flex items-center justify-center h-full text-[var(--text-muted)]"><p className="text-sm">{t('common.loading')}</p></div>
             ) : filteredItems.length === 0 ? (
-              emptyViewProps ? <ListEmptyView title={emptyViewProps.title} description={emptyViewProps.description} icon={emptyViewProps.icon} actions={emptyViewProps.actions} /> : <div className="flex items-center justify-center h-full text-[var(--text-subtle)]"><p className="text-sm">No results</p></div>
+              emptyViewProps ? <ListEmptyView title={emptyViewProps.title} description={emptyViewProps.description} icon={emptyViewProps.icon} actions={emptyViewProps.actions} /> : <div className="flex items-center justify-center h-full text-[var(--text-subtle)]"><p className="text-sm">{t('common.noResults')}</p></div>
             ) : (
               groupedItems.map((group, groupIndex) => (
                 <div key={groupIndex} className="mb-2">
@@ -258,7 +278,7 @@ export function createGridRuntime(deps: GridRuntimeDeps) {
               </button>
             )}
             <button onClick={() => setShowActions(true)} className="flex items-center gap-1.5 text-[var(--text-muted)] hover:text-[var(--text-secondary)] transition-colors">
-              <span className="text-xs font-normal">Actions</span>
+              <span className="text-xs font-normal">{t('common.actions')}</span>
               <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[11px] text-[var(--text-subtle)] font-medium">⌘</kbd>
               <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[11px] text-[var(--text-subtle)] font-medium">K</kbd>
             </button>

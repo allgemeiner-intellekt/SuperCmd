@@ -402,9 +402,15 @@ const ScheduleExtension: React.FC<ScheduleExtensionProps> = ({ onClose }) => {
           event.preventDefault();
           onClose();
           break;
+        case 'Backspace':
+          if (!searchQuery) {
+            event.preventDefault();
+            onClose();
+          }
+          break;
       }
     },
-    [actions, flatRows.length, onClose, openCalendarApp, permissionError, selectedActionIndex, selectedEntry, showActions]
+    [actions, flatRows.length, onClose, openCalendarApp, permissionError, selectedActionIndex, selectedEntry, showActions, searchQuery]
   );
 
   const todaySummary = todayEvents.length > 0
@@ -417,7 +423,7 @@ const ScheduleExtension: React.FC<ScheduleExtensionProps> = ({ onClose }) => {
 
   return (
     <div className="w-full h-full flex flex-col relative" onKeyDown={handleKeyDown} tabIndex={-1}>
-      <div className="flex items-center gap-3 px-5 py-3.5 border-b border-[var(--ui-divider)]">
+      <div className="drag-region flex items-center gap-3 px-5 py-3.5 border-b border-[var(--ui-divider)]">
         <button
           onClick={onClose}
           className="text-[var(--text-subtle)] hover:text-[var(--text-muted)] transition-colors flex-shrink-0 focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0"

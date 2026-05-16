@@ -16,10 +16,23 @@ export interface AIRequestOptions {
   signal?: AbortSignal;
 }
 
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface AIChatRequestOptions {
+  messages: ChatMessage[];
+  model?: string;
+  creativity?: number;
+  systemPrompt?: string;
+  signal?: AbortSignal;
+}
+
 // ─── Model routing ────────────────────────────────────────────────────
 
 interface ModelRoute {
-  provider: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible';
+  provider: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'lm-studio' | 'openai-compatible';
   modelId: string;
 }
 
@@ -33,8 +46,8 @@ const MODEL_ROUTES: Record<string, ModelRoute> = {
   'openai-o1-mini': { provider: 'openai', modelId: 'o1-mini' },
   'openai-o3-mini': { provider: 'openai', modelId: 'o3-mini' },
   // Anthropic
-  'anthropic-claude-opus': { provider: 'anthropic', modelId: 'claude-opus-4-20250514' },
-  'anthropic-claude-sonnet': { provider: 'anthropic', modelId: 'claude-sonnet-4-20250514' },
+  'anthropic-claude-opus': { provider: 'anthropic', modelId: 'claude-opus-4-7' },
+  'anthropic-claude-sonnet': { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
   'anthropic-claude-haiku': { provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001' },
   // Google Gemini
   'gemini-gemini-2.5-pro': { provider: 'gemini', modelId: 'gemini-2.5-pro' },
@@ -53,10 +66,10 @@ function resolveModel(model: string | undefined, config: AISettings): ModelRoute
   // If the model key is not in our routing table, strip provider prefix and route directly
   if (model) {
     // Order matters: check longer prefixes first to avoid partial matches
-    const prefixes = ['openai-compatible-', 'anthropic-', 'gemini-', 'ollama-', 'openai-'] as const;
+    const prefixes = ['openai-compatible-', 'lm-studio-', 'anthropic-', 'gemini-', 'ollama-', 'openai-'] as const;
     for (const prefix of prefixes) {
       if (model.startsWith(prefix)) {
-        return { provider: prefix.slice(0, -1) as 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible', modelId: model.slice(prefix.length) };
+        return { provider: prefix.slice(0, -1) as 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible' | 'lm-studio', modelId: model.slice(prefix.length) };
       }
     }
     return { provider: config.provider, modelId: model };
@@ -68,10 +81,10 @@ function resolveModel(model: string | undefined, config: AISettings): ModelRoute
     }
     // Handle dynamic model IDs (e.g. "ollama-llama3.2")
     // Order matters: check longer prefixes first to avoid partial matches
-    const prefixes = ['openai-compatible-', 'anthropic-', 'gemini-', 'ollama-', 'openai-'] as const;
+    const prefixes = ['openai-compatible-', 'lm-studio-', 'anthropic-', 'gemini-', 'ollama-', 'openai-'] as const;
     for (const prefix of prefixes) {
       if (config.defaultModel.startsWith(prefix)) {
-        return { provider: prefix.slice(0, -1) as 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible', modelId: config.defaultModel.slice(prefix.length) };
+        return { provider: prefix.slice(0, -1) as 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible' | 'lm-studio', modelId: config.defaultModel.slice(prefix.length) };
       }
     }
   }
@@ -82,8 +95,22 @@ function resolveModel(model: string | undefined, config: AISettings): ModelRoute
     gemini: 'gemini-2.5-flash',
     ollama: 'llama3',
     'openai-compatible': config.openaiCompatibleModel?.trim() || 'gpt-4o',
+    'lm-studio': config.lmStudioModel?.trim() || 'local-model',
   };
   return { provider: config.provider, modelId: defaults[config.provider] || 'gpt-4o-mini' };
+}
+
+// ─── Model capability helpers ────────────────────────────────────────
+
+// OpenAI reasoning models (o1, o1-mini, o1-preview, o3, o3-mini, o4-mini, …)
+// reject the `temperature` parameter — they only support the default.
+function isOpenAIReasoningModel(model: string): boolean {
+  return /^o\d/i.test(model.trim());
+}
+
+// Newer Anthropic models (Opus 4.7+) reject the `temperature` parameter.
+function anthropicSupportsTemperature(model: string): boolean {
+  return !/^claude-opus-4-7/i.test(model.trim());
 }
 
 // ─── Availability check ──────────────────────────────────────────────
@@ -100,6 +127,8 @@ function hasProviderCredentials(provider: ModelRoute['provider'], config: AISett
       return !!config.ollamaBaseUrl;
     case 'openai-compatible':
       return !!(config.openaiCompatibleBaseUrl && config.openaiCompatibleApiKey);
+    case 'lm-studio':
+      return !!config.lmStudioBaseUrl;
     default:
       return false;
   }
@@ -149,10 +178,273 @@ export async function* streamAI(
         options.prompt,
         temperature,
         options.systemPrompt,
+        options.signal,
+        config.openaiCompatibleAppendV1
+      );
+      break;
+    case 'lm-studio':
+      yield* streamOpenAICompatible(
+        config.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1',
+        config.lmStudioApiKey || 'lm-studio',
+        route.modelId,
+        options.prompt,
+        temperature,
+        options.systemPrompt,
         options.signal
       );
       break;
   }
+}
+
+// ─── Chat (multi-turn) ───────────────────────────────────────────────
+
+export async function* streamAIChat(
+  config: AISettings,
+  options: AIChatRequestOptions
+): AsyncGenerator<string> {
+  const route = resolveModel(options.model, config);
+  const temperature = options.creativity ?? 0.7;
+
+  switch (route.provider) {
+    case 'openai':
+      yield* streamOpenAIChat(config.openaiApiKey, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
+      break;
+    case 'anthropic':
+      yield* streamAnthropicChat(config.anthropicApiKey, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
+      break;
+    case 'gemini':
+      yield* streamGeminiChat(config.geminiApiKey, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
+      break;
+    case 'ollama':
+      yield* streamOllamaChat(config.ollamaBaseUrl, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
+      break;
+    case 'openai-compatible':
+      yield* streamOpenAICompatibleChat(
+        config.openaiCompatibleBaseUrl,
+        config.openaiCompatibleApiKey,
+        route.modelId,
+        options.messages,
+        temperature,
+        options.systemPrompt,
+        options.signal,
+        config.openaiCompatibleAppendV1
+      );
+      break;
+    case 'lm-studio':
+      yield* streamOpenAICompatibleChat(
+        config.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1',
+        config.lmStudioApiKey || 'lm-studio',
+        route.modelId,
+        options.messages,
+        temperature,
+        options.systemPrompt,
+        options.signal
+      );
+      break;
+  }
+}
+
+async function* streamOpenAIChat(
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  temperature: number,
+  systemPrompt?: string,
+  signal?: AbortSignal
+): AsyncGenerator<string> {
+  const full: any[] = [];
+  if (systemPrompt) full.push({ role: 'system', content: systemPrompt });
+  for (const m of messages) full.push({ role: m.role, content: m.content });
+
+  const payload: any = { model, messages: full, stream: true };
+  if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
+  const body = JSON.stringify(payload);
+
+  const response = await httpRequest({
+    hostname: 'api.openai.com',
+    path: '/v1/chat/completions',
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body,
+    signal,
+    useHttps: true,
+  });
+
+  yield* parseSSE(response, (data) => {
+    if (data === '[DONE]') return null;
+    try {
+      const parsed = JSON.parse(data);
+      return parsed.choices?.[0]?.delta?.content || null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+async function* streamOpenAICompatibleChat(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  temperature: number,
+  systemPrompt?: string,
+  signal?: AbortSignal,
+  appendV1?: boolean
+): AsyncGenerator<string> {
+  const full: any[] = [];
+  if (systemPrompt) full.push({ role: 'system', content: systemPrompt });
+  for (const m of messages) full.push({ role: m.role, content: m.content });
+
+  const payload: any = { model, messages: full, stream: true };
+  if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
+  const body = JSON.stringify(payload);
+
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
+  const chatUrl = (appendV1 !== false && !normalizedBaseUrl.endsWith('/v1'))
+    ? `${normalizedBaseUrl}/v1/chat/completions`
+    : `${normalizedBaseUrl}/chat/completions`;
+  const url = new URL(chatUrl);
+  const useHttps = url.protocol === 'https:';
+
+  const response = await httpRequest({
+    hostname: url.hostname,
+    port: url.port ? parseInt(url.port) : undefined,
+    path: url.pathname,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+    body,
+    signal,
+    useHttps,
+  });
+
+  yield* parseSSE(response, (data) => {
+    if (data === '[DONE]') return null;
+    try {
+      const parsed = JSON.parse(data);
+      return parsed.choices?.[0]?.delta?.content || null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+async function* streamAnthropicChat(
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  temperature: number,
+  systemPrompt?: string,
+  signal?: AbortSignal
+): AsyncGenerator<string> {
+  const body: any = {
+    model,
+    max_tokens: 4096,
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    stream: true,
+  };
+  if (temperature !== undefined && anthropicSupportsTemperature(model)) body.temperature = temperature;
+  if (systemPrompt) body.system = systemPrompt;
+
+  const response = await httpRequest({
+    hostname: 'api.anthropic.com',
+    path: '/v1/messages',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify(body),
+    signal,
+    useHttps: true,
+  });
+
+  yield* parseSSE(response, (data) => {
+    try {
+      const parsed = JSON.parse(data);
+      if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+        return parsed.delta.text;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+async function* streamGeminiChat(
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  temperature: number,
+  systemPrompt?: string,
+  signal?: AbortSignal
+): AsyncGenerator<string> {
+  const contents = messages.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+
+  const body: any = { contents, generationConfig: { temperature } };
+  if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
+
+  const response = await httpRequest({
+    hostname: 'generativelanguage.googleapis.com',
+    path: `/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+    useHttps: true,
+  });
+
+  yield* parseSSE(response, (data) => {
+    try {
+      const parsed = JSON.parse(data);
+      const parts = parsed?.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts)) {
+        return parts.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('') || null;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+async function* streamOllamaChat(
+  baseUrl: string,
+  model: string,
+  messages: ChatMessage[],
+  temperature: number,
+  systemPrompt?: string,
+  signal?: AbortSignal
+): AsyncGenerator<string> {
+  const url = new URL('/api/chat', baseUrl);
+  const full: any[] = [];
+  if (systemPrompt) full.push({ role: 'system', content: systemPrompt });
+  for (const m of messages) full.push({ role: m.role, content: m.content });
+
+  const body = {
+    model,
+    messages: full,
+    stream: true,
+    options: { temperature },
+  };
+
+  const useHttps = url.protocol === 'https:';
+  const response = await httpRequest({
+    hostname: url.hostname,
+    port: url.port ? parseInt(url.port) : undefined,
+    path: url.pathname,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+    useHttps,
+  });
+
+  yield* parseNDJSON(response, (obj) => obj?.message?.content || null);
 }
 
 // ─── OpenAI ──────────────────────────────────────────────────────────
@@ -169,12 +461,9 @@ async function* streamOpenAI(
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
   messages.push({ role: 'user', content: prompt });
 
-  const body = JSON.stringify({
-    model,
-    messages,
-    temperature,
-    stream: true,
-  });
+  const payload: any = { model, messages, stream: true };
+  if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
+  const body = JSON.stringify(payload);
 
   const response = await httpRequest({
     hostname: 'api.openai.com',
@@ -209,24 +498,21 @@ async function* streamOpenAICompatible(
   prompt: string,
   temperature: number,
   systemPrompt?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  appendV1?: boolean
 ): AsyncGenerator<string> {
   const messages: any[] = [];
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
   messages.push({ role: 'user', content: prompt });
 
-  const body = JSON.stringify({
-    model,
-    messages,
-    temperature,
-    stream: true,
-  });
+  const payload: any = { model, messages, stream: true };
+  if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
+  const body = JSON.stringify(payload);
 
-  // Ensure baseUrl ends with /v1 and append /chat/completions
   const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
-  const chatUrl = normalizedBaseUrl.endsWith('/v1') 
-    ? `${normalizedBaseUrl}/chat/completions`
-    : `${normalizedBaseUrl}/v1/chat/completions`;
+  const chatUrl = (appendV1 !== false && !normalizedBaseUrl.endsWith('/v1'))
+    ? `${normalizedBaseUrl}/v1/chat/completions`
+    : `${normalizedBaseUrl}/chat/completions`;
   
   const url = new URL(chatUrl);
   const useHttps = url.protocol === 'https:';
@@ -272,7 +558,7 @@ async function* streamAnthropic(
     messages: [{ role: 'user', content: prompt }],
     stream: true,
   };
-  if (temperature !== undefined) body.temperature = temperature;
+  if (temperature !== undefined && anthropicSupportsTemperature(model)) body.temperature = temperature;
   if (systemPrompt) body.system = systemPrompt;
 
   const response = await httpRequest({

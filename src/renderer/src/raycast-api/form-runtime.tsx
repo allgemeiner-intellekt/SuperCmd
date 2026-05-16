@@ -10,9 +10,11 @@ import { attachFormFields } from './form-runtime-fields';
 import {
   FormContext,
   setCurrentFormErrors,
+  setCurrentFormPlaceholders,
   setCurrentFormValues,
 } from './form-runtime-context';
 import type { ExtractedAction } from './action-runtime';
+import { useI18n } from '../i18n';
 
 interface FormRuntimeDeps {
   ExtensionInfoReactContext: React.Context<any>;
@@ -48,9 +50,11 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
   } = deps;
 
   function FormComponent({ children, actions, navigationTitle, isLoading, draftValues }: any) {
+    const { t } = useI18n();
     const extInfo = useContext(ExtensionInfoReactContext);
     const [values, setValues] = useState<Record<string, any>>(draftValues || {});
     const [errors, setErrors] = useState<Record<string, string>>({});
+    const [placeholders, setPlaceholders] = useState<Record<string, string>>({});
     const [showActions, setShowActions] = useState(false);
     const { pop } = useNavigation();
 
@@ -76,10 +80,20 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
       });
     }, []);
 
+    const setPlaceholder = useCallback((id: string, placeholder: string) => {
+      setPlaceholders((previous) => {
+        if (previous[id] === placeholder) return previous;
+        const next = { ...previous, [id]: placeholder };
+        setCurrentFormPlaceholders(next);
+        return next;
+      });
+    }, []);
+
     useEffect(() => {
       setCurrentFormValues(values);
       setCurrentFormErrors(errors);
-    }, [values, errors]);
+      setCurrentFormPlaceholders(placeholders);
+    }, [values, errors, placeholders]);
 
     const { collectedActions: formActions, registryAPI: formActionRegistry } = useCollectedActions();
     const primaryAction = formActions[0];
@@ -95,11 +109,6 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
 
     useEffect(() => {
       const handler = (event: KeyboardEvent) => {
-        if (event.key === 'Escape') {
-          event.preventDefault();
-          pop();
-          return;
-        }
         if (isMetaK(event)) {
           event.preventDefault();
           setShowActions((value) => !value);
@@ -121,9 +130,12 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
 
       window.addEventListener('keydown', handler);
       return () => window.removeEventListener('keydown', handler);
-    }, [formActions, isMetaK, matchesShortcut, pop, primaryAction]);
+    }, [formActions, isMetaK, matchesShortcut, primaryAction]);
 
-    const contextValue = useMemo(() => ({ values, setValue, errors, setError }), [errors, setError, setValue, values]);
+    const contextValue = useMemo(
+      () => ({ values, setValue, errors, setError, placeholders, setPlaceholder }),
+      [errors, placeholders, setError, setPlaceholder, setValue, values],
+    );
     const handleActionExecute = useCallback((action: ExtractedAction) => {
       setShowActions(false);
       action.execute();
@@ -146,7 +158,7 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
             setShowActions(true);
           }}
         >
-          <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--ui-divider)]">
+          <div className="drag-region flex items-center gap-2 px-4 py-3 border-b border-[var(--ui-divider)]">
             <button onClick={pop} className="sc-back-button text-[var(--text-subtle)] hover:text-[var(--text-muted)] transition-colors flex-shrink-0 p-0.5">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M19 12H5M12 19l-7-7 7-7" />
@@ -157,7 +169,7 @@ export function createFormRuntime(deps: FormRuntimeDeps) {
           <div className="flex-1 overflow-y-auto py-4 px-4">
             {isLoading ? (
               <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-                <p className="text-sm">Loading…</p>
+                <p className="text-sm">{t('common.loading')}</p>
               </div>
             ) : (
               <div className="max-w-2xl mx-auto space-y-3">{children}</div>

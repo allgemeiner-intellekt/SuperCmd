@@ -16,7 +16,7 @@
  * manage top-level view visibility directly.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import type { ExtensionBundle, CommandInfo } from '../../types/electron';
 
 export interface ExtensionPreferenceSetup {
@@ -54,6 +54,7 @@ export interface AppViewManager {
   showCamera: boolean;
   showSchedule: boolean;
   showWindowManager: boolean;
+  showAppUninstall: string | null;
   showWhisperOnboarding: boolean;
   showWhisperHint: boolean;
   showOnboarding: boolean;
@@ -79,6 +80,7 @@ export interface AppViewManager {
   openCamera: () => void;
   openSchedule: () => void;
   openWindowManager: () => void;
+  openAppUninstall: (appPath: string) => void;
   openWhisperOnboarding: () => void;
   openOnboarding: () => void;
   openAiMode: () => void;
@@ -101,6 +103,7 @@ export interface AppViewManager {
   setShowCamera: React.Dispatch<React.SetStateAction<boolean>>;
   setShowSchedule: React.Dispatch<React.SetStateAction<boolean>>;
   setShowWindowManager: React.Dispatch<React.SetStateAction<boolean>>;
+  setShowAppUninstall: React.Dispatch<React.SetStateAction<string | null>>;
   setShowWhisperOnboarding: React.Dispatch<React.SetStateAction<boolean>>;
   setShowWhisperHint: React.Dispatch<React.SetStateAction<boolean>>;
   setShowOnboarding: React.Dispatch<React.SetStateAction<boolean>>;
@@ -124,10 +127,12 @@ export function useAppViewManager(): AppViewManager {
   const [showCamera, setShowCamera] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [showWindowManager, setShowWindowManager] = useState(false);
+  const [showAppUninstall, setShowAppUninstall] = useState<string | null>(null);
   const [showWhisperOnboarding, setShowWhisperOnboarding] = useState(false);
   const [showWhisperHint, setShowWhisperHint] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [aiMode, setAiMode] = useState(false);
+  const whisperHintShownCountRef = useRef(0);
 
   const resetAllViews = useCallback(() => {
     setExtensionView(null);
@@ -146,6 +151,7 @@ export function useAppViewManager(): AppViewManager {
     setShowCamera(false);
     setShowSchedule(false);
     setShowWindowManager(false);
+    setShowAppUninstall(null);
     setShowWhisperOnboarding(false);
     setShowWhisperHint(false);
     setShowOnboarding(false);
@@ -208,10 +214,14 @@ export function useAppViewManager(): AppViewManager {
   }, [resetAllViews]);
 
   const openWhisper = useCallback(() => {
-    resetAllViews();
     setShowWhisper(true);
-    setShowWhisperHint(true);
-  }, [resetAllViews]);
+    if (whisperHintShownCountRef.current < 2) {
+      whisperHintShownCountRef.current += 1;
+      setShowWhisperHint(true);
+    } else {
+      setShowWhisperHint(false);
+    }
+  }, []);
 
   const openSpeak = useCallback(() => {
     resetAllViews();
@@ -232,6 +242,12 @@ export function useAppViewManager(): AppViewManager {
     resetAllViews();
     setShowWindowManager(true);
   }, [resetAllViews]);
+
+  const openAppUninstall = useCallback((appPath: string) => {
+    // Don't call resetAllViews() — it can trigger side effects in menubar
+    // extensions that cause SIGTRAP crashes. Just set the uninstall view directly.
+    setShowAppUninstall(appPath);
+  }, []);
 
   const openWhisperOnboarding = useCallback(() => {
     // Whisper onboarding co-exists with whisper
@@ -269,6 +285,7 @@ export function useAppViewManager(): AppViewManager {
     showCamera,
     showSchedule,
     showWindowManager,
+    showAppUninstall,
     showWhisperOnboarding,
     showWhisperHint,
     showOnboarding,
@@ -292,6 +309,7 @@ export function useAppViewManager(): AppViewManager {
     openCamera,
     openSchedule,
     openWindowManager,
+    openAppUninstall,
     openWhisperOnboarding,
     openOnboarding,
     openAiMode,
@@ -313,6 +331,7 @@ export function useAppViewManager(): AppViewManager {
     setShowCamera,
     setShowSchedule,
     setShowWindowManager,
+    setShowAppUninstall,
     setShowWhisperOnboarding,
     setShowWhisperHint,
     setShowOnboarding,

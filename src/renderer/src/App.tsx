@@ -7,7 +7,8 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Sparkles, ArrowRight, CornerDownLeft } from 'lucide-react';
+import { X, Sparkles, ArrowRight, ArrowUp, ArrowDown, CornerDownLeft, ExternalLink, Plus, Pencil, Files, Trash2, Download, BellOff, Info, FolderOpen, Copy, Pin, Link, EyeOff, Play, XCircle, Timer } from 'lucide-react';
+import supercmdLogo from '../../../supercmd.png';
 import type {
   CommandInfo,
   ExtensionBundle,
@@ -41,7 +42,8 @@ import { useBackgroundRefresh } from './hooks/useBackgroundRefresh';
 import { useSpeakManager } from './hooks/useSpeakManager';
 import { useWhisperManager } from './hooks/useWhisperManager';
 import { useInlineArgumentAnchor } from './hooks/useInlineArgumentAnchor';
-import { LAST_EXT_KEY, MAX_RECENT_COMMANDS } from './utils/constants';
+import { useBrowserSearch } from './hooks/useBrowserSearch';
+import { AI_CHAT_STORAGE_KEY, LAST_EXT_KEY, MAX_RECENT_COMMANDS } from './utils/constants';
 import { applyBaseColor } from './utils/base-color';
 import { resetAccessToken } from './raycast-api';
 import {
@@ -51,15 +53,21 @@ import {
   getCommandAccessoryLabel,
   getCommandTypeBadgeLabel,
   renderShortcutLabel,
+  matchesLauncherShortcut,
+  getShortcutDisplayParts,
 } from './utils/command-helpers';
 import {
+  collectLegacyExtensionPreferencesSnapshot,
   readJsonObject, writeJsonObject,
   getCmdArgsKey,
   getScriptCmdArgsKey,
   clearCommandArguments,
   hydrateExtensionBundlePreferences,
   shouldOpenCommandSetup,
+  getMissingRequiredPreferences,
   getMissingRequiredScriptArguments, toScriptArgumentMapFromArray,
+  migrateExtensionPreferencesFromLocalStorage,
+  hydrateExtensionPreferencesFromSettings,
 } from './utils/extension-preferences';
 import { applyAppFontSize, getDefaultAppFontSize } from './utils/font-size';
 import { refreshThemeFromStorage, setForcedTheme } from './utils/theme';
@@ -69,10 +77,11 @@ import ScriptCommandOutputView from './views/ScriptCommandOutputView';
 import ExtensionPreferenceSetupView from './views/ExtensionPreferenceSetupView';
 import AiChatView from './views/AiChatView';
 import CursorPromptView from './views/CursorPromptView';
+import AppUninstallView from './views/AppUninstallView';
 import InlineArgumentField, { InlineArgumentLeadingIcon, InlineArgumentOverflowBadge } from './components/InlineArgumentField';
 import { useI18n } from './i18n';
 
-const STALE_OVERLAY_RESET_MS = 60_000;
+const DEFAULT_POP_TO_ROOT_TIMEOUT_SECONDS = 90;
 const MAX_RECENT_SECTION_ITEMS = 5;
 const QUICK_LINK_COMMAND_PREFIX = 'quicklink-';
 const DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT = 25;
@@ -89,10 +98,26 @@ function getQuickLinkIdFromCommandId(commandId: string): string | null {
 const FILE_RESULT_COMMAND_PREFIX = 'system-file-result:';
 const MAX_LAUNCHER_FILE_RESULTS = 30;
 const MAX_LAUNCHER_FILE_CANDIDATE_RESULTS = 3000;
+const BROWSER_SEARCH_OPEN_URL_ID = 'browser-search-action-open-url';
+const BROWSER_SEARCH_PERFORM_SEARCH_ID = 'browser-search-action-perform-search';
 const MAX_LAUNCHER_FILE_RESULT_ICONS = MAX_LAUNCHER_FILE_RESULTS;
 const MIN_LAUNCHER_FILE_QUERY_LENGTH = 2;
 const MAX_INLINE_EXTENSION_ARGUMENTS = 3;
 const MAX_INLINE_QUICK_LINK_ARGUMENTS = 3;
+const DIRECT_LAUNCH_EXPANSION_GUARD_MS = 700;
+const NOOP_ON_CLOSE = () => {};
+const DIRECT_LAUNCH_EXPANDED_SYSTEM_COMMAND_IDS = new Set([
+  'system-clipboard-manager',
+  'system-search-snippets',
+  'system-create-snippet',
+  'system-search-notes',
+  'system-search-canvases',
+  'system-search-quicklinks',
+  'system-create-quicklink',
+  'system-search-files',
+  'system-my-schedule',
+  'system-camera',
+]);
 
 function asTildePath(filePath: string, homeDir: string): string {
   if (!homeDir) return filePath;
@@ -122,6 +147,18 @@ function formatCalcKindLabel(kind: 'math' | 'unit' | 'currency' | 'crypto' | 'ti
 
 function buildFileResultCommandId(filePath: string): string {
   return `${FILE_RESULT_COMMAND_PREFIX}${encodeURIComponent(filePath)}`;
+}
+
+function getFileBasename(filePath: string): string {
+  const normalized = String(filePath || '').replace(/\/$/, '');
+  const idx = normalized.lastIndexOf('/');
+  return idx >= 0 ? normalized.slice(idx + 1) : normalized;
+}
+
+function getFileDirname(filePath: string): string {
+  const normalized = String(filePath || '').replace(/\/$/, '');
+  const idx = normalized.lastIndexOf('/');
+  return idx > 0 ? normalized.slice(0, idx) : '/';
 }
 
 function normalizeLauncherFileSearchText(value: string): string {
@@ -304,11 +341,17 @@ function normalizeQuickLinkDynamicFields(fields: QuickLinkDynamicField[]): Quick
   return Array.from(map.values());
 }
 
+// Intern cache: commandId → stable iconDataUrl string reference.
+// Prevents duplicate base64 strings accumulating across repeated fetchCommands() IPC calls.
+const _commandIconCache = new Map<string, string>();
+
 const App: React.FC = () => {
   const { t } = useI18n();
   const [commands, setCommands] = useState<CommandInfo[]>([]);
   const [commandAliases, setCommandAliases] = useState<Record<string, string>>({});
+  const [commandHotkeys, setCommandHotkeys] = useState<Record<string, string>>({});
   const [pinnedCommands, setPinnedCommands] = useState<string[]>([]);
+  const [pinnedFiles, setPinnedFiles] = useState<string[]>([]);
   const [recentCommands, setRecentCommands] = useState<string[]>([]);
   const [recentCommandLaunchCounts, setRecentCommandLaunchCounts] = useState<Record<string, number>>({});
   const [launcherBackgroundImagePath, setLauncherBackgroundImagePath] = useState('');
@@ -320,6 +363,9 @@ const App: React.FC = () => {
     DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT
   );
   const [searchQuery, setSearchQuery] = useState('');
+  const [autoQuitAppPaths, setAutoQuitAppPaths] = useState<Set<string>>(new Set());
+  const browserSearch = useBrowserSearch(searchQuery);
+  const [browserSearchSkipAutoComplete, setBrowserSearchSkipAutoComplete] = useState(false);
   const [inlineExtensionArgumentValues, setInlineExtensionArgumentValues] = useState<
     Record<string, Record<string, string>>
   >({});
@@ -330,20 +376,27 @@ const App: React.FC = () => {
     Record<string, Record<string, string>>
   >({});
   const [launcherFileResults, setLauncherFileResults] = useState<IndexedFileSearchResult[]>([]);
+  const [disableFileSearchResults, setDisableFileSearchResults] = useState(false);
+  const [launcherViewMode, setLauncherViewMode] = useState<'expanded' | 'compact'>('expanded');
+  const [isCompactCollapsed, setIsCompactCollapsed] = useState(true);
   const [launcherFileIcons, setLauncherFileIcons] = useState<Record<string, string>>({});
+  const [fileIsDirectoryMap, setFileIsDirectoryMap] = useState<Record<string, boolean>>({});
+  const [launcherFooterStatus, setLauncherFooterStatus] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const launcherFooterStatusTimerRef = useRef<number | null>(null);
   const [fileSearchInitialDetailPath, setFileSearchInitialDetailPath] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const [navigationStyle, setNavigationStyle] = useState<'vim' | 'macos'>('vim');
+  const [isLoading, setIsLoading] = useState(false);
   const homeDir = String((window.electron as any).homeDir || '');
   const {
     extensionView, extensionPreferenceSetup, scriptCommandSetup, scriptCommandOutput,
     showClipboardManager, showSnippetManager, showNotesSearch, showCanvasSearch, showQuickLinkManager, showFileSearch, showCursorPrompt,
-    showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showWhisperOnboarding, showWhisperHint, showOnboarding, aiMode,
+    showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showAppUninstall, showWhisperOnboarding, showWhisperHint, showOnboarding, aiMode,
     openOnboarding, openWhisper, openClipboardManager,
-    openSnippetManager, openNotesSearch, openCanvasSearch, openQuickLinkManager, openFileSearch, openCursorPrompt, openSpeak, openCamera, openSchedule, openWindowManager,
+    openSnippetManager, openNotesSearch, openCanvasSearch, openQuickLinkManager, openFileSearch, openCursorPrompt, openSpeak, openCamera, openSchedule, openWindowManager, openAppUninstall,
     setExtensionView, setExtensionPreferenceSetup, setScriptCommandSetup, setScriptCommandOutput,
     setShowClipboardManager, setShowSnippetManager, setShowNotesSearch, setShowCanvasSearch, setShowQuickLinkManager, setShowFileSearch, setShowCursorPrompt,
-    setShowWhisper, setShowSpeak, setShowCamera, setShowSchedule, setShowWindowManager, setShowWhisperOnboarding, setShowWhisperHint,
+    setShowWhisper, setShowSpeak, setShowCamera, setShowSchedule, setShowWindowManager, setShowAppUninstall, setShowWhisperOnboarding, setShowWhisperHint,
     setShowOnboarding, setAiMode,
   } = useAppViewManager();
   const {
@@ -357,6 +410,7 @@ const App: React.FC = () => {
     showWhisperOnboarding, setShowWhisperOnboarding,
     showWhisperHint, setShowWhisperHint,
   });
+  const [whisperStartToken, setWhisperStartToken] = useState(0);
   const {
     speakStatus, speakOptions,
     setConfiguredEdgeTtsVoice, setConfiguredTtsModel,
@@ -367,6 +421,7 @@ const App: React.FC = () => {
   const [onboardingRequiresShortcutFix, setOnboardingRequiresShortcutFix] = useState(false);
   const [onboardingHotkeyPresses, setOnboardingHotkeyPresses] = useState(0);
   const [launcherShortcut, setLauncherShortcut] = useState('Alt+Space');
+  const [whisperAutoClose, setWhisperAutoClose] = useState(true);
   const [showActions, setShowActions] = useState(false);
   const [actionsCommand, setActionsCommand] = useState<CommandInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<{
@@ -376,6 +431,7 @@ const App: React.FC = () => {
   } | null>(null);
   const [selectedActionIndex, setSelectedActionIndex] = useState(0);
   const [selectedContextActionIndex, setSelectedContextActionIndex] = useState(0);
+  const [quickLinkEditId, setQuickLinkEditId] = useState<string | null>(null);
   const [quickLinkDynamicPrompt, setQuickLinkDynamicPrompt] = useState<{
     command: CommandInfo;
     quickLinkId: string;
@@ -387,6 +443,7 @@ const App: React.FC = () => {
     backgroundNoViewRuns, setBackgroundNoViewRuns,
     isMenuBarExtensionMounted,
     hideMenuBarExtension,
+    hideMenuBarExtensionsForExtension,
     upsertMenuBarExtension,
   } = useMenuBarExtensions();
   const [selectedTextSnapshot, setSelectedTextSnapshot] = useState('');
@@ -400,7 +457,10 @@ const App: React.FC = () => {
   const inlineQuickLinkInputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const fileSearchRequestSeqRef = useRef(0);
   const commandsRef = useRef<CommandInfo[]>([]);
+  const lastCommandsFetchAtRef = useRef(0);
+  const executingCommandRef = useRef(false);
   const showActionsRef = useRef(false);
+  const showAppUninstallRef = useRef<string | null>(null);
   const selectedCommandRef = useRef<CommandInfo | null>(null);
   commandsRef.current = commands;
 
@@ -412,20 +472,29 @@ const App: React.FC = () => {
 
   const queueNoViewBundleRun = useCallback((
     bundle: ExtensionBundle,
-    launchType: 'userInitiated' | 'background' = 'userInitiated'
+    launchType: 'userInitiated' | 'background' = 'userInitiated',
+    reportStatus = false
   ) => {
     const runId = `${bundle.extensionName || bundle.extName}/${bundle.commandName || bundle.cmdName}/${Date.now()}`;
-    setBackgroundNoViewRuns((prev) => [...prev, { runId, bundle, launchType }]);
+    setBackgroundNoViewRuns((prev) => [...prev, { runId, bundle, launchType, reportStatus }]);
   }, [setBackgroundNoViewRuns]);
 
   const onExitAiMode = useCallback(() => {
+    if (launcherViewMode === 'compact') {
+      setSearchQuery('');
+      setIsCompactCollapsed(true);
+      window.electron.resizeLauncherWindow(false);
+    }
     setTimeout(() => inputRef.current?.focus(), 50);
-  }, []);
+  }, [launcherViewMode]);
 
   const {
-    aiResponse, aiStreaming, aiAvailable, aiQuery, setAiQuery,
+    messages: aiMessages, aiStreaming, aiAvailable, aiQuery, setAiQuery,
     aiResponseRef, aiInputRef, setAiAvailable,
-    startAiChat, submitAiQuery, exitAiMode,
+    conversations: aiConversations, activeConversationId: aiActiveConversationId,
+    startAiChat, sendMessage: aiSendMessage, stopStreaming: aiStopStreaming,
+    newChat: aiNewChat, selectConversation: aiSelectConversation,
+    deleteConversation: aiDeleteConversation, exitAiMode,
   } = useAiChat({
     setAiMode,
     onExitAiMode,
@@ -454,12 +523,57 @@ const App: React.FC = () => {
   const quickLinkDynamicInputRef = useRef<HTMLInputElement>(null);
   const windowPresetCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const lastWindowHiddenAtRef = useRef<number>(0);
+  const directLaunchExpansionGuardUntilRef = useRef<number>(0);
+  // Holds a search query to restore after the window-shown reset, set by the
+  // hotkey no-view path when it needs to open the launcher with a pre-typed query.
+  const pendingWindowShownQueryRef = useRef<string | null>(null);
+  // When true, focus the first inline argument input as soon as it appears.
+  const pendingFocusInlineArgRef = useRef(false);
   const calcRequestSeqRef = useRef(0);
   const isLauncherModeActiveRef = useRef(false);
   const pinnedCommandsRef = useRef<string[]>([]);
+  const pinnedFilesRef = useRef<string[]>([]);
   const extensionViewRef = useRef<ExtensionBundle | null>(null);
   extensionViewRef.current = extensionView;
   pinnedCommandsRef.current = pinnedCommands;
+  pinnedFilesRef.current = pinnedFiles;
+  // Configurable timeout (ms) before the launcher resets to root search after
+  // it has been hidden. Synced from settings.popToRootSearchTimeoutSeconds.
+  // 0 = reset immediately on every reopen.
+  const popToRootTimeoutMsRef = useRef<number>(DEFAULT_POP_TO_ROOT_TIMEOUT_SECONDS * 1000);
+  // Tracks whether any persistable view (extension or internal view like
+  // Clipboard/Snippets/etc.) is currently active, so the window-shown handler
+  // can keep that view alive when reopened within the configured timeout.
+  const hasPersistableViewRef = useRef<boolean>(false);
+  hasPersistableViewRef.current = Boolean(
+    extensionView ||
+    showClipboardManager ||
+    showSnippetManager ||
+    showQuickLinkManager ||
+    showFileSearch ||
+    showNotesSearch ||
+    showCanvasSearch ||
+    showCamera ||
+    showSchedule ||
+    showAppUninstall
+  );
+
+  const expandLauncherForDirectLaunch = useCallback(() => {
+    directLaunchExpansionGuardUntilRef.current = Date.now() + DIRECT_LAUNCH_EXPANSION_GUARD_MS;
+    setIsCompactCollapsed(false);
+    void window.electron.resizeLauncherWindow(true);
+
+    // Extension/script direct launches are dispatched with executeJavaScript(),
+    // which can beat the async window-shown IPC reset. Retry briefly so the
+    // direct launch remains expanded regardless of delivery order.
+    [0, 80, 180].forEach((delayMs) => {
+      window.setTimeout(() => {
+        if (Date.now() > directLaunchExpansionGuardUntilRef.current) return;
+        setIsCompactCollapsed(false);
+        void window.electron.resizeLauncherWindow(true);
+      }, delayMs);
+    });
+  }, []);
 
 
   const cursorPromptPortalTarget = useDetachedPortalWindow(showCursorPrompt, {
@@ -483,6 +597,18 @@ const App: React.FC = () => {
       setShowWindowManager(false);
     },
   });
+
+  const showLauncherFooterStatus = useCallback((type: 'success' | 'error', text: string, durationMs = 3000) => {
+    if (launcherFooterStatusTimerRef.current !== null) {
+      window.clearTimeout(launcherFooterStatusTimerRef.current);
+      launcherFooterStatusTimerRef.current = null;
+    }
+    setLauncherFooterStatus({ type, text });
+    launcherFooterStatusTimerRef.current = window.setTimeout(() => {
+      setLauncherFooterStatus(null);
+      launcherFooterStatusTimerRef.current = null;
+    }, durationMs);
+  }, []);
 
   const showMemoryFeedback = useCallback((type: 'success' | 'error', text: string) => {
     if (memoryFeedbackTimerRef.current !== null) {
@@ -510,6 +636,11 @@ const App: React.FC = () => {
       const settings = (await window.electron.getSettings()) as AppSettings;
       const shortcutStatus = await window.electron.getGlobalShortcutStatus();
       setPinnedCommands(settings.pinnedCommands || []);
+      setPinnedFiles(
+        Array.isArray(settings.pinnedFiles)
+          ? settings.pinnedFiles.map((p) => String(p || '').trim()).filter(Boolean)
+          : []
+      );
       setRecentCommands(settings.recentCommands || []);
       setRecentCommandLaunchCounts(
         Object.entries(settings.recentCommandLaunchCounts || {}).reduce((acc, [commandId, launchCount]) => {
@@ -531,11 +662,21 @@ const App: React.FC = () => {
           return acc;
         }, {} as Record<string, string>)
       );
+      setCommandHotkeys(
+        Object.entries(settings.commandHotkeys || {}).reduce((acc, [commandId, hotkey]) => {
+          const normalizedCommandId = String(commandId || '').trim();
+          const normalizedHotkey = String(hotkey || '').trim();
+          if (!normalizedCommandId || !normalizedHotkey) return acc;
+          acc[normalizedCommandId] = normalizedHotkey;
+          return acc;
+        }, {} as Record<string, string>)
+      );
       setLauncherShortcut(settings.globalShortcut || 'Alt+Space');
       const speakToggleHotkey = settings.commandHotkeys?.['system-supercmd-whisper-speak-toggle'] ?? '';
       setWhisperSpeakToggleLabel(formatShortcutLabel(speakToggleHotkey));
       setConfiguredEdgeTtsVoice(String(settings.ai?.edgeTtsVoice || 'en-US-EricNeural'));
       setConfiguredTtsModel(String(settings.ai?.textToSpeechModel || 'edge-tts'));
+      setWhisperAutoClose(settings.ai?.whisperAutoClose !== false);
       setLauncherBackgroundImagePath(String(settings.launcherBackgroundImagePath || ''));
       setLauncherBackgroundImageEverywhere(Boolean(settings.launcherBackgroundImageEverywhere));
       setLauncherBackgroundImageBlurPercent(
@@ -550,18 +691,41 @@ const App: React.FC = () => {
           DEFAULT_LAUNCHER_BACKGROUND_OPACITY_PERCENT
         )
       );
+      setDisableFileSearchResults(Boolean(settings.disableFileSearchResults));
+      setLauncherViewMode(settings.launcherViewMode || 'expanded');
       applyAppFontSize(settings.fontSize);
       applyUiStyle(settings.uiStyle || 'default');
       applyBaseColor(settings.baseColor || '#101113');
+      setNavigationStyle(settings.navigationStyle === 'macos' ? 'macos' : 'vim');
+      // Load auto-quit app paths
+      const aqApps = settings.autoQuitApps || [];
+      setAutoQuitAppPaths(new Set(aqApps.map((a: any) => a.appPath)));
+      const popToRootSeconds = Number(settings.popToRootSearchTimeoutSeconds);
+      popToRootTimeoutMsRef.current = (Number.isFinite(popToRootSeconds) ? Math.max(0, popToRootSeconds) : DEFAULT_POP_TO_ROOT_TIMEOUT_SECONDS) * 1000;
       const shouldShowOnboarding = !settings.hasSeenOnboarding;
       setShowOnboarding(shouldShowOnboarding);
       setOnboardingRequiresShortcutFix(shouldShowOnboarding && !shortcutStatus.ok);
+      // Mirror localStorage extension prefs into synced settings (one-shot
+      // per machine), then hydrate localStorage from any prefs synced from
+      // another Mac. Order matters: migrate first so this Mac's existing
+      // values are pushed up before we overwrite from the merged settings.
+      // Re-fetch settings post-migration — the snapshot above is stale once
+      // migration writes back, and hydrating against it would revert local
+      // values that just won the merge.
+      void migrateExtensionPreferencesFromLocalStorage()
+        .then(async () => {
+          const fresh = (await window.electron.getSettings()) as AppSettings;
+          hydrateExtensionPreferencesFromSettings(fresh);
+        })
+        .catch((err) => console.warn('Extension preferences sync init failed:', err));
     } catch (e) {
       console.error('Failed to load launcher preferences:', e);
       setPinnedCommands([]);
+      setPinnedFiles([]);
       setRecentCommands([]);
       setRecentCommandLaunchCounts({});
       setCommandAliases({});
+      setCommandHotkeys({});
       setLauncherShortcut('Alt+Space');
       setConfiguredEdgeTtsVoice('en-US-EricNeural');
       setConfiguredTtsModel('edge-tts');
@@ -584,7 +748,18 @@ const App: React.FC = () => {
     }
     try {
       const fetchedCommands = await window.electron.getCommands();
+      for (const cmd of fetchedCommands) {
+        if (cmd.iconDataUrl) {
+          const cached = _commandIconCache.get(cmd.id);
+          if (cached !== undefined) {
+            cmd.iconDataUrl = cached;
+          } else {
+            _commandIconCache.set(cmd.id, cmd.iconDataUrl);
+          }
+        }
+      }
       setCommands(fetchedCommands);
+      lastCommandsFetchAtRef.current = Date.now();
     } catch (error) {
       console.error('Failed to fetch commands:', error);
     } finally {
@@ -632,13 +807,15 @@ const App: React.FC = () => {
   // Mount-only initial load — must NOT re-run when callbacks are recreated
   // or the loading flash triggers on every aiStreaming state change.
   useEffect(() => {
-    fetchCommands();
+    fetchCommands({ showLoading: false });
     loadLauncherPreferences();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const cleanupWindowHidden = window.electron.onWindowHidden(() => {
       lastWindowHiddenAtRef.current = Date.now();
+      setSearchQuery('');
+      setSelectedIndex(0);
     });
     return cleanupWindowHidden;
   }, []);
@@ -662,7 +839,6 @@ const App: React.FC = () => {
       if (!isOnboardingMode) {
         refreshThemeFromStorage(false);
       }
-      console.log('[WINDOW-SHOWN] fired', payload);
       const isWhisperMode = payload?.mode === 'whisper';
       const isSpeakMode = payload?.mode === 'speak';
       const isPromptMode = payload?.mode === 'prompt';
@@ -704,9 +880,10 @@ const App: React.FC = () => {
         setScriptCommandOutput(null);
         setExtensionView(null);
         localStorage.removeItem(LAST_EXT_KEY);
-        setSearchQuery('');
-        setSelectedIndex(0);
         exitAiMode();
+        if (!isOnboardingMode) {
+          expandLauncherForDirectLaunch();
+        }
         if (routedSystemCommandId === 'system-clipboard-manager') {
           setShowSnippetManager(null);
           setShowFileSearch(false);
@@ -789,20 +966,32 @@ const App: React.FC = () => {
         }
       }
 
+      if (Date.now() <= directLaunchExpansionGuardUntilRef.current) {
+        whisperSessionRef.current = false;
+        setShowCursorPrompt(false);
+        setShowWhisperHint(false);
+        setMemoryFeedback(null);
+        setMemoryActionLoading(false);
+        setSelectedTextSnapshot(String(payload?.selectedTextSnapshot || '').trim());
+        exitAiMode();
+        expandLauncherForDirectLaunch();
+        return;
+      }
+
       whisperSessionRef.current = false;
       setShowCursorPrompt(false);
       setShowWhisperHint(false);
-      setShowCamera(false);
-      setShowSchedule(false);
       setShowWindowManager(false);
       setMemoryFeedback(null);
       setMemoryActionLoading(false);
       setScriptCommandSetup(null);
       setScriptCommandOutput(null);
       setSelectedTextSnapshot(String(payload?.selectedTextSnapshot || '').trim());
+      const popToRootTimeoutMs = popToRootTimeoutMsRef.current;
       const shouldResetOverlays =
-        lastWindowHiddenAtRef.current > 0 &&
-        Date.now() - lastWindowHiddenAtRef.current > STALE_OVERLAY_RESET_MS;
+        popToRootTimeoutMs === 0 ||
+        (lastWindowHiddenAtRef.current > 0 &&
+          Date.now() - lastWindowHiddenAtRef.current > popToRootTimeoutMs);
 
       if (shouldResetOverlays) {
         setExtensionView(null);
@@ -811,6 +1000,8 @@ const App: React.FC = () => {
         setContextMenu(null);
         setShowClipboardManager(false);
         setShowSnippetManager(null);
+        setShowNotesSearch(false);
+        setShowCanvasSearch(false);
         setShowQuickLinkManager(null);
         setShowFileSearch(false);
         setShowCursorPrompt(false);
@@ -818,28 +1009,58 @@ const App: React.FC = () => {
         setShowSpeak(false);
         setShowCamera(false);
         setShowSchedule(false);
-        setShowWindowManager(false);
         setShowWhisperOnboarding(false);
       }
 
-      // If an extension is open, keep it alive — don't reset
-      if (extensionViewRef.current && !shouldResetOverlays) return;
-      setSearchQuery('');
-      setSelectedIndex(0);
-      exitAiMode();
-      setShowClipboardManager(false);
-      setShowSnippetManager(null);
-      setShowQuickLinkManager(null);
-      setShowFileSearch(false);
-      // Re-fetch commands every time the window is shown
-      // so newly installed extensions appear immediately
-      fetchCommands({ showLoading: false });
-      loadLauncherPreferences();
-      window.electron.aiIsAvailable().then(setAiAvailable);
+      // If a persistable view (extension or internal view like Clipboard,
+      // Snippets, File Search, etc.) is open, keep it alive — don't reset.
+      if (hasPersistableViewRef.current && !shouldResetOverlays) {
+        setIsCompactCollapsed(false);
+        void window.electron.resizeLauncherWindow(true);
+        return;
+      }
+      const pendingQuery = pendingWindowShownQueryRef.current;
+      pendingWindowShownQueryRef.current = null;
+      if (pendingQuery) {
+        setSearchQuery(pendingQuery);
+        setSelectedIndex(0);
+        pendingFocusInlineArgRef.current = true;
+      }
+      // When a pending query is pre-filled (e.g. hotkey-triggered no-view
+      // command with missing args), expand out of compact so results are
+      // immediately visible.
+      if (pendingQuery) {
+        exitAiMode();
+        expandLauncherForDirectLaunch();
+      } else {
+        setIsCompactCollapsed(true);
+        exitAiMode();
+      }
+      // Focus synchronously before any IO — a keystroke arriving back-to-back
+      // with the show event must land on a focused input.
       inputRef.current?.focus();
+
+      // Defer housekeeping past first paint so it doesn't compete with the
+      // user's first keystroke or list rendering.
+      const runDeferred = () => {
+        const COMMANDS_REFRESH_TTL_MS = 5 * 60_000;
+        if (
+          commandsRef.current.length === 0 ||
+          Date.now() - lastCommandsFetchAtRef.current > COMMANDS_REFRESH_TTL_MS
+        ) {
+          fetchCommands({ showLoading: false });
+        }
+        loadLauncherPreferences();
+        window.electron.aiIsAvailable().then(setAiAvailable);
+      };
+      if (typeof window.requestIdleCallback === 'function') {
+        window.requestIdleCallback(runDeferred, { timeout: 200 });
+      } else {
+        setTimeout(runDeferred, 0);
+      }
     });
     return cleanupWindowShown;
-  }, [fetchCommands, loadLauncherPreferences, refreshSelectedTextSnapshot, openWhisper, openSpeak, openCursorPrompt, resetCursorPromptState, exitAiMode, setShowCursorPrompt, setShowWhisperHint, setMemoryFeedback, setMemoryActionLoading, setScriptCommandSetup, setScriptCommandOutput, setExtensionView, setSearchQuery, setSelectedIndex, setShowSnippetManager, setShowQuickLinkManager, setShowFileSearch, openClipboardManager, setShowClipboardManager, openSnippetManager, openQuickLinkManager, openFileSearch, openSchedule, openCamera, openOnboarding, setShowCamera, setShowSchedule, setShowWindowManager]);
+  }, [expandLauncherForDirectLaunch, fetchCommands, loadLauncherPreferences, refreshSelectedTextSnapshot, openWhisper, openSpeak, openCursorPrompt, resetCursorPromptState, exitAiMode, setShowCursorPrompt, setShowWhisperHint, setMemoryFeedback, setMemoryActionLoading, setScriptCommandSetup, setScriptCommandOutput, setExtensionView, setSearchQuery, setSelectedIndex, setShowSnippetManager, setShowNotesSearch, setShowCanvasSearch, setShowQuickLinkManager, setShowFileSearch, openClipboardManager, setShowClipboardManager, openSnippetManager, openQuickLinkManager, openFileSearch, openSchedule, openCamera, openOnboarding, setShowCamera, setShowSchedule, setShowWindowManager, setShowWhisper, setShowSpeak, setShowWhisperOnboarding]);
 
   useEffect(() => {
     const cleanupSelectionSnapshotUpdated = window.electron.onSelectionSnapshotUpdated((payload) => {
@@ -850,6 +1071,10 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const cleanup = window.electron.onSettingsUpdated?.((settings: AppSettings) => {
+      // Settings broadcasts fire for in-app saves AND for external sync
+      // changes (cloud watcher → reload → broadcast). Re-hydrate localStorage
+      // so any prefs delivered from another Mac take effect immediately.
+      hydrateExtensionPreferencesFromSettings(settings);
       applyAppFontSize(settings.fontSize);
       applyUiStyle(settings.uiStyle || 'default');
       applyBaseColor(settings.baseColor || '#101113');
@@ -868,6 +1093,10 @@ const App: React.FC = () => {
         )
       );
       setLauncherShortcut(settings.globalShortcut || 'Alt+Space');
+      setDisableFileSearchResults(Boolean(settings.disableFileSearchResults));
+      setNavigationStyle(settings.navigationStyle === 'macos' ? 'macos' : 'vim');
+      const popToRootSeconds = Number(settings.popToRootSearchTimeoutSeconds);
+      popToRootTimeoutMsRef.current = (Number.isFinite(popToRootSeconds) ? Math.max(0, popToRootSeconds) : DEFAULT_POP_TO_ROOT_TIMEOUT_SECONDS) * 1000;
     });
     return cleanup;
   }, []);
@@ -922,16 +1151,45 @@ const App: React.FC = () => {
         if (hydrated.mode === 'no-view') {
           queueNoViewBundleRun(hydrated, 'background');
         }
+        // Background launches from menu-bar runners (e.g. pomodoro auto
+        // transitions) must not hijack the launcher into a view command —
+        // the user didn't ask for it. Silent drop.
         return;
       }
 
-      // Hidden menu-bar runners should not hijack the launcher by forcing
-      // view commands into the foreground (e.g. pomodoro auto transitions).
-      if (sourceMode === 'menu-bar' && hydrated.mode === 'view') {
+      // Hotkey-triggered no-view commands: run silently without showing the launcher.
+      // If the command has argument definitions, ALWAYS open the launcher with the
+      // command name pre-typed so the user can review/fill args before running.
+      // Only run silently when the command has no arguments (and prefs are all filled).
+      if (sourceMode === 'hotkey' && hydrated.mode === 'no-view') {
+        const hasRequiredArgDefs = (hydrated.commandArgumentDefinitions || []).some(d => !!d.required);
+        const hasMissingPrefs = getMissingRequiredPreferences(hydrated).length > 0;
+        if (hasRequiredArgDefs || hasMissingPrefs) {
+          const cmdTitle = hydrated.title || hydrated.commandName || hydrated.cmdName || '';
+          pendingWindowShownQueryRef.current = cmdTitle;
+          void window.electron.showWindow();
+          setShowFileSearch(false);
+          setExtensionPreferenceSetup(null);
+        } else {
+          // No-view hotkey commands never call showWindow(), so SuperCmd never
+          // takes focus — the user's active app keeps focus throughout.
+          // activateLastFrontmostApp() is intentionally NOT called here: it
+          // uses stale lastFrontmostApp data and can activate the wrong app.
+          queueNoViewBundleRun(hydrated, 'userInitiated', true);
+        }
         return;
       }
+
+      // Bundles dispatched from a menu-bar runner (e.g. clicking a tray menu
+      // item that calls launchCommand) reach here while the launcher window
+      // is hidden. expandLauncherForDirectLaunch only resizes — it does not
+      // show the window — so we must explicitly call showWindow() for these
+      // user-initiated launches, otherwise the click silently no-ops.
+      const needsWindowShow = sourceMode === 'menu-bar' && hydrated.mode !== 'no-view';
 
       if (shouldOpenCommandSetup(hydrated)) {
+        if (needsWindowShow) void window.electron.showWindow();
+        expandLauncherForDirectLaunch();
         setShowFileSearch(false);
         setExtensionPreferenceSetup({
           bundle: hydrated,
@@ -941,6 +1199,8 @@ const App: React.FC = () => {
       } else if (hydrated.mode === 'no-view') {
         queueNoViewBundleRun(hydrated, 'userInitiated');
       } else {
+        if (needsWindowShow) void window.electron.showWindow();
+        expandLauncherForDirectLaunch();
         setShowFileSearch(false);
         setExtensionView(hydrated);
       }
@@ -948,7 +1208,25 @@ const App: React.FC = () => {
 
     window.addEventListener('sc-launch-extension-bundle', onLaunchBundle as EventListener);
     return () => window.removeEventListener('sc-launch-extension-bundle', onLaunchBundle as EventListener);
-  }, [queueNoViewBundleRun, upsertMenuBarExtension]);
+  }, [expandLauncherForDirectLaunch, queueNoViewBundleRun, upsertMenuBarExtension]);
+
+  // Tear down per-extension renderer state whenever ANY uninstall path completes
+  // (launcher action, settings tab, store tab). Without this the in-memory bundle
+  // outlives the on-disk delete: its setInterval keeps firing, and the menu-bar
+  // tray + scheduled re-runs in useBackgroundRefresh keep re-mounting it, even
+  // though run-extension now fails with "Extension directory not found".
+  useEffect(() => {
+    const cleanup = window.electron.onExtensionUninstalled?.((extensionName: string) => {
+      hideMenuBarExtensionsForExtension(extensionName);
+      setBackgroundNoViewRuns((prev) =>
+        prev.filter((run) => {
+          const runExt = (run.bundle.extName || run.bundle.extensionName || '').trim();
+          return runExt !== extensionName;
+        })
+      );
+    });
+    return cleanup;
+  }, [hideMenuBarExtensionsForExtension, setBackgroundNoViewRuns]);
 
   useEffect(() => {
     const onRunScript = (event: Event) => {
@@ -974,6 +1252,7 @@ const App: React.FC = () => {
         });
         if (!result) return;
         if (result.needsArguments) {
+          expandLauncherForDirectLaunch();
           setShowFileSearch(false);
           setScriptCommandSetup({
             command,
@@ -982,6 +1261,7 @@ const App: React.FC = () => {
           return;
         }
         if (result.mode === 'fullOutput') {
+          expandLauncherForDirectLaunch();
           setShowFileSearch(false);
           setScriptCommandOutput({
             command,
@@ -997,9 +1277,17 @@ const App: React.FC = () => {
     };
     window.addEventListener('sc-run-script-command', onRunScript as EventListener);
     return () => window.removeEventListener('sc-run-script-command', onRunScript as EventListener);
-  }, [commands, fetchCommands]);
+  }, [commands, expandLauncherForDirectLaunch, fetchCommands]);
 
-  useBackgroundRefresh({ commands, fetchCommands });
+  useBackgroundRefresh({
+    commands,
+    fetchCommands,
+    isMenuBarCommandActive: useCallback(
+      (extName: string, cmdName: string) =>
+        isMenuBarExtensionMounted({ extName, cmdName }),
+      [isMenuBarExtensionMounted],
+    ),
+  });
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -1010,9 +1298,10 @@ const App: React.FC = () => {
   }, [refreshSelectedTextSnapshot]);
 
   const saveLauncherPreferences = useCallback(
-    async (next: { pinnedCommands?: string[]; recentCommands?: string[]; recentCommandLaunchCounts?: Record<string, number> }) => {
+    async (next: { pinnedCommands?: string[]; pinnedFiles?: string[]; recentCommands?: string[]; recentCommandLaunchCounts?: Record<string, number> }) => {
       const patch: Partial<AppSettings> = {};
       if (next.pinnedCommands) patch.pinnedCommands = next.pinnedCommands;
+      if (next.pinnedFiles) patch.pinnedFiles = next.pinnedFiles;
       if (next.recentCommands) patch.recentCommands = next.recentCommands;
       if (next.recentCommandLaunchCounts) patch.recentCommandLaunchCounts = next.recentCommandLaunchCounts;
       if (Object.keys(patch).length > 0) {
@@ -1068,6 +1357,42 @@ const App: React.FC = () => {
     [updatePinnedCommands]
   );
 
+  const updatePinnedFiles = useCallback(
+    async (nextPinned: string[]) => {
+      setPinnedFiles(nextPinned);
+      await saveLauncherPreferences({ pinnedFiles: nextPinned });
+    },
+    [saveLauncherPreferences]
+  );
+
+  const pinToggleForFile = useCallback(
+    async (filePath: string) => {
+      const normalized = String(filePath || '').trim();
+      if (!normalized) return;
+      const currentPinned = pinnedFilesRef.current;
+      const exists = currentPinned.includes(normalized);
+      const name = getFileBasename(normalized) || normalized;
+      let isDirectory = Boolean(fileIsDirectoryMap[normalized]);
+      if (fileIsDirectoryMap[normalized] === undefined) {
+        try {
+          const stat = window.electron.statSync(normalized);
+          if (stat && stat.exists) isDirectory = Boolean(stat.isDirectory);
+        } catch {
+          // ignore
+        }
+      }
+      const kindLabel = isDirectory ? 'folder' : 'file';
+      if (exists) {
+        await updatePinnedFiles(currentPinned.filter((p) => p !== normalized));
+        showLauncherFooterStatus('success', `Unpinned ${kindLabel} "${name}"`);
+      } else {
+        await updatePinnedFiles([normalized, ...currentPinned]);
+        showLauncherFooterStatus('success', `Pinned ${kindLabel} "${name}"`);
+      }
+    },
+    [updatePinnedFiles, fileIsDirectoryMap, showLauncherFooterStatus]
+  );
+
   const disableCommand = useCallback(
     async (command: CommandInfo) => {
       await window.electron.toggleCommandEnabled(command.id, false);
@@ -1099,6 +1424,10 @@ const App: React.FC = () => {
       const separatorIndex = rawPath.indexOf('/');
       const extName = separatorIndex > 0 ? rawPath.slice(0, separatorIndex).trim() : '';
       if (!extName) return;
+      // Live menu-bar / background runner teardown happens via the
+      // `extension-uninstalled` IPC broadcast (see effect below) so it covers
+      // settings + store uninstall paths uniformly. We only need to update
+      // launcher-local pinned/recent state here.
       await window.electron.uninstallExtension(extName);
       await updatePinnedCommands(pinnedCommands.filter((id) => id !== command.id));
       const nextRecent = recentCommands.filter((id) => id !== command.id);
@@ -1155,10 +1484,11 @@ const App: React.FC = () => {
 
   useEffect(() => {
     showActionsRef.current = showActions;
+    showAppUninstallRef.current = showAppUninstall;
     if (!showActions) {
       setActionsCommand(null);
     }
-  }, [showActions]);
+  }, [showActions, showAppUninstall]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -1167,10 +1497,10 @@ const App: React.FC = () => {
   }, [contextMenu]);
 
   useEffect(() => {
-    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showNotesSearch && !showQuickLinkManager && !showFileSearch && !showCursorPrompt && !showWhisper && !showSpeak && !showCamera && !showSchedule && !showWindowManager && !showOnboarding) {
+    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showNotesSearch && !showQuickLinkManager && !showFileSearch && !showCursorPrompt && !showWhisper && !showSpeak && !showCamera && !showSchedule && !showWindowManager && !showAppUninstall && !showOnboarding) {
       restoreLauncherFocus();
     }
-  }, [showActions, contextMenu, quickLinkDynamicPrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showCursorPrompt, showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showOnboarding, showWhisperOnboarding, restoreLauncherFocus]);
+  }, [showActions, contextMenu, quickLinkDynamicPrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showCursorPrompt, showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showAppUninstall, showOnboarding, showWhisperOnboarding, restoreLauncherFocus]);
 
   const isLauncherModeActive =
     !showActions &&
@@ -1200,6 +1530,12 @@ const App: React.FC = () => {
   }, [isLauncherModeActive]);
 
   useEffect(() => {
+    if (launcherViewMode !== 'compact' || isLauncherModeActive) return;
+    setIsCompactCollapsed(false);
+    void window.electron.resizeLauncherWindow(true);
+  }, [isLauncherModeActive, launcherViewMode]);
+
+  useEffect(() => {
     fileSearchRequestSeqRef.current += 1;
     const requestSeq = fileSearchRequestSeqRef.current;
     const trimmed = searchQuery.trim();
@@ -1207,7 +1543,7 @@ const App: React.FC = () => {
     const terms = pathLikeQuery ? [] : getLauncherFileSearchTerms(trimmed);
     const minimumQueryLength = pathLikeQuery ? 1 : MIN_LAUNCHER_FILE_QUERY_LENGTH;
 
-    if (!shouldKeepLauncherSearchResults || trimmed.length < minimumQueryLength) {
+    if (disableFileSearchResults || !shouldKeepLauncherSearchResults || trimmed.length < minimumQueryLength) {
       setLauncherFileResults([]);
       return;
     }
@@ -1282,12 +1618,13 @@ const App: React.FC = () => {
     return () => {
       window.clearTimeout(timer);
     };
-  }, [searchQuery, shouldKeepLauncherSearchResults, homeDir]);
+  }, [searchQuery, shouldKeepLauncherSearchResults, homeDir, disableFileSearchResults]);
 
   useEffect(() => {
     if (!isLauncherModeActive) return;
     const onWindowKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      if (showAppUninstallRef.current) return;
       if (!e.metaKey || String(e.key || '').toLowerCase() !== 'k' || e.repeat) return;
 
       const target = e.target as HTMLElement | null;
@@ -1321,6 +1658,10 @@ const App: React.FC = () => {
       if (memoryFeedbackTimerRef.current !== null) {
         window.clearTimeout(memoryFeedbackTimerRef.current);
         memoryFeedbackTimerRef.current = null;
+      }
+      if (launcherFooterStatusTimerRef.current !== null) {
+        window.clearTimeout(launcherFooterStatusTimerRef.current);
+        launcherFooterStatusTimerRef.current = null;
       }
     };
   }, []);
@@ -1363,18 +1704,22 @@ const App: React.FC = () => {
     [contextualCommands, searchQuery, commandAliases]
   );
 
-  // When calculator is showing but no commands match, show unfiltered list below
+  // When calculator is showing but no commands match, show unfiltered list below.
+  // alwaysOnTop commands are always present in filteredCommands regardless of query,
+  // so exclude them from the "nothing matched" check.
   const sourceCommands =
-    calcResult && filteredCommands.length === 0 ? contextualCommands : filteredCommands;
+    calcResult && filteredCommands.filter((c) => !c.alwaysOnTop).length === 0
+      ? contextualCommands
+      : filteredCommands;
   const hiddenListOnlyCommandIds = useMemo(
-    () => new Set(['system-add-to-memory', 'system-cursor-prompt']),
+    () => new Set(['system-add-to-memory', 'system-cursor-prompt', 'system-emoji-picker']),
     []
   );
-  const visibleSourceCommands = useMemo(
-    () => sourceCommands.filter((cmd) => !hiddenListOnlyCommandIds.has(cmd.id)),
-    [sourceCommands, hiddenListOnlyCommandIds]
-  );
   const hasSearchQuery = searchQuery.trim().length > 0;
+  const visibleSourceCommands = useMemo(
+    () => sourceCommands.filter((cmd) => !hiddenListOnlyCommandIds.has(cmd.id) || hasSearchQuery),
+    [sourceCommands, hiddenListOnlyCommandIds, hasSearchQuery]
+  );
 
   const fileResultCommands = useMemo<CommandInfo[]>(
     () =>
@@ -1392,6 +1737,92 @@ const App: React.FC = () => {
       }),
     [launcherFileResults, launcherFileIcons, homeDir]
   );
+
+  const pinnedFileCommands = useMemo<CommandInfo[]>(
+    () =>
+      pinnedFiles.map((filePath) => {
+        const name = getFileBasename(filePath);
+        const parentPath = getFileDirname(filePath);
+        return {
+          id: buildFileResultCommandId(filePath),
+          title: name || filePath,
+          subtitle: asTildePath(parentPath, homeDir),
+          keywords: [name, parentPath, filePath],
+          iconDataUrl: launcherFileIcons[filePath] || undefined,
+          category: 'system',
+          path: filePath,
+        };
+      }),
+    [pinnedFiles, launcherFileIcons, homeDir]
+  );
+
+  useEffect(() => {
+    if (pinnedFiles.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const missing = pinnedFiles.filter((p) => !launcherFileIcons[p]);
+      if (missing.length === 0) return;
+      const entries = await Promise.all(
+        missing.map(async (filePath) => {
+          try {
+            const dataUrl = await window.electron.getFileIconDataUrl(filePath, 20);
+            return [filePath, dataUrl || ''] as const;
+          } catch {
+            return [filePath, ''] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      setLauncherFileIcons((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const [filePath, icon] of entries) {
+          if (icon && !next[filePath]) {
+            next[filePath] = icon;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pinnedFiles, launcherFileIcons]);
+
+  useEffect(() => {
+    const pending: Array<[string, boolean]> = [];
+    for (const result of launcherFileResults) {
+      const path = String(result?.path || '').trim();
+      if (!path) continue;
+      if (fileIsDirectoryMap[path] === undefined) {
+        pending.push([path, Boolean(result?.isDirectory)]);
+      }
+    }
+    for (const pinnedPath of pinnedFiles) {
+      if (!pinnedPath || fileIsDirectoryMap[pinnedPath] !== undefined) continue;
+      try {
+        const stat = window.electron.statSync(pinnedPath);
+        if (stat && stat.exists) {
+          pending.push([pinnedPath, Boolean(stat.isDirectory)]);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    if (pending.length === 0) return;
+    setFileIsDirectoryMap((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const [path, isDirectory] of pending) {
+        if (next[path] !== isDirectory) {
+          next[path] = isDirectory;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [launcherFileResults, pinnedFiles, fileIsDirectoryMap]);
 
   const groupedCommands = useMemo(() => {
     if (hasSearchQuery) {
@@ -1411,9 +1842,10 @@ const App: React.FC = () => {
       : [];
     const contextualIds = new Set(contextual.map((c) => c.id));
 
-    const pinned = pinnedCommands
+    const pinnedFromCommands = pinnedCommands
       .map((id) => sourceMap.get(id))
       .filter((cmd): cmd is CommandInfo => Boolean(cmd) && !contextualIds.has((cmd as CommandInfo).id));
+    const pinned = [...pinnedFromCommands, ...pinnedFileCommands];
     const pinnedSet = new Set(pinned.map((c) => c.id));
 
     const recentRecencyRank = new Map(recentCommands.map((id, index) => [id, index]));
@@ -1440,18 +1872,79 @@ const App: React.FC = () => {
     );
 
     return { contextual, pinned, recent, files: fileResultCommands, other };
-  }, [hasSearchQuery, visibleSourceCommands, pinnedCommands, recentCommands, recentCommandLaunchCounts, selectedTextSnapshot, fileResultCommands]);
+  }, [hasSearchQuery, visibleSourceCommands, pinnedCommands, pinnedFileCommands, recentCommands, recentCommandLaunchCounts, selectedTextSnapshot, fileResultCommands]);
 
-  const displayCommands = useMemo(
-    () => [
+  // Chrome-style inline autocomplete: the input visually shows the full
+  // completion ("x.com") with the auto-extended portion (".com") selected,
+  // while `searchQuery` continues to hold what the user actually typed (so
+  // result filtering uses the typed prefix, not the extended URL).
+  const browserSearchAutoComplete = useMemo(() => {
+    if (!browserSearch.enabled) return null;
+    if (aiMode) return null;
+    if (browserSearchSkipAutoComplete) return null;
+    if (!searchQuery) return null;
+    const completion = browserSearch.getCompletion(searchQuery);
+    if (!completion) return null;
+    if (completion.completion === searchQuery) return null;
+    if (!completion.completion.toLowerCase().startsWith(searchQuery.toLowerCase())) return null;
+    return completion;
+  }, [browserSearch, searchQuery, browserSearchSkipAutoComplete, aiMode]);
+
+  const launcherInputValue = browserSearchAutoComplete?.completion ?? searchQuery;
+
+  const browserSearchSyntheticCommand = useMemo<CommandInfo | null>(() => {
+    if (!browserSearch.enabled) return null;
+    if (aiMode) return null;
+    const subject = launcherInputValue.trim();
+    if (!subject) return null;
+    const resolved = browserSearch.resolve(subject);
+    if (!resolved) return null;
+    if (resolved.type === 'url') {
+      const displayUrl = subject.replace(/^https?:\/\//i, '').replace(/\/+$/, '') || resolved.host || subject;
+      return {
+        id: BROWSER_SEARCH_OPEN_URL_ID,
+        title: t('launcher.browserSearch.openUrl', { url: displayUrl }),
+        subtitle: t('launcher.browserSearch.subtitle.openUrl'),
+        category: 'system',
+        keywords: [],
+        alwaysOnTop: true,
+      };
+    }
+    // Search intent: suppress when there are real app/command/contextual
+    // matches — the user is more likely launching an app like "Clipboard
+    // History" than literally searching the web for "clip". Files are
+    // intentionally excluded since broad filename matches are noisy.
+    const hasAppMatch =
+      groupedCommands.contextual.length > 0 ||
+      groupedCommands.pinned.length > 0 ||
+      groupedCommands.recent.length > 0 ||
+      groupedCommands.other.length > 0;
+    if (hasAppMatch) return null;
+    return {
+      id: BROWSER_SEARCH_PERFORM_SEARCH_ID,
+      title: t('launcher.browserSearch.searchFor', { query: subject }),
+      subtitle: t('launcher.browserSearch.subtitle.search'),
+      category: 'system',
+      keywords: [],
+      alwaysOnTop: true,
+    };
+  }, [browserSearch, launcherInputValue, aiMode, t, groupedCommands]);
+
+  const displayCommands = useMemo(() => {
+    const all = [
       ...groupedCommands.contextual,
       ...groupedCommands.pinned,
       ...groupedCommands.recent,
       ...groupedCommands.other,
       ...groupedCommands.files,
-    ],
-    [groupedCommands]
-  );
+    ];
+    // alwaysOnTop commands (e.g. update banner) must be the very first items,
+    // above pinned, contextual, and everything else.
+    const top = all.filter((c) => c.alwaysOnTop);
+    const rest = all.filter((c) => !c.alwaysOnTop);
+    const ordered = [...top, ...rest];
+    return browserSearchSyntheticCommand ? [browserSearchSyntheticCommand, ...ordered] : ordered;
+  }, [groupedCommands, browserSearchSyntheticCommand]);
 
   useEffect(() => {
     itemRefs.current = itemRefs.current.slice(0, displayCommands.length + calcOffset);
@@ -1592,6 +2085,17 @@ const App: React.FC = () => {
     );
   }, [selectedInlineQuickLinkDynamicFields.length]);
 
+  // When a hotkey-triggered no-view command opens the launcher with a pre-typed
+  // query, focus the first inline argument input once it appears in the DOM.
+  useEffect(() => {
+    if (!pendingFocusInlineArgRef.current) return;
+    if (!isShowingInlineArgumentInputs) return;
+    pendingFocusInlineArgRef.current = false;
+    requestAnimationFrame(() => {
+      inlineArgumentInputRefs.current[0]?.focus();
+    });
+  }, [isShowingInlineArgumentInputs]);
+
   useEffect(() => {
     if (!isLauncherModeActive) return;
     const extensionIdentity = getExtensionIdentityFromCommand(selectedCommand);
@@ -1700,6 +2204,18 @@ const App: React.FC = () => {
     },
     []
   );
+
+  const clearInlineQuickLinkDynamicValuesForId = useCallback((quickLinkId: string) => {
+    const normalizedId = String(quickLinkId || '').trim();
+    if (!normalizedId) return;
+    setInlineQuickLinkDynamicValuesById((prev) => {
+      if (!prev[normalizedId]) return prev;
+      const next = { ...prev };
+      delete next[normalizedId];
+      return next;
+    });
+  }, []);
+
   const getInlineExtensionArgumentsForCommand = useCallback(
     (command: CommandInfo): Record<string, string> => {
       const definitions = (command.commandArgumentDefinitions || []).filter((definition) => definition?.name);
@@ -1771,6 +2287,16 @@ const App: React.FC = () => {
     }
   }, []);
 
+  const copyCommandDeeplink = useCallback(async (command: CommandInfo) => {
+    const deeplink = String(command?.deeplink || '').trim();
+    if (!deeplink) return;
+    try {
+      await window.electron.clipboardWrite({ text: deeplink });
+    } catch (error) {
+      console.error('Failed to copy deeplink:', error);
+    }
+  }, []);
+
   const showFileResultDetailsByPath = useCallback(
     (targetPath: string) => {
       if (!targetPath) return;
@@ -1794,6 +2320,11 @@ const App: React.FC = () => {
     if (!selectedCommand) return;
     await uninstallExtensionCommand(selectedCommand);
   }, [selectedCommand, uninstallExtensionCommand]);
+
+  const copyDeeplinkForSelectedCommand = useCallback(async () => {
+    if (!selectedCommand || !selectedCommand.deeplink) return;
+    await copyCommandDeeplink(selectedCommand);
+  }, [selectedCommand, copyCommandDeeplink]);
 
   const moveSelectedPinnedCommand = useCallback(
     async (direction: 'up' | 'down') => {
@@ -1830,8 +2361,50 @@ const App: React.FC = () => {
     });
   }, []);
 
+  // After every render where the autocomplete state changed, sync the
+  // input's selection so the auto-extended portion stays highlighted.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    if (!browserSearchAutoComplete) return;
+    if (el.value !== browserSearchAutoComplete.completion) return;
+    const start = searchQuery.length;
+    const end = browserSearchAutoComplete.completion.length;
+    if (start >= end) return;
+    try {
+      el.setSelectionRange(start, end);
+    } catch {}
+  }, [browserSearchAutoComplete, searchQuery]);
+
+  // Once the user has dismissed an autocomplete with Backspace, keep it
+  // dismissed for the rest of the typing session — only re-enable when
+  // they clear the input completely and start fresh. Mirrors how Chrome's
+  // omnibox behaves after a manual rejection.
+  useEffect(() => {
+    if (searchQuery.length === 0 && browserSearchSkipAutoComplete) {
+      setBrowserSearchSkipAutoComplete(false);
+    }
+  }, [searchQuery, browserSearchSkipAutoComplete]);
+
+  const submitBrowserSearch = useCallback(
+    async (input: string) => {
+      const trimmed = input.trim();
+      if (!trimmed) return false;
+      const ok = await browserSearch.executeBrowserSearch(trimmed);
+      if (ok) {
+        setBrowserSearchSkipAutoComplete(false);
+        try { window.electron.hideWindow(); } catch {}
+      }
+      return ok;
+    },
+    [browserSearch]
+  );
+
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (showAppUninstall) {
+        return;
+      }
       if (quickLinkDynamicPrompt) {
         return;
       }
@@ -1850,19 +2423,6 @@ const App: React.FC = () => {
         setSelectedActionIndex(0);
         setShowActions(true);
         return;
-      }
-
-      if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-        if (e.key === 'j' || e.key === 'J') {
-          e.preventDefault();
-          moveSelection('down');
-          return;
-        }
-        if (e.key === 'k' || e.key === 'K') {
-          e.preventDefault();
-          moveSelection('up');
-          return;
-        }
       }
 
       if (showActions || contextMenu) {
@@ -1889,6 +2449,11 @@ const App: React.FC = () => {
         void copyFileResultPath(selectedFileResultPath);
         return;
       }
+      if (selectedFileResultPath && e.metaKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
+        e.preventDefault();
+        void pinToggleForFile(selectedFileResultPath);
+        return;
+      }
       if (!selectedFileResultPath && e.metaKey && e.shiftKey && (e.key === 'P' || e.key === 'p')) {
         e.preventDefault();
         togglePinSelectedCommand();
@@ -1899,10 +2464,34 @@ const App: React.FC = () => {
         disableSelectedCommand();
         return;
       }
+      if (
+        !selectedFileResultPath &&
+        e.metaKey &&
+        e.shiftKey &&
+        (e.key === 'L' || e.key === 'l') &&
+        selectedCommand?.deeplink
+      ) {
+        e.preventDefault();
+        void copyDeeplinkForSelectedCommand();
+        return;
+      }
       if (!selectedFileResultPath && e.metaKey && (e.key === 'Backspace' || e.key === 'Delete')) {
         if (selectedCommand?.category === 'extension') {
           e.preventDefault();
           uninstallSelectedExtension();
+          return;
+        }
+      }
+      // Ctrl+X: Uninstall Application (for app commands and .app file results)
+      if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'x' || e.key === 'X')) {
+        const appPath = selectedFileResultPath?.endsWith('.app')
+          ? selectedFileResultPath
+          : (selectedCommand?.category === 'app' && selectedCommand?.path?.endsWith('.app'))
+            ? selectedCommand.path
+            : null;
+        if (appPath) {
+          e.preventDefault();
+          openAppUninstall(appPath);
           return;
         }
       }
@@ -1947,14 +2536,23 @@ const App: React.FC = () => {
               return;
             }
           }
-          if (isSearchInputTarget && searchQuery.trim() && aiAvailable && !shouldHideAskAi) {
+          if (isSearchInputTarget && aiAvailable && !shouldHideAskAi) {
             e.preventDefault();
+            if (launcherViewMode === 'compact') {
+              setIsCompactCollapsed(false);
+              window.electron.resizeLauncherWindow(true);
+            }
             startAiChat(searchQuery);
           }
           break;
 
         case 'ArrowDown':
           e.preventDefault();
+          if (launcherViewMode === 'compact' && isCompactCollapsed) {
+            setIsCompactCollapsed(false);
+            window.electron.resizeLauncherWindow(true);
+            break;
+          }
           moveSelection('down');
           break;
 
@@ -1991,6 +2589,15 @@ const App: React.FC = () => {
           if (searchQuery.length > 0) {
             setSearchQuery('');
             setSelectedIndex(0);
+            if (launcherViewMode === 'compact') {
+              setIsCompactCollapsed(true);
+              window.electron.resizeLauncherWindow(false);
+            }
+            return;
+          }
+          if (launcherViewMode === 'compact' && !isCompactCollapsed) {
+            setIsCompactCollapsed(true);
+            window.electron.resizeLauncherWindow(false);
             return;
           }
           window.electron.hideWindow();
@@ -2014,14 +2621,20 @@ const App: React.FC = () => {
       disableSelectedCommand,
       uninstallSelectedExtension,
       moveSelectedPinnedCommand,
+      copyDeeplinkForSelectedCommand,
       selectedFileResultPath,
       showFileResultDetailsByPath,
       revealFileResultByPath,
       copyFileResultPath,
+      pinToggleForFile,
+      openAppUninstall,
       selectedCommand,
       contextMenu,
       showActions,
       quickLinkDynamicPrompt,
+      showAppUninstall,
+      launcherViewMode,
+      isCompactCollapsed,
     ]
   );
 
@@ -2029,6 +2642,9 @@ const App: React.FC = () => {
     commandId: string,
     options?: { fromMainEvent?: boolean }
   ): Promise<boolean> => {
+    if (DIRECT_LAUNCH_EXPANDED_SYSTEM_COMMAND_IDS.has(commandId)) {
+      expandLauncherForDirectLaunch();
+    }
     if (commandId === 'system-supercmd-whisper' || commandId === 'system-supercmd-speak') {
       try {
         const settings = await window.electron.getSettings();
@@ -2217,8 +2833,24 @@ const App: React.FC = () => {
       await window.electron.appUpdaterCheckAndInstall();
       return true;
     }
+    if (commandId === 'system-update-and-reopen') {
+      await window.electron.appUpdaterQuitAndInstall();
+      try { await window.electron.hideWindow(); } catch {}
+      return true;
+    }
+    if (commandId === 'system-empty-trash') {
+      const ok = window.confirm('Are you sure you want to permanently delete the items in the Trash?');
+      if (!ok) return true;
+      await window.electron.executeCommand('system-empty-trash');
+      return true;
+    }
+    if (commandId === 'system-reset-launcher-position') {
+      await window.electron.resetLauncherPosition();
+      await window.electron.hideWindow();
+      return true;
+    }
     return false;
-  }, [memoryActionLoading, selectedTextSnapshot, showMemoryFeedback, showOnboarding, showWindowManager, openOnboarding, openWhisper, setShowWhisper, setShowWhisperOnboarding, setShowWhisperHint, openClipboardManager, openSnippetManager, openQuickLinkManager, openFileSearch, openCamera, openSpeak, openWindowManager, setShowSpeak, setShowWindowManager]);
+  }, [expandLauncherForDirectLaunch, memoryActionLoading, selectedTextSnapshot, showMemoryFeedback, showOnboarding, showWindowManager, openOnboarding, openWhisper, setShowWhisper, setShowWhisperOnboarding, setShowWhisperHint, openClipboardManager, openSnippetManager, openQuickLinkManager, openFileSearch, openCamera, openSpeak, openWindowManager, setShowSpeak, setShowWindowManager]);
 
   useEffect(() => {
     const cleanup = window.electron.onRunSystemCommand(async (commandId: string) => {
@@ -2232,6 +2864,15 @@ const App: React.FC = () => {
   }, [runLocalSystemCommand]);
 
   useEffect(() => {
+    const cleanup = window.electron.onWhisperStartListening(() => {
+      whisperSessionRef.current = true;
+      setShowWhisper(true);
+      setWhisperStartToken((value) => value + 1);
+    });
+    return cleanup;
+  }, [setShowWhisper, whisperSessionRef]);
+
+  useEffect(() => {
     const cleanup = window.electron.onOnboardingHotkeyPressed(() => {
       setOnboardingHotkeyPresses((prev) => prev + 1);
     });
@@ -2241,6 +2882,33 @@ const App: React.FC = () => {
   // Signal main process that the renderer is mounted and IPC listeners are
   // registered.  Main waits for this before dispatching the initial
   // window-shown / run-system-command messages so they are never lost.
+  useEffect(() => {
+    const legacySnapshot = collectLegacyExtensionPreferencesSnapshot();
+    if (
+      Object.keys(legacySnapshot.extensions).length === 0 &&
+      Object.keys(legacySnapshot.commands).length === 0
+    ) {
+      return;
+    }
+    void window.electron.mergeExtensionPreferencesSnapshot(legacySnapshot);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(AI_CHAT_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed) || parsed.length === 0) return;
+      void window.electron.mergeAiChatSnapshot({
+        version: 1,
+        conversations: parsed.map((conversation: any) => ({
+          ...conversation,
+          source: conversation?.source === 'raycast' ? 'raycast' : 'local',
+        })),
+      });
+    } catch {}
+  }, []);
+
   useEffect(() => {
     window.electron.rendererReady();
   }, []);
@@ -2285,8 +2953,6 @@ const App: React.FC = () => {
         await fetchCommands();
       } else if (!options?.background) {
         await window.electron.hideWindow();
-        setSearchQuery('');
-        setSelectedIndex(0);
       }
 
       if (!options?.background && !options?.skipRecent) {
@@ -2331,10 +2997,9 @@ const App: React.FC = () => {
           if (fields.length <= MAX_INLINE_QUICK_LINK_ARGUMENTS) {
             const openedInline = await window.electron.quickLinkOpen(quickLinkId, resolvedValuesFromInline);
             if (!openedInline) return false;
+            clearInlineQuickLinkDynamicValuesForId(quickLinkId);
             setQuickLinkDynamicPrompt(null);
             await updateRecentCommands(command.id);
-            setSearchQuery('');
-            setSelectedIndex(0);
             await window.electron.hideWindow();
             return true;
           }
@@ -2360,14 +3025,14 @@ const App: React.FC = () => {
       const opened = await window.electron.quickLinkOpen(quickLinkId, dynamicValues);
       if (!opened) return false;
 
+      clearInlineQuickLinkDynamicValuesForId(quickLinkId);
       setQuickLinkDynamicPrompt(null);
       await updateRecentCommands(command.id);
-      setSearchQuery('');
-      setSelectedIndex(0);
       await window.electron.hideWindow();
       return true;
     },
     [
+      clearInlineQuickLinkDynamicValuesForId,
       getDynamicFieldsForQuickLink,
       inlineQuickLinkDynamicValuesById,
       selectedQuickLinkId,
@@ -2427,13 +3092,54 @@ const App: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [cancelQuickLinkDynamicPrompt, quickLinkDynamicPrompt, submitQuickLinkDynamicPrompt]);
 
+  // Global nav-key rebinding — works in the main launcher AND inside
+  // extensions. Ctrl+<key> is translated into a synthetic arrow key event
+  // dispatched at the original target so whichever component handles arrow
+  // keys (list, grid, submenu, text input) picks it up naturally.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      const keyLower = event.key.toLowerCase();
+      const navMap: Record<string, 'ArrowDown' | 'ArrowUp' | 'ArrowLeft' | 'ArrowRight'> =
+        navigationStyle === 'vim'
+          ? { j: 'ArrowDown', k: 'ArrowUp', h: 'ArrowLeft', l: 'ArrowRight' }
+          : { n: 'ArrowDown', p: 'ArrowUp', b: 'ArrowLeft', f: 'ArrowRight' };
+      const mapped = navMap[keyLower];
+      if (!mapped) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const target =
+        (event.target as HTMLElement | null) ||
+        (document.activeElement as HTMLElement | null);
+      target?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: mapped, bubbles: true, cancelable: true })
+      );
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [navigationStyle]);
+
   const handleCommandExecute = async (command: CommandInfo) => {
+    // Drop a second Enter while the first command is still resolving — a
+    // fast double-press could otherwise re-fire the same command or a
+    // different one if selection moved during the IPC roundtrip.
+    if (executingCommandRef.current) return;
     try {
+      executingCommandRef.current = true;
+      // Browser-search synthetic action: open the resolved URL/search query
+      // in the default browser. Bypasses recent-commands tracking — the
+      // browser-search history module records the entry itself.
+      if (command.id === BROWSER_SEARCH_OPEN_URL_ID || command.id === BROWSER_SEARCH_PERFORM_SEARCH_ID) {
+        const subject = launcherInputValue.trim();
+        if (subject) {
+          await submitBrowserSearch(subject);
+        }
+        return;
+      }
+
       const filePath = getFileResultPathFromCommand(command);
       if (filePath) {
         await openFileResultByPath(filePath);
-        setSearchQuery('');
-        setSelectedIndex(0);
         return;
       }
 
@@ -2490,9 +3196,7 @@ const App: React.FC = () => {
             } else {
               upsertMenuBarExtension(hydratedWithInlineArguments);
             }
-            window.electron.hideWindow();
-            setSearchQuery('');
-            setSelectedIndex(0);
+            try { window.electron.hideWindow(); } catch {}
             await updateRecentCommands(command.id);
             return;
           }
@@ -2548,12 +3252,30 @@ const App: React.FC = () => {
         return;
       }
 
+      if (command.needsConfirmation) {
+        // Commands where the main process owns the confirmation dialog (native Electron dialog with icon).
+        if (
+          command.id === 'system-close-all-apps' ||
+          command.id === 'system-restart' ||
+          command.id === 'system-logout'
+        ) {
+          const confirmed = await window.electron.executeCommand(command.id);
+          if (!confirmed) return;
+          await updateRecentCommands(command.id);
+          try { window.electron.hideWindow(); } catch {}
+          return;
+        }
+        const ok = window.confirm(`Run "${command.title}"?`);
+        if (!ok) return;
+      }
+
       await window.electron.executeCommand(command.id);
       await updateRecentCommands(command.id);
-      setSearchQuery('');
-      setSelectedIndex(0);
+      try { window.electron.hideWindow(); } catch {}
     } catch (error) {
       console.error('Failed to execute command:', error);
+    } finally {
+      executingCommandRef.current = false;
     }
   };
   const handleCommandRowClick = useCallback(
@@ -2591,47 +3313,208 @@ const App: React.FC = () => {
     ]
   );
 
+  const toggleAutoQuitForApp = useCallback(async (appPath: string, appName: string) => {
+    const isEnabled = autoQuitAppPaths.has(appPath);
+    if (isEnabled) {
+      await window.electron.autoQuitRemoveApp(appPath);
+      setAutoQuitAppPaths((prev) => {
+        const next = new Set(prev);
+        next.delete(appPath);
+        return next;
+      });
+      showLauncherFooterStatus('success', `Auto Quit disabled for ${appName}`);
+      return;
+    }
+
+    const timeout = await window.electron.autoQuitGetDefaultTimeout();
+    await window.electron.autoQuitAddApp({ appPath, appName, timeoutSeconds: timeout });
+    setAutoQuitAppPaths((prev) => new Set(prev).add(appPath));
+    showLauncherFooterStatus('success', `Auto Quit enabled for ${appName}`);
+  }, [autoQuitAppPaths, showLauncherFooterStatus]);
+
   const getActionsForCommand = useCallback(
     (command: CommandInfo | null): LauncherAction[] => {
       if (!command) return [];
+
+      if (command.id === 'system-update-and-reopen') {
+        return [
+          {
+            id: 'update-and-reopen',
+            title: 'Update and Restart',
+            shortcut: 'Enter',
+            icon: <Download className="w-4 h-4" />,
+            execute: () => handleCommandExecute(command),
+          },
+          {
+            id: 'dismiss-update-banner',
+            title: 'Dismiss for 3 Days',
+            icon: <BellOff className="w-4 h-4" />,
+            execute: async () => {
+              await window.electron.dismissUpdateBanner();
+              await fetchCommands({ showLoading: false });
+            },
+          },
+        ] as LauncherAction[];
+      }
+
       const filePath = getFileResultPathFromCommand(command);
       if (filePath) {
+        const isPinnedFile = pinnedFiles.includes(filePath);
+        const isDirectory = Boolean(fileIsDirectoryMap[filePath]);
+        const pinActionTitle = isDirectory
+          ? (isPinnedFile ? 'Unpin Folder' : 'Pin Folder')
+          : (isPinnedFile ? 'Unpin File' : 'Pin File');
         return [
           {
             id: 'open-file',
             title: t('launcher.actions.openFile'),
             shortcut: 'Enter',
+            icon: <CornerDownLeft className="w-4 h-4" />,
             execute: () => openFileResultByPath(filePath),
           },
           {
             id: 'show-file-details',
             title: t('launcher.actions.showDetails'),
             shortcut: 'Cmd+D',
+            icon: <Info className="w-4 h-4" />,
             execute: () => showFileResultDetailsByPath(filePath),
           },
           {
             id: 'reveal-file',
             title: t('launcher.actions.revealInFinder'),
             shortcut: 'Cmd+Enter',
+            icon: <FolderOpen className="w-4 h-4" />,
             execute: () => revealFileResultByPath(filePath),
           },
           {
             id: 'copy-file-path',
             title: t('launcher.actions.copyPath'),
             shortcut: 'Cmd+Shift+C',
+            icon: <Copy className="w-4 h-4" />,
             execute: () => copyFileResultPath(filePath),
+          },
+          {
+            id: 'pin-file',
+            title: pinActionTitle,
+            shortcut: 'Cmd+Shift+P',
+            icon: <Pin className="w-4 h-4" />,
+            execute: () => pinToggleForFile(filePath),
+          },
+          ...(filePath.endsWith('.app') ? [{
+            id: 'toggle-auto-quit',
+            title: autoQuitAppPaths.has(filePath) ? t('launcher.actions.disableAutoQuit') : t('launcher.actions.enableAutoQuit'),
+            icon: <Timer className="w-4 h-4" />,
+            execute: () => toggleAutoQuitForApp(filePath, command.title),
+          }, {
+            id: 'quit-app',
+            title: t('launcher.actions.quit'),
+            shortcut: 'Ctrl+Shift+Q',
+            separatorBefore: true,
+            icon: <XCircle className="w-4 h-4" />,
+            execute: async () => {
+              const appName = filePath.split('/').pop()?.replace('.app', '') || '';
+              const ok = await window.electron.quitApp(filePath);
+              setShowActions(false);
+              window.electron.hideWindow();
+              window.electron.reportNoViewStatus(ok ? 'success' : 'error', ok ? t('launcher.actions.quitApp', { appName }) : t('launcher.actions.failedQuitting', { appName }));
+            },
+          }, {
+            id: 'force-quit-app',
+            title: t('launcher.actions.forceQuit'),
+            shortcut: 'Ctrl+Alt+Shift+Q',
+            icon: <XCircle className="w-4 h-4" />,
+            execute: async () => {
+              const appName = filePath.split('/').pop()?.replace('.app', '') || '';
+              const confirmed = window.confirm(t('launcher.actions.forceQuitConfirm', { appName }));
+              if (!confirmed) return;
+              const ok = await window.electron.quitApp(filePath, true);
+              setShowActions(false);
+              window.electron.hideWindow();
+              window.electron.reportNoViewStatus(ok ? 'success' : 'error', ok ? t('launcher.actions.forceQuitApp', { appName }) : t('launcher.actions.failedQuitting', { appName }));
+            },
+          }, {
+            id: 'uninstall-app',
+            title: t('launcher.actions.uninstallApplication'),
+            shortcut: 'Ctrl+X',
+            icon: <Trash2 className="w-4 h-4" />,
+            style: 'destructive' as const,
+            execute: () => openAppUninstall(filePath),
+          }] : []),
+        ];
+      }
+
+      const quickLinkId = getQuickLinkIdFromCommandId(command.id);
+      if (quickLinkId) {
+        return [
+          {
+            id: 'open-quick-link',
+            title: 'Open Quick Link',
+            shortcut: 'Enter',
+            icon: <ExternalLink className="w-4 h-4" />,
+            execute: () => handleCommandExecute(command),
+          },
+          {
+            id: 'create-quick-link',
+            title: 'Create Quick Link',
+            shortcut: 'Cmd+N',
+            icon: <Plus className="w-4 h-4" />,
+            execute: () => openQuickLinkManager('create'),
+          },
+          {
+            id: 'edit-quick-link',
+            title: 'Edit Quick Link',
+            shortcut: 'Cmd+E',
+            icon: <Pencil className="w-4 h-4" />,
+            execute: () => {
+              setQuickLinkEditId(quickLinkId);
+              openQuickLinkManager('search');
+            },
+          },
+          {
+            id: 'duplicate-quick-link',
+            title: 'Duplicate Quick Link',
+            shortcut: 'Cmd+D',
+            icon: <Files className="w-4 h-4" />,
+            execute: async () => {
+              await window.electron.quickLinkDuplicate(quickLinkId);
+              await fetchCommands({ showLoading: false });
+            },
+          },
+          {
+            id: 'delete-quick-link',
+            title: 'Delete Quick Link',
+            shortcut: 'Ctrl+X',
+            icon: <Trash2 className="w-4 h-4" />,
+            style: 'destructive' as const,
+            execute: async () => {
+              await window.electron.quickLinkDelete(quickLinkId);
+              setSearchQuery('');
+              setSelectedIndex(0);
+              await fetchCommands({ showLoading: false });
+            },
           },
         ];
       }
 
       const isPinned = pinnedCommands.includes(command.id);
       const pinnedIndex = pinnedCommands.indexOf(command.id);
-      return [
+      const hasDeeplink = Boolean(String(command.deeplink || '').trim());
+      const isApp = command.category === 'app' && Boolean(command.path?.endsWith('.app'));
+      return ([
         {
           id: 'open',
           title: t('launcher.actions.openCommand'),
           shortcut: 'Enter',
+          icon: <Play className="w-4 h-4" />,
           execute: () => handleCommandExecute(command),
+        },
+        {
+          id: 'copy-deeplink',
+          title: t('launcher.actions.copyDeeplink'),
+          shortcut: 'Cmd+Shift+L',
+          enabled: hasDeeplink,
+          icon: <Link className="w-4 h-4" />,
+          execute: () => copyCommandDeeplink(command),
         },
         {
           id: 'pin',
@@ -2641,27 +3524,78 @@ const App: React.FC = () => {
               ? t('launcher.actions.pinExtension')
               : t('launcher.actions.pinCommand'),
           shortcut: 'Cmd+Shift+P',
+          icon: <Pin className="w-4 h-4" />,
           execute: () => pinToggleForCommand(command),
+        },
+        ...(isApp ? [{
+          id: 'quit-app',
+          title: t('launcher.actions.quit'),
+          shortcut: 'Ctrl+Shift+Q',
+          separatorBefore: true,
+          icon: <XCircle className="w-4 h-4" />,
+          execute: async () => {
+            const ok = await window.electron.quitApp(command.path!);
+            setShowActions(false);
+            window.electron.hideWindow();
+            window.electron.reportNoViewStatus(ok ? 'success' : 'error', ok ? t('launcher.actions.quitApp', { appName: command.title }) : t('launcher.actions.failedQuitting', { appName: command.title }));
+          },
+        }] : []),
+        ...(isApp ? [{
+          id: 'force-quit-app',
+          title: t('launcher.actions.forceQuit'),
+          shortcut: 'Ctrl+Alt+Shift+Q',
+          icon: <XCircle className="w-4 h-4" />,
+          execute: async () => {
+            const confirmed = window.confirm(t('launcher.actions.forceQuitConfirm', { appName: command.title }));
+            if (!confirmed) return;
+            const ok = await window.electron.quitApp(command.path!, true);
+            setShowActions(false);
+            window.electron.hideWindow();
+            window.electron.reportNoViewStatus(ok ? 'success' : 'error', ok ? t('launcher.actions.forceQuitApp', { appName: command.title }) : t('launcher.actions.failedQuitting', { appName: command.title }));
+          },
+        }] : []),
+        {
+          id: 'toggle-auto-quit',
+          title: (command.path && autoQuitAppPaths.has(command.path)) ? t('launcher.actions.disableAutoQuit') : t('launcher.actions.enableAutoQuit'),
+          enabled: command.category === 'app' && Boolean(command.path?.endsWith('.app')),
+          icon: <Timer className="w-4 h-4" />,
+          execute: () => {
+            if (!command.path) return;
+            void toggleAutoQuitForApp(command.path, command.title);
+          },
         },
         {
           id: 'disable',
-          title: t('launcher.actions.disableCommand'),
+          title: command.category === 'app' ? t('launcher.actions.disableApplication') : t('launcher.actions.disableCommand'),
           shortcut: 'Cmd+Shift+D',
+          separatorBefore: true,
+          style: 'destructive' as const,
+          icon: <EyeOff className="w-4 h-4" />,
           execute: () => disableCommand(command),
         },
         {
           id: 'uninstall',
           title: 'Uninstall',
           shortcut: 'Cmd+Delete',
-          style: 'destructive',
+          style: 'destructive' as const,
           enabled: command.category === 'extension',
+          icon: <Trash2 className="w-4 h-4" />,
           execute: () => uninstallExtensionCommand(command),
         },
         {
-          id: 'move-up',
+          id: 'uninstall-app',
+          title: t('launcher.actions.uninstallApplication'),
+          shortcut: 'Ctrl+X',
+          style: 'destructive' as const,
+          enabled: command.category === 'app' && Boolean(command.path?.endsWith('.app')),
+          icon: <Trash2 className="w-4 h-4" />,
+          execute: () => { try { if (command.path) openAppUninstall(command.path); } catch(e) { console.error('openAppUninstall error:', e); } },
+        },
+        {
           title: t('launcher.actions.moveUp'),
           shortcut: 'Cmd+Alt+Up',
           enabled: isPinned && pinnedIndex > 0,
+          icon: <ArrowUp className="w-4 h-4" />,
           execute: () => movePinnedCommand(command, 'up'),
         },
         {
@@ -2669,12 +3603,16 @@ const App: React.FC = () => {
           title: t('launcher.actions.moveDown'),
           shortcut: 'Cmd+Alt+Down',
           enabled: isPinned && pinnedIndex >= 0 && pinnedIndex < pinnedCommands.length - 1,
+          icon: <ArrowDown className="w-4 h-4" />,
           execute: () => movePinnedCommand(command, 'down'),
         },
-      ].filter((action) => action.enabled !== false);
+      ] as LauncherAction[]).filter((action) => action.enabled !== false);
     },
     [
       pinnedCommands,
+      pinnedFiles,
+      fileIsDirectoryMap,
+      pinToggleForFile,
       handleCommandExecute,
       pinToggleForCommand,
       disableCommand,
@@ -2684,6 +3622,14 @@ const App: React.FC = () => {
       showFileResultDetailsByPath,
       revealFileResultByPath,
       copyFileResultPath,
+      copyCommandDeeplink,
+      fetchCommands,
+      openQuickLinkManager,
+      setQuickLinkEditId,
+      openAppUninstall,
+      showLauncherFooterStatus,
+      autoQuitAppPaths,
+      toggleAutoQuitForApp,
       t,
     ]
   );
@@ -2710,6 +3656,21 @@ const App: React.FC = () => {
   const handleActionsOverlayKeyDown = useCallback(
     async (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (actionsOverlayActions.length === 0) return;
+
+      // Match modifier shortcuts (Cmd+N, Ctrl+X, etc.) to actions
+      if (!e.repeat && (e.metaKey || e.ctrlKey || e.altKey)) {
+        for (const action of actionsOverlayActions) {
+          if (!action.shortcut || action.shortcut === 'Enter') continue;
+          if (matchesLauncherShortcut(e, action.shortcut)) {
+            e.preventDefault();
+            await Promise.resolve(action.execute());
+            setShowActions(false);
+            restoreLauncherFocus();
+            return;
+          }
+        }
+      }
+
       switch (e.key) {
         case 'ArrowDown':
           e.preventDefault();
@@ -2740,6 +3701,21 @@ const App: React.FC = () => {
   const handleContextMenuKeyDown = useCallback(
     async (e: React.KeyboardEvent<HTMLDivElement>) => {
       if (contextActions.length === 0) return;
+
+      // Match modifier shortcuts to actions
+      if (!e.repeat && (e.metaKey || e.ctrlKey || e.altKey)) {
+        for (const action of contextActions) {
+          if (!action.shortcut || action.shortcut === 'Enter') continue;
+          if (matchesLauncherShortcut(e, action.shortcut)) {
+            e.preventDefault();
+            await Promise.resolve(action.execute());
+            setContextMenu(null);
+            restoreLauncherFocus();
+            return;
+          }
+        }
+      }
+
       switch (e.key) {
         case 'ArrowDown':
           e.preventDefault();
@@ -2770,61 +3746,73 @@ const App: React.FC = () => {
   // ─── Hidden menu-bar extension runners (always mounted) ────────────
   // These run "invisibly" so that menu-bar extensions produce native Tray
   // menus via IPC even when the main window is hidden.
-  const menuBarRunner = menuBarExtensions.length > 0 ? (
-    <div style={{ display: 'none', position: 'absolute', width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }}>
-      {menuBarExtensions.map((entry) => (
-        <ExtensionView
-          key={`menubar-${entry.key}`}
-          code={entry.bundle.code}
-          title={entry.bundle.title}
-          mode="menu-bar"
-          extensionName={(entry.bundle as any).extensionName || entry.bundle.extName}
-          extensionDisplayName={(entry.bundle as any).extensionDisplayName}
-          extensionIconDataUrl={(entry.bundle as any).extensionIconDataUrl}
-          commandName={(entry.bundle as any).commandName || entry.bundle.cmdName}
-          assetsPath={(entry.bundle as any).assetsPath}
-          supportPath={(entry.bundle as any).supportPath}
-          owner={(entry.bundle as any).owner}
-          preferences={(entry.bundle as any).preferences}
-          preferenceDefinitions={(entry.bundle as any).preferenceDefinitions}
-          launchArguments={(entry.bundle as any).launchArguments}
-          launchContext={(entry.bundle as any).launchContext}
-          fallbackText={(entry.bundle as any).fallbackText}
-          launchType={(entry.bundle as any).launchType}
-          onClose={() => {}}
-        />
-      ))}
-    </div>
-  ) : null;
+  //
+  // Memoized so App.tsx re-renders (e.g. on every search-bar keystroke) do not
+  // reconcile the extension subtree. Some extensions have render-phase side
+  // effects (e.g. 1-click-confetti's Shoot() calls open() + exec() in its body);
+  // re-rendering on every keystroke would fire those effects repeatedly.
+  const menuBarRunner = useMemo(() => {
+    if (menuBarExtensions.length === 0) return null;
+    return (
+      <div style={{ display: 'none', position: 'absolute', width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }}>
+        {menuBarExtensions.map((entry) => (
+          <ExtensionView
+            key={`menubar-${entry.key}`}
+            code={entry.bundle.code}
+            title={entry.bundle.title}
+            mode="menu-bar"
+            extensionName={(entry.bundle as any).extensionName || entry.bundle.extName}
+            extensionDisplayName={(entry.bundle as any).extensionDisplayName}
+            extensionIconDataUrl={(entry.bundle as any).extensionIconDataUrl}
+            commandName={(entry.bundle as any).commandName || entry.bundle.cmdName}
+            assetsPath={(entry.bundle as any).assetsPath}
+            supportPath={(entry.bundle as any).supportPath}
+            owner={(entry.bundle as any).owner}
+            preferences={(entry.bundle as any).preferences}
+            preferenceDefinitions={(entry.bundle as any).preferenceDefinitions}
+            launchArguments={(entry.bundle as any).launchArguments}
+            launchContext={(entry.bundle as any).launchContext}
+            fallbackText={(entry.bundle as any).fallbackText}
+            launchType={(entry.bundle as any).launchType}
+            onClose={NOOP_ON_CLOSE}
+          />
+        ))}
+      </div>
+    );
+  }, [menuBarExtensions]);
 
-  const backgroundNoViewRunner = backgroundNoViewRuns.length > 0 ? (
-    <div style={{ display: 'none', position: 'absolute', width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }}>
-      {backgroundNoViewRuns.map((run) => (
-        <ExtensionView
-          key={`bg-no-view-${run.runId}`}
-          code={run.bundle.code}
-          title={run.bundle.title}
-          mode="no-view"
-          extensionName={(run.bundle as any).extensionName || run.bundle.extName}
-          extensionDisplayName={(run.bundle as any).extensionDisplayName}
-          extensionIconDataUrl={(run.bundle as any).extensionIconDataUrl}
-          commandName={(run.bundle as any).commandName || run.bundle.cmdName}
-          assetsPath={(run.bundle as any).assetsPath}
-          supportPath={(run.bundle as any).supportPath}
-          owner={(run.bundle as any).owner}
-          preferences={(run.bundle as any).preferences}
-          preferenceDefinitions={(run.bundle as any).preferenceDefinitions}
-          launchArguments={(run.bundle as any).launchArguments}
-          launchContext={(run.bundle as any).launchContext}
-          fallbackText={(run.bundle as any).fallbackText}
-          launchType={run.launchType}
-          onClose={() => {
-            setBackgroundNoViewRuns((prev) => prev.filter((item) => item.runId !== run.runId));
-          }}
-        />
-      ))}
-    </div>
-  ) : null;
+  const backgroundNoViewRunner = useMemo(() => {
+    if (backgroundNoViewRuns.length === 0) return null;
+    return (
+      <div style={{ display: 'none', position: 'absolute', width: 0, height: 0, overflow: 'hidden', pointerEvents: 'none' }}>
+        {backgroundNoViewRuns.map((run) => (
+          <ExtensionView
+            key={`bg-no-view-${run.runId}`}
+            code={run.bundle.code}
+            title={run.bundle.title}
+            mode="no-view"
+            extensionName={(run.bundle as any).extensionName || run.bundle.extName}
+            extensionDisplayName={(run.bundle as any).extensionDisplayName}
+            extensionIconDataUrl={(run.bundle as any).extensionIconDataUrl}
+            commandName={(run.bundle as any).commandName || run.bundle.cmdName}
+            assetsPath={(run.bundle as any).assetsPath}
+            supportPath={(run.bundle as any).supportPath}
+            owner={(run.bundle as any).owner}
+            preferences={(run.bundle as any).preferences}
+            preferenceDefinitions={(run.bundle as any).preferenceDefinitions}
+            launchArguments={(run.bundle as any).launchArguments}
+            launchContext={(run.bundle as any).launchContext}
+            fallbackText={(run.bundle as any).fallbackText}
+            launchType={run.launchType}
+            reportStatus={run.reportStatus}
+            onClose={() => {
+              setBackgroundNoViewRuns((prev) => prev.filter((item) => item.runId !== run.runId));
+            }}
+          />
+        ))}
+      </div>
+    );
+  }, [backgroundNoViewRuns, setBackgroundNoViewRuns]);
 
   const hiddenExtensionRunners = (
     <>
@@ -2838,6 +3826,7 @@ const App: React.FC = () => {
       {showWhisper && whisperPortalTarget ? (
         <SuperCmdWhisper
           portalTarget={whisperPortalTarget}
+          startToken={whisperStartToken}
           onboardingCaptureMode={showWhisperOnboarding}
           onOnboardingTranscriptAppend={appendWhisperOnboardingPracticeText}
           coachmarkText={
@@ -2845,6 +3834,7 @@ const App: React.FC = () => {
               ? t('whisper.coachmark.holdToTalk', { shortcut: whisperSpeakToggleLabel })
               : undefined
           }
+          autoClose={whisperAutoClose}
           onClose={() => {
             whisperSessionRef.current = false;
             setShowWhisper(false);
@@ -2986,8 +3976,6 @@ const App: React.FC = () => {
             upsertMenuBarExtension(updatedBundle);
           }
           window.electron.hideWindow();
-          setSearchQuery('');
-          setSelectedIndex(0);
           localStorage.removeItem(LAST_EXT_KEY);
         }}
         setExtensionPreferenceSetup={setExtensionPreferenceSetup}
@@ -3213,8 +4201,11 @@ const App: React.FC = () => {
         >
           <QuickLinkManager
             initialView={showQuickLinkManager}
+            commandAliases={commandAliases}
+            initialEditId={quickLinkEditId ?? undefined}
             onClose={() => {
               setShowQuickLinkManager(null);
+              setQuickLinkEditId(null);
               setSearchQuery('');
               setSelectedIndex(0);
               setTimeout(() => inputRef.current?.focus(), 50);
@@ -3226,6 +4217,8 @@ const App: React.FC = () => {
   }
 
   // ─── File Search mode ─────────────────────────────────────────────
+  // ─── App Uninstall view (rendered as overlay in default return, not early-return) ─────
+
   if (showFileSearch) {
     return (
       <>
@@ -3238,6 +4231,8 @@ const App: React.FC = () => {
         >
           <FileSearchExtension
             initialDetailPath={fileSearchInitialDetailPath}
+            pinnedFiles={pinnedFiles}
+            onTogglePinFile={pinToggleForFile}
             onClose={() => {
               setShowFileSearch(false);
               setFileSearchInitialDetailPath(null);
@@ -3258,13 +4253,43 @@ const App: React.FC = () => {
         alwaysMountedRunners={alwaysMountedRunners}
         aiQuery={aiQuery}
         setAiQuery={setAiQuery}
-        aiResponse={aiResponse}
+        messages={aiMessages}
         aiStreaming={aiStreaming}
         aiInputRef={aiInputRef as React.RefObject<HTMLInputElement>}
         aiResponseRef={aiResponseRef as React.RefObject<HTMLDivElement>}
-        submitAiQuery={submitAiQuery}
+        conversations={aiConversations}
+        activeConversationId={aiActiveConversationId}
+        sendMessage={aiSendMessage}
+        stopStreaming={aiStopStreaming}
+        newChat={aiNewChat}
+        selectConversation={aiSelectConversation}
+        deleteConversation={aiDeleteConversation}
         exitAiMode={exitAiMode}
       />
+    );
+  }
+
+  // ─── App Uninstall mode ────────────────────────────────────────
+  if (showAppUninstall) {
+    return (
+      <>
+        {alwaysMountedRunners}
+        <div className="w-full h-full">
+          <div className="glass-effect overflow-hidden h-full flex flex-col relative">
+            <AppUninstallView
+              appPath={showAppUninstall}
+              onClose={() => {
+                setShowAppUninstall(null);
+                setShowActions(false);
+                setContextMenu(null);
+                setSearchQuery('');
+                setSelectedIndex(0);
+                setTimeout(() => inputRef.current?.focus(), 50);
+              }}
+            />
+          </div>
+        </div>
+      </>
     );
   }
 
@@ -3325,8 +4350,32 @@ const App: React.FC = () => {
                 ref={inputRef}
                 type="text"
                 placeholder={aiMode ? t('launcher.aiMode.placeholder') : t('launcher.searchPlaceholder')}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                value={launcherInputValue}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  // If we had a suggestion and the resulting value equals the
+                  // already-typed prefix, the user just deleted the suggestion
+                  // suffix — keep searchQuery and remember to suppress autocomplete
+                  // until the input is cleared.
+                  if (
+                    browserSearchAutoComplete &&
+                    value === searchQuery &&
+                    value.length > 0
+                  ) {
+                    setBrowserSearchSkipAutoComplete(true);
+                    return;
+                  }
+                  setSearchQuery(value);
+                  if (launcherViewMode === 'compact') {
+                    if (isCompactCollapsed && value.length > 0) {
+                      setIsCompactCollapsed(false);
+                      window.electron.resizeLauncherWindow(true);
+                    } else if (!isCompactCollapsed && value.length === 0) {
+                      setIsCompactCollapsed(true);
+                      window.electron.resizeLauncherWindow(false);
+                    }
+                  }
+                }}
                 onBlur={handleLauncherSearchBlur}
                 onKeyDown={handleKeyDown}
                 className="launcher-search-input min-w-0 w-full bg-transparent border-none outline-none text-[var(--text-primary)] placeholder:text-[color:var(--text-muted)] placeholder:font-medium text-[0.9375rem] font-medium tracking-[0.005em]"
@@ -3456,10 +4505,32 @@ const App: React.FC = () => {
           </div>
         </div>
 
+        {/* Compact mode: Show More row */}
+        {launcherViewMode === 'compact' && isCompactCollapsed && (
+          <div
+            className="flex items-center justify-between px-4 py-2 cursor-pointer hover:bg-[var(--ui-segment-hover-bg)] transition-colors border-t border-[var(--ui-divider)]"
+            onClick={() => {
+              setIsCompactCollapsed(false);
+              window.electron.resizeLauncherWindow(true);
+            }}
+          >
+            <div className="flex items-center gap-2 text-[var(--text-muted)]">
+              <img src={supercmdLogo} alt="SuperCmd" className="w-4 h-4" />
+            </div>
+            <div className="flex items-center gap-1.5 text-[var(--text-muted)]">
+              <span className="text-xs font-medium">{t('launcher.compact.showMore')}</span>
+              <kbd className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded bg-[var(--kbd-bg)] text-[var(--text-subtle)]">
+                <ArrowDown className="w-3 h-3" />
+              </kbd>
+            </div>
+          </div>
+        )}
+
         {/* Command list */}
         <div
           ref={listRef}
           className="flex-1 overflow-y-auto custom-scrollbar p-1.5 list-area"
+          style={launcherViewMode === 'compact' && isCompactCollapsed ? { display: 'none' } : undefined}
         >
           {isLoading ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
@@ -3477,8 +4548,8 @@ const App: React.FC = () => {
                   ref={(el) => (itemRefs.current[0] = el)}
                   className={`mx-1 mt-0.5 mb-2 px-3 py-3 rounded-xl cursor-pointer transition-colors border ${
                     selectedIndex === 0
-                      ? 'bg-[var(--launcher-card-selected-bg)] border-[var(--launcher-card-selected-border)]'
-                      : 'bg-[var(--launcher-card-bg)] border-[var(--launcher-card-border)] hover:bg-[var(--launcher-card-hover-bg)]'
+                      ? 'bg-[color-mix(in_srgb,var(--launcher-card-selected-bg)_60%,transparent)] border-[color-mix(in_srgb,var(--launcher-card-selected-border)_60%,transparent)]'
+                      : 'bg-transparent border-[color-mix(in_srgb,var(--launcher-card-border)_50%,transparent)] hover:bg-[color-mix(in_srgb,var(--launcher-card-hover-bg)_50%,transparent)]'
                   }`}
                   onClick={() => {
                     navigator.clipboard.writeText(calcResult.result);
@@ -3513,7 +4584,7 @@ const App: React.FC = () => {
                             {calcResult.inputLabel}
                           </div>
                           <div
-                            className="mt-1 text-[1.15rem] leading-7 font-semibold text-[var(--text-primary)] text-center whitespace-normal break-words"
+                            className="mt-1 text-[1.15rem] leading-7 font-medium text-[var(--text-secondary)] text-center whitespace-normal break-words"
                             style={{
                               display: '-webkit-box',
                               WebkitLineClamp: 2,
@@ -3532,7 +4603,7 @@ const App: React.FC = () => {
                             {calcResult.resultLabel}
                           </div>
                           <div
-                            className="mt-1 text-[1.15rem] leading-7 font-semibold text-[var(--text-primary)] text-center whitespace-normal break-words"
+                            className="mt-1 text-[1.15rem] leading-7 font-medium text-[var(--text-secondary)] text-center whitespace-normal break-words"
                             style={{
                               display: '-webkit-box',
                               WebkitLineClamp: 2,
@@ -3549,36 +4620,43 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              {[
-                { title: t('launcher.sections.selectedText'), items: groupedCommands.contextual },
-                { title: t('launcher.sections.pinned'), items: groupedCommands.pinned },
-                { title: t('launcher.categories.recent'), items: groupedCommands.recent },
-                { title: t('common.other'), items: groupedCommands.other },
-                { title: t('launcher.categories.files'), items: groupedCommands.files },
-              ]
+              {(() => {
+                // Pull alwaysOnTop commands out first so they render above every section
+                const allTopItems = displayCommands.filter((c) => c.alwaysOnTop);
+                const topIds = new Set(allTopItems.map((c) => c.id));
+                const strip = (items: CommandInfo[]) => items.filter((c) => !topIds.has(c.id));
+                return [
+                  { title: '', items: allTopItems },
+                  { title: t('launcher.sections.selectedText'), items: strip(groupedCommands.contextual) },
+                  { title: t('launcher.sections.pinned'), items: strip(groupedCommands.pinned) },
+                  { title: t('launcher.categories.recent'), items: strip(groupedCommands.recent) },
+                  { title: t('launcher.sections.results'), items: strip(groupedCommands.other) },
+                  { title: t('launcher.categories.files'), items: strip(groupedCommands.files) },
+                ];
+              })()
                 .filter((section) => section.items.length > 0)
                 .map((section) => section)
                 .reduce(
                   (acc, section) => {
                     const startIndex = acc.index;
-                    acc.nodes.push(
-                      <div
-                        key={`section-${section.title}`}
-                        className="px-3 pt-2 pb-1 text-[0.6875rem] uppercase tracking-wider text-[var(--text-subtle)] font-medium"
-                      >
-                        {section.title}
-                      </div>
-                    );
+                    if (section.title) {
+                      acc.nodes.push(
+                        <div
+                          key={`section-${section.title}`}
+                          className="px-3 pt-2 pb-1 text-[0.6875rem] uppercase tracking-wider text-[var(--text-subtle)] font-medium"
+                        >
+                          {section.title}
+                        </div>
+                      );
+                    }
                     section.items.forEach((command, i) => {
                       const flatIndex = startIndex + i;
                       const accessoryLabel = getCommandAccessoryLabel(command);
                       const typeBadgeLabel = getCommandTypeBadgeLabel(command, t);
                       const fallbackCategory = getCategoryLabel(command.category, t);
                       const commandAlias = String(commandAliases[command.id] || '').trim();
-                      const aliasMatchesSearch =
-                        Boolean(commandAlias) &&
-                        Boolean(searchQuery.trim()) &&
-                        commandAlias.toLowerCase().includes(searchQuery.trim().toLowerCase());
+                      const commandHotkey = String(commandHotkeys[command.id] || '').trim();
+                      const hotkeyParts = commandHotkey ? getShortcutDisplayParts(commandHotkey) : [];
                       acc.nodes.push(
                         <div
                           key={command.id}
@@ -3618,10 +4696,19 @@ const App: React.FC = () => {
                                   {fallbackCategory}
                                 </div>
                               )}
-                              {aliasMatchesSearch ? (
+                              {commandAlias ? (
                                 <div className="inline-flex items-center h-5 rounded-md border border-[var(--launcher-chip-border)] bg-[var(--launcher-chip-bg)] px-1.5 text-[0.625rem] font-mono text-[var(--text-subtle)] leading-none flex-shrink-0">
                                   {commandAlias}
                                 </div>
+                              ) : null}
+                              {hotkeyParts.length > 0 ? (
+                                <span className="inline-flex items-center gap-0.5 flex-shrink-0">
+                                  {hotkeyParts.map((part, idx) => (
+                                    <kbd key={idx} className="inline-flex items-center justify-center min-w-[18px] h-[18px] rounded bg-[var(--kbd-bg)] px-1 text-[10px] font-medium text-[var(--text-muted)]">
+                                      {part}
+                                    </kbd>
+                                  ))}
+                                </span>
                               ) : null}
                             </div>
                             {typeBadgeLabel ? (
@@ -3649,23 +4736,32 @@ const App: React.FC = () => {
         </div>
         
         {/* Footer actions */}
-        {!isLoading && (
+        {!isLoading && !(launcherViewMode === 'compact' && isCompactCollapsed) && (
           <div
             className="sc-glass-footer sc-launcher-footer absolute bottom-0 left-0 right-0 z-10 flex items-center px-4 py-2.5"
           >
             <div
               className="sc-footer-primary flex items-center gap-2 text-xs flex-1 min-w-0 font-normal truncate text-[var(--text-subtle)]"
             >
-              {selectedCommand
-                ? (
-                  <>
-                    <span className="w-5 h-5 flex items-center justify-center flex-shrink-0 overflow-hidden">
-                      {renderCommandIcon(selectedCommand)}
-                    </span>
-                    <span className="truncate">{getCommandDisplayTitle(selectedCommand, t)}</span>
-                  </>
-                )
-                : t('launcher.status.results', { count: displayCommands.length })}
+              {launcherFooterStatus ? (
+                <>
+                  {launcherFooterStatus.type === 'success' ? (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400/90 shadow-[0_0_0_3px_rgba(52,211,153,0.18)] flex-shrink-0" />
+                  ) : (
+                    <span className="w-1.5 h-1.5 rounded-full bg-rose-400/90 shadow-[0_0_0_3px_rgba(244,114,182,0.18)] flex-shrink-0" />
+                  )}
+                  <span className="truncate text-[var(--text-secondary)]">{launcherFooterStatus.text}</span>
+                </>
+              ) : selectedCommand ? (
+                <>
+                  <span className="w-5 h-5 flex items-center justify-center flex-shrink-0 overflow-hidden">
+                    {renderCommandIcon(selectedCommand)}
+                  </span>
+                  <span className="truncate">{getCommandDisplayTitle(selectedCommand, t)}</span>
+                </>
+              ) : (
+                t('launcher.status.results', { count: displayCommands.length })
+              )}
             </div>
             {selectedActions[0] && (
               <div className="flex items-center gap-2 mr-3">
@@ -3827,8 +4923,11 @@ const App: React.FC = () => {
         >
           <div className="flex-1 overflow-y-auto py-1">
             {actionsOverlayActions.map((action, idx) => (
+              <React.Fragment key={action.id}>
+                {action.separatorBefore && (
+                  <div className="mx-2.5 my-1 border-t border-[var(--ui-divider)]" />
+                )}
               <div
-                key={action.id}
                 className={`mx-1 px-2.5 py-1.5 rounded-lg border border-transparent flex items-center gap-2.5 cursor-pointer transition-colors ${
                   idx === selectedActionIndex
                     ? action.style === 'destructive'
@@ -3854,13 +4953,32 @@ const App: React.FC = () => {
                 }}
                 onMouseMove={() => setSelectedActionIndex(idx)}
               >
+                {action.icon && (
+                  <span
+                    className={`shrink-0 ${
+                      action.style === 'destructive'
+                        ? 'text-[var(--status-danger-faded)]'
+                        : 'text-[var(--text-muted)]'
+                    }`}
+                  >
+                    {action.icon}
+                  </span>
+                )}
                 <span className="flex-1 text-sm truncate">{action.title}</span>
                 {action.shortcut && (
-                  <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[0.6875rem] font-medium text-[var(--text-muted)]">
-                    {renderShortcutLabel(action.shortcut)}
-                  </kbd>
+                  <span className="flex items-center gap-0.5">
+                    {getShortcutDisplayParts(action.shortcut).map((key, keyIdx) => (
+                      <kbd
+                        key={`${action.id}-${key}-${keyIdx}`}
+                        className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[11px] font-medium text-[var(--text-muted)]"
+                      >
+                        {key}
+                      </kbd>
+                    ))}
+                  </span>
                 )}
               </div>
+              </React.Fragment>
             ))}
           </div>
         </div>
@@ -3942,11 +5060,29 @@ const App: React.FC = () => {
                 }}
                 onMouseMove={() => setSelectedContextActionIndex(idx)}
               >
+                {action.icon && (
+                  <span
+                    className={`shrink-0 ${
+                      action.style === 'destructive'
+                        ? 'text-[var(--status-danger-faded)]'
+                        : 'text-[var(--text-muted)]'
+                    }`}
+                  >
+                    {action.icon}
+                  </span>
+                )}
                 <span className="flex-1 text-sm truncate">{action.title}</span>
                 {action.shortcut && (
-                  <kbd className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[0.6875rem] font-medium text-[var(--text-muted)]">
-                    {renderShortcutLabel(action.shortcut)}
-                  </kbd>
+                  <span className="flex items-center gap-0.5">
+                    {getShortcutDisplayParts(action.shortcut).map((key, keyIdx) => (
+                      <kbd
+                        key={`ctx-${action.id}-${key}-${keyIdx}`}
+                        className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-1.5 rounded bg-[var(--kbd-bg)] text-[11px] font-medium text-[var(--text-muted)]"
+                      >
+                        {key}
+                      </kbd>
+                    ))}
+                  </span>
                 )}
               </div>
             ))}

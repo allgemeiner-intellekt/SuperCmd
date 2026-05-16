@@ -5,6 +5,7 @@
     "noResults": "沒有結果",
     "search": "搜尋...",
     "save": "儲存",
+    "saving": "儲存中...",
     "cancel": "取消",
     "close": "關閉",
     "continue": "繼續",
@@ -107,7 +108,8 @@
         "fr": "Français",
         "de": "Deutsch",
         "es": "Español",
-        "ru": "俄語"
+        "ru": "俄語",
+        "it": "義大利語"
       },
       "fontSize": {
         "title": "字體大小",
@@ -168,6 +170,19 @@
         "title": "關於",
         "description": "版本資訊。",
         "version": "SuperCmd v{version}"
+      },
+      "launcherMode": {
+        "title": "啟動器模式",
+        "description": "選擇打開啟動器時的顯示方式。",
+        "expanded": "展開",
+        "compact": "緊湊"
+      },
+      "autoQuit": {
+        "title": "自動退出",
+        "timeout": "預設逾時",
+        "description": "啟用自動退出的應用程式將在此時間段不活動後退出",
+        "minute": "分鐘",
+        "minutes": "分鐘"
       }
     },
     "ai": {
@@ -235,6 +250,7 @@
           "anthropic": "Claude",
           "gemini": "Gemini",
           "ollama": "Ollama",
+          "lmStudio": "LM Studio",
           "openaiCompatible": "自訂 (OpenAI 相容)"
         },
         "ollama": {
@@ -255,13 +271,26 @@
           "downloadModel": "下載",
           "removeModel": "移除",
           "downloading": "正在下載...",
-          "removing": "正在移除..."
+          "removing": "正在移除...",
+          "startingDownload": "開始下載...",
+          "deleteFailed": "刪除模型失敗。",
+          "curatedDescriptions": {
+            "llama32": "Meta 通用模型（3B）",
+            "llama32_1b": "體積小，速度快",
+            "mistral": "高效通用模型",
+            "codellama": "程式碼生成與補全",
+            "phi3": "Microsoft 小型語言模型",
+            "gemma2": "Google 開源模型（9B）",
+            "qwen25": "Alibaba 多語言模型（7B）",
+            "deepseekR1": "側重推理能力的模型（7B）"
+          }
         },
         "openaiCompatible": {
           "baseUrl": {
             "label": "基礎 URL",
             "placeholder": "https://api.openrouter.ai/v1",
-            "hint": "如果您的提供者使用 /v1，請包含它（例如 https://api.openai.com/v1）"
+            "hint": "如果您的提供者使用 /v1，請包含它（例如 https://api.openai.com/v1）",
+            "appendV1": "自動在基礎 URL 後追加 /v1"
           },
           "apiKey": {
             "label": "API 金鑰",
@@ -276,6 +305,25 @@
         "defaultModel": {
           "label": "預設模型",
           "auto": "自動（提供者預設）"
+        },
+        "providerDescriptions": {
+          "openai": "GPT 系列模型",
+          "anthropic": "Anthropic Claude 模型",
+          "gemini": "Google Gemini 模型",
+          "ollama": "本地模型",
+          "openaiCompatible": "任何 OpenAI 相容 API（OpenRouter、Together 等）",
+          "lmStudio": "透過 LM Studio 使用本地模型"
+        },
+        "lmStudio": {
+          "baseUrl": {
+            "label": "伺服器網址",
+            "hint": "LM Studio 本地伺服器網址（預設：http://127.0.0.1:1234/v1）"
+          },
+          "apiKey": {
+            "toggle": "可選 API 金鑰",
+            "placeholder": "如不需要，請留空",
+            "hint": "僅當您在 LM Studio 中設定了驗證時才需要。"
+          }
         }
       },
       "whisper": {
@@ -358,6 +406,10 @@
             "downloading": "正在下載 SuperCmd Whisper",
             "notDownloaded": "模型尚未下載。現在下載後即可使用 SuperCmd Whisper 聽寫。"
           }
+        },
+        "autoClose": {
+          "title": "聽寫後自動關閉",
+          "description": "聽寫完成後自動關閉 Whisper 列。"
         }
       },
       "speak": {
@@ -405,7 +457,8 @@
             "premade": "額外預製語音",
             "custom": "您的自訂語音（複製/生成）",
             "professional": "專業語音複製",
-            "available": "您的 ElevenLabs 帳戶中有 {count} 個自訂語音可用"
+            "available": "您的 ElevenLabs 帳戶中有 {count} 個自訂語音可用",
+            "fetchFailed": "獲取語音失敗。"
           },
           "playSample": {
             "idle": "播放範例語音",
@@ -425,7 +478,24 @@
       "hotkeyUpdated": "快捷鍵已更新。",
       "hotkeyRemoved": "快捷鍵已移除。",
       "hotkeyDuplicate": "快捷鍵已被其他 SuperCmd 命令使用。",
-      "hotkeyUnavailable": "快捷鍵不可用。它可能已被 macOS 或其他應用程式占用。"
+      "hotkeyUnavailable": "快捷鍵不可用。它可能已被 macOS 或其他應用程式占用。",
+      "languages": {
+        "arabic": "阿拉伯語",
+        "chineseMandarin": "中文（普通話）",
+        "englishUs": "英語（美國）",
+        "englishUk": "英語（英國）",
+        "frenchCanada": "法語（加拿大）",
+        "frenchFrance": "法語（法國）",
+        "german": "德語",
+        "hindi": "印地語",
+        "italian": "義大利語",
+        "japanese": "日語",
+        "korean": "韓語",
+        "portugueseBrazil": "葡萄牙語（巴西）",
+        "russian": "俄語",
+        "spanishMexico": "西班牙語（墨西哥）",
+        "spanishSpain": "西班牙語（西班牙）"
+      }
     },
     "extensions": {
       "title": "擴充功能",
@@ -452,7 +522,10 @@
       "search": {
         "placeholder": "搜尋...",
         "all": "全部",
-        "commands": "命令"
+        "commands": "命令",
+        "statusAll": "全部",
+        "enabled": "已啟用",
+        "disabled": "已停用"
       },
       "install": {
         "button": "安裝擴充功能",
@@ -482,7 +555,10 @@
         "settings": "設定",
         "scripts": "指令碼",
         "extension": "擴充功能",
-        "application": "應用程式"
+        "application": "應用程式",
+        "command": "指令",
+        "menuBarCommand": "選單列指令",
+        "quickLink": "快速連結"
       },
       "alias": {
         "add": "新增別名",
@@ -490,13 +566,24 @@
         "edit": "編輯別名"
       },
       "hotkey": {
-        "record": "錄製快捷鍵"
+        "record": "錄製快捷鍵",
+        "duplicateWithCommand": "熱鍵已被「{name}」使用。"
       },
       "noResults": "沒有符合的擴充功能",
       "selectExtension": "選擇一個擴充功能",
       "extensionPreferences": "擴充功能偏好設定",
       "commandPreferences": "命令偏好設定",
       "noPreferences": "沒有偏好設定",
+      "clipboardBlacklist": {
+        "title": "忽略的應用程式",
+        "description": "當以下應用程式在最前景時，複製的內容不會儲存到 SuperCmd 的剪貼簿歷史。",
+        "add": "新增應用程式",
+        "remove": "移除",
+        "empty": "未封鎖任何應用程式。所有應用程式的複製都會儲存到剪貼簿歷史。",
+        "searchPlaceholder": "搜尋應用程式…",
+        "loading": "正在載入應用程式…",
+        "noApps": "找不到應用程式"
+      },
       "enabled": "已啟用",
       "logout": "登出",
       "loggedIn": "已登入 {name}",
@@ -519,15 +606,131 @@
         "opened": "已開啟包含範例指令碼的自訂指令碼資料夾。",
         "openedExisting": "已開啟自訂指令碼資料夾。",
         "failed": "開啟自訂指令碼資料夾失敗。"
+      },
+      "preferences": {
+        "selectOption": "選擇一個選項"
+      },
+      "emojiPicker": {
+        "enabled": "啟用表情符號選擇器",
+        "enabledDesc": "輸入觸發前綴後顯示表情符號建議。",
+        "triggerPrefix": "觸發前綴",
+        "triggerPrefixDesc": "開始表情符號搜尋的字元，例如 :fire。",
+        "triggerPrefixPlaceholder": "例如 :",
+        "excludedApps": {
+          "title": "排除的應用程式",
+          "description": "在這些應用程式中不會彈出表情符號選擇器。適用於自帶選擇器的應用程式（Slack、Telegram 等）。",
+          "add": "新增應用程式",
+          "remove": "移除",
+          "empty": "未排除任何應用程式。選擇器會在所有應用程式中觸發。",
+          "searchPlaceholder": "搜尋應用程式…",
+          "loading": "正在載入應用程式…",
+          "noApps": "找不到應用程式"
+        }
       }
     },
     "advanced": {
       "title": "進階",
       "loading": "正在載入進階設定...",
+      "settingsFolder": {
+        "title": "設定資料夾",
+        "description": "透過 iCloud 雲碟、Dropbox 或任何資料夾，在多台 Mac 之間同步設定和擴充功能。",
+        "defaultLabel": "預設位置",
+        "chooseButton": "選擇資料夾…",
+        "changeButton": "變更資料夾…",
+        "resetButton": "重設為預設",
+        "conflict": {
+          "title": "此資料夾中已有設定",
+          "body": "{folder} 中已經有一個 settings.json。您要使用哪個版本？",
+          "useExisting": "使用現有設定",
+          "useExistingHint": "用同步的副本取代此 Mac 上的設定。",
+          "replace": "取代為目前設定",
+          "replaceHint": "用此 Mac 上的設定覆寫同步的副本。",
+          "cancel": "取消"
+        },
+        "resetConfirm": {
+          "title": "將設定移回預設位置？",
+          "body": "您的設定將只儲存在此 Mac 上。所選資料夾中同步的副本不會被刪除。",
+          "confirm": "重設為預設",
+          "cancel": "取消"
+        },
+        "status": {
+          "moved": "設定資料夾已更新。",
+          "adopted": "已採用同步的設定。",
+          "reset": "設定已移回預設位置。",
+          "failed": "無法更新設定資料夾。"
+        }
+      },
+      "disableFileSearch": {
+        "title": "停用檔案與資料夾搜尋",
+        "description": "在主啟動器搜尋中隱藏檔案與資料夾結果。",
+        "label": "停用檔案與資料夾搜尋結果"
+      },
+      "navigationStyle": {
+        "title": "導覽樣式",
+        "description": "選擇在啟動器中向上、向下、向左與向右導覽的鍵盤快捷鍵。",
+        "option": {
+          "vim": "Vim 樣式 (^J, ^K, ^H, ^L)",
+          "macos": "macOS 樣式 (^N, ^P, ^B, ^F)"
+        }
+      },
+      "popToRootSearch": {
+        "title": "返回根搜尋",
+        "description": "重新開啟 SuperCmd 時,經過此延遲後返回根搜尋;否則先前開啟的擴充功能或檢視會保持開啟。",
+        "option": {
+          "immediately": "立即",
+          "5s": "5 秒後",
+          "15s": "15 秒後",
+          "30s": "30 秒後",
+          "60s": "60 秒後",
+          "90s": "90 秒後",
+          "120s": "120 秒後"
+        }
+      },
+      "clipboardRetention": {
+        "title": "剪貼簿歷史保留期限",
+        "description": "自動刪除超過所選時長的剪貼簿項目。已釘選的項目會一直保留。",
+        "option": {
+          "1day": "1 天",
+          "7days": "7 天",
+          "1month": "1 個月",
+          "3months": "3 個月",
+          "6months": "6 個月",
+          "1year": "1 年",
+          "never": "永不"
+        }
+      },
       "debugMode": {
         "title": "偵錯模式",
         "description": "當擴充功能載入或建置失敗時顯示詳細記錄。",
         "label": "啟用偵錯模式"
+      },
+      "browserSearch": {
+        "title": "瀏覽器搜尋",
+        "description": "輸入內容後按 Enter 即可在預設瀏覽器中開啟。內嵌自動補全會根據歷史紀錄建議網站。",
+        "enableLabel": "啟用瀏覽器搜尋",
+        "retention": {
+          "label": "歷史紀錄保留時間",
+          "option": {
+            "7d": "7 天",
+            "30d": "30 天",
+            "90d": "90 天",
+            "180d": "180 天",
+            "365d": "1 年",
+            "forever": "永久"
+          }
+        },
+        "clearButton": "清除瀏覽器搜尋歷史",
+        "importLabel": "從瀏覽器匯入歷史",
+        "import": {
+          "action": "匯入",
+          "running": "正在匯入…",
+          "noneFound": "未偵測到支援的瀏覽器"
+        },
+        "status": {
+          "cleared": "瀏覽器搜尋歷史已清除。",
+          "imported": "已匯入 {count} / {total} 筆。",
+          "failed": "操作失敗。"
+        }
       }
     }
   },
@@ -566,14 +769,19 @@
       "run": "執行",
       "copy": "複製",
       "copyPath": "複製路徑",
+      "copyDeeplink": "複製深層連結",
       "copyToClipboard": "複製到剪貼簿",
       "paste": "貼上",
       "showDetails": "顯示詳情",
       "showInFinder": "在 Finder 中顯示",
       "revealInFinder": "在 Finder 中顯示",
       "getInfo": "顯示簡介",
-      "quit": "結束",
-      "forceQuit": "強制結束",
+      "quit": "結束應用程式",
+      "forceQuit": "強制結束應用程式",
+      "quitApp": "結束{appName}",
+      "forceQuitApp": "強制結束{appName}",
+      "failedQuitting": "結束{appName}失敗",
+      "forceQuitConfirm": "強制結束「{appName}」？未儲存的更改將會遺失。",
       "hide": "隱藏",
       "show": "顯示",
       "preferences": "偏好設定",
@@ -584,7 +792,11 @@
       "unpinExtension": "取消固定擴充功能",
       "disableCommand": "停用命令",
       "moveUp": "上移",
-      "moveDown": "下移"
+      "moveDown": "下移",
+      "uninstallApplication": "解除安裝應用程式",
+      "enableAutoQuit": "啟用自動退出",
+      "disableAutoQuit": "停用自動退出",
+      "disableApplication": "停用應用程式"
     },
     "empty": {
       "noResults": "找不到結果",
@@ -598,7 +810,8 @@
     },
     "sections": {
       "selectedText": "已選文字",
-      "pinned": "已固定"
+      "pinned": "已固定",
+      "results": "結果"
     },
     "calculator": {
       "pressEnterToCopy": "按 Enter 複製",
@@ -611,6 +824,17 @@
       "script": "指令碼",
       "settings": "設定",
       "quickLink": "快速連結"
+    },
+    "compact": {
+      "showMore": "顯示更多"
+    },
+    "browserSearch": {
+      "openUrl": "開啟 {url}",
+      "searchFor": "搜尋「{query}」",
+      "subtitle": {
+        "openUrl": "預設瀏覽器",
+        "search": "網路搜尋"
+      }
     }
   },
   "scriptCommand": {
@@ -687,6 +911,10 @@
     },
     "actions": {
       "title": "操作"
+    },
+    "errorBoundary": {
+      "title": "加載擴充商店時出錯。",
+      "retry": "重試"
     }
   },
   "clipboard": {
@@ -718,11 +946,39 @@
     "create": "建立快速連結",
     "edit": "編輯快速連結",
     "delete": "刪除快速連結",
+    "confirmDelete": "再次點擊以確認",
     "searchPlaceholder": "搜尋快速連結...",
     "name": "名稱",
     "url": "網址",
+    "urlHint": "使用 {placeholder} 加入剪貼簿內容或自訂參數等動態值。",
+    "openWith": "開啟方式",
+    "defaultBrowser": "預設瀏覽器",
     "icon": "圖示",
-    "save": "儲存快速連結"
+    "save": "儲存快速連結",
+    "saved": "已儲存",
+    "saveFailed": "儲存快速連結失敗。",
+    "deleteFailed": "刪除快速連結失敗。",
+    "notFound": "找不到快速連結。",
+    "nameRequired": "請輸入名稱。",
+    "urlRequired": "請輸入網址。"
+  },
+  "appUninstall": {
+    "title": "解除安裝 {appName}",
+    "filesCount": "{count} 個檔案",
+    "uninstallButton": "解除安裝應用程式",
+    "scanning": "正在掃描相關檔案...",
+    "noRemnants": "未找到相關檔案",
+    "confirmMessage": "將 {count} 個檔案 ({size}) 移到垃圾桶？",
+    "filterPlaceholder": "依名稱篩選檔案和資料夾...",
+    "sortByPath": "依路徑排序",
+    "sortBySize": "依大小排序",
+    "markKeep": "標記保留檔案",
+    "markRemove": "標記移除檔案",
+    "actions": "動作",
+    "showInfo": "在 Finder 中顯示簡介",
+    "trashErrors": "部分檔案無法移至垃圾桶：\n{errors}",
+    "uninstallSuccess": "{appName} 已解除安裝",
+    "uninstallError": "解除安裝 {appName} 失敗"
   },
   "fileSearch": {
     "placeholder": "搜尋檔案...",
@@ -954,5 +1210,43 @@
     "duration": "持續時間",
     "reminder": "提醒",
     "save": "儲存事件"
+  },
+  "canvas": {
+    "searchPlaceholder": "搜尋畫布...",
+    "untitled": "未命名畫布",
+    "modified": "修改時間",
+    "count": "{count} 個畫布{plural}",
+    "time": {
+      "justNow": "剛剛"
+    },
+    "actions": {
+      "new": "新建畫布",
+      "open": "打開畫布",
+      "rename": "重新命名",
+      "duplicate": "複製",
+      "copyDeeplink": "複製深層連結",
+      "exportJson": "匯出為 JSON",
+      "pin": "置頂",
+      "unpin": "取消置頂",
+      "delete": "刪除畫布"
+    },
+    "empty": {
+      "title": "還沒有畫布",
+      "description": "建立你的第一個畫布開始使用",
+      "noSearchResults": "沒有找到畫布",
+      "shortcutHint": "或按 ⌘N"
+    },
+    "preview": {
+      "empty": "暫無預覽 — 儲存畫布以產生預覽",
+      "selectPrompt": "選擇一個畫布以預覽"
+    },
+    "rename": {
+      "title": "重新命名畫布",
+      "placeholder": "畫布名稱..."
+    },
+    "delete": {
+      "title": "刪除「{title}」？",
+      "description": "此操作無法撤銷。"
+    }
   }
 }

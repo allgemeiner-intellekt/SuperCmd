@@ -4,6 +4,7 @@
   },
   "common": {
     "save": "Speichern",
+    "saving": "Speichern...",
     "cancel": "Abbrechen",
     "close": "Schließen",
     "continue": "Weiter",
@@ -104,7 +105,8 @@
         "fr": "Français",
         "de": "Deutsch",
         "es": "Español",
-        "ru": "Russisch"
+        "ru": "Russisch",
+        "it": "Italienisch"
       },
       "theme": {
         "label": "Thema",
@@ -131,6 +133,13 @@
       "checkUpdates": {
         "label": "Automatisch nach Updates suchen",
         "description": "Prüfen, ob eine neue Version verfügbar ist"
+      },
+      "autoQuit": {
+        "title": "Auto-Beenden",
+        "timeout": "Standard-Timeout",
+        "description": "Apps mit aktiviertem Auto-Beenden werden nach dieser Inaktivitätsdauer geschlossen",
+        "minute": "Minute",
+        "minutes": "Minuten"
       }
     },
     "ai": {
@@ -203,6 +212,7 @@
           "anthropic": "Anthropic",
           "ollama": "Ollama (lokal)",
           "gemini": "Gemini",
+          "lmStudio": "LM Studio",
           "openaiCompatible": "Benutzerdefiniert (OpenAI-kompatibel)"
         },
         "model": {
@@ -260,7 +270,8 @@
           "baseUrl": {
             "label": "Basis-URL",
             "placeholder": "https://api.openrouter.ai/v1",
-            "hint": "Fuege /v1 hinzu, falls dein Anbieter es erwartet (z. B. https://api.openai.com/v1)."
+            "hint": "Fuege /v1 hinzu, falls dein Anbieter es erwartet (z. B. https://api.openai.com/v1).",
+            "appendV1": "/v1 automatisch an Basis-URL anhaengen"
           },
           "apiKey": {
             "label": "API-Schluessel",
@@ -275,6 +286,17 @@
         "defaultModel": {
           "label": "Standardmodell",
           "auto": "Automatisch (Provider-Standard)"
+        },
+        "lmStudio": {
+          "baseUrl": {
+            "label": "Server-URL",
+            "hint": "Lokale Server-URL von LM Studio (Standard: http://127.0.0.1:1234/v1)"
+          },
+          "apiKey": {
+            "toggle": "Optionaler API-Schlüssel",
+            "placeholder": "Leer lassen, wenn nicht benötigt",
+            "hint": "Nur erforderlich, wenn Sie in LM Studio eine Authentifizierung konfiguriert haben."
+          }
         }
       },
       "whisper": {
@@ -480,6 +502,16 @@
     },
     "extensions": {
       "title": "Erweiterungs-Einstellungen",
+      "clipboardBlacklist": {
+        "title": "Ignorierte Anwendungen",
+        "description": "Zwischenablage-Inhalte, die kopiert werden, während eine dieser Apps im Vordergrund ist, werden nicht in der Zwischenablage-Historie von SuperCmd gespeichert.",
+        "add": "Anwendung hinzufügen",
+        "remove": "Entfernen",
+        "empty": "Keine Anwendungen auf der Sperrliste. Kopien aus allen Apps werden im Verlauf gespeichert.",
+        "searchPlaceholder": "Anwendungen suchen…",
+        "loading": "Anwendungen werden geladen…",
+        "noApps": "Keine Anwendungen gefunden"
+      },
       "builtIn": {
         "superCmd": {
           "title": "SuperCmd",
@@ -539,10 +571,82 @@
         "confirm": "Sind Sie sicher, dass Sie diese Erweiterung deinstallieren möchten?",
         "description": "Diese Aktion kann nicht rückgängig gemacht werden.",
         "button": "Deinstallieren"
+      },
+      "emojiPicker": {
+        "enabled": "Emoji-Auswahl aktivieren",
+        "enabledDesc": "Zeigt Emoji-Vorschläge an, wenn ein Auslösezeichen eingegeben wird.",
+        "triggerPrefix": "Auslösezeichen",
+        "triggerPrefixDesc": "Zeichen, das die Emoji-Suche startet (z. B. :feuer).",
+        "triggerPrefixPlaceholder": "z. B. :",
+        "excludedApps": {
+          "title": "Ausgeschlossene Apps",
+          "description": "Die Emoji-Auswahl wird nicht angezeigt, wenn diese Apps aktiv sind. Nützlich für Apps mit eigener Auswahl (Slack, Telegram …).",
+          "add": "App hinzufügen",
+          "remove": "Entfernen",
+          "empty": "Keine Apps ausgeschlossen. Die Auswahl wird in jeder App ausgelöst.",
+          "searchPlaceholder": "Apps suchen…",
+          "loading": "Apps werden geladen…",
+          "noApps": "Keine Apps gefunden"
+        }
       }
     },
     "advanced": {
       "title": "Erweiterte Einstellungen",
+      "settingsFolder": {
+        "title": "Einstellungsordner",
+        "description": "Synchronisiere Einstellungen und Erweiterungen zwischen Macs über iCloud Drive, Dropbox oder einen beliebigen Ordner.",
+        "defaultLabel": "Standardspeicherort",
+        "chooseButton": "Ordner wählen…",
+        "changeButton": "Ordner ändern…",
+        "resetButton": "Auf Standard zurücksetzen",
+        "conflict": {
+          "title": "In diesem Ordner sind bereits Einstellungen vorhanden",
+          "body": "In {folder} gibt es bereits eine settings.json. Welche Version möchtest du verwenden?",
+          "useExisting": "Vorhandene Einstellungen verwenden",
+          "useExistingHint": "Einstellungen dieses Macs durch die synchronisierte Kopie ersetzen.",
+          "replace": "Mit aktuellen Einstellungen ersetzen",
+          "replaceHint": "Synchronisierte Kopie mit den Einstellungen dieses Macs überschreiben.",
+          "cancel": "Abbrechen"
+        },
+        "resetConfirm": {
+          "title": "Einstellungen an den Standardspeicherort verschieben?",
+          "body": "Deine Einstellungen werden nur auf diesem Mac gespeichert. Die synchronisierte Kopie im gewählten Ordner wird nicht gelöscht.",
+          "confirm": "Auf Standard zurücksetzen",
+          "cancel": "Abbrechen"
+        },
+        "status": {
+          "moved": "Einstellungsordner aktualisiert.",
+          "adopted": "Synchronisierte Einstellungen übernommen.",
+          "reset": "Einstellungen an den Standardspeicherort verschoben.",
+          "failed": "Einstellungsordner konnte nicht aktualisiert werden."
+        }
+      },
+      "disableFileSearch": {
+        "title": "Datei- und Ordnersuche deaktivieren",
+        "description": "Datei- und Ordnerergebnisse in der Hauptsuche des Launchers ausblenden.",
+        "label": "Suchergebnisse für Dateien und Ordner deaktivieren"
+      },
+      "navigationStyle": {
+        "title": "Navigationsstil",
+        "description": "Wählen Sie die Tastenkürzel für die Navigation nach oben, unten, links und rechts im Launcher.",
+        "option": {
+          "vim": "Vim-Stil (^J, ^K, ^H, ^L)",
+          "macos": "macOS-Stil (^N, ^P, ^B, ^F)"
+        }
+      },
+      "popToRootSearch": {
+        "title": "Zur Stammsuche zurückkehren",
+        "description": "Wenn Sie SuperCmd erneut öffnen, kehren Sie nach dieser Verzögerung zur Stammsuche zurück. Andernfalls bleibt die zuvor geöffnete Erweiterung oder Ansicht erhalten.",
+        "option": {
+          "immediately": "Sofort",
+          "5s": "Nach 5 Sekunden",
+          "15s": "Nach 15 Sekunden",
+          "30s": "Nach 30 Sekunden",
+          "60s": "Nach 60 Sekunden",
+          "90s": "Nach 90 Sekunden",
+          "120s": "Nach 120 Sekunden"
+        }
+      },
       "developerMode": {
         "label": "Entwicklermodus",
         "description": "Debug-Funktionen für die Erweiterungsentwicklung aktivieren"
@@ -574,6 +678,34 @@
         "label": "Einstellungen importieren",
         "description": "Einstellungen aus einer Datei importieren",
         "button": "Importieren"
+      },
+      "browserSearch": {
+        "title": "Browser-Suche",
+        "description": "Drücke Enter, um deine Eingabe im Standardbrowser zu öffnen. Die Inline-Autovervollständigung schlägt Seiten aus deinem Verlauf vor.",
+        "enableLabel": "Browser-Suche aktivieren",
+        "retention": {
+          "label": "Aufbewahrungsdauer",
+          "option": {
+            "7d": "7 Tage",
+            "30d": "30 Tage",
+            "90d": "90 Tage",
+            "180d": "180 Tage",
+            "365d": "1 Jahr",
+            "forever": "Für immer"
+          }
+        },
+        "clearButton": "Browser-Suchverlauf löschen",
+        "importLabel": "Verlauf aus einem Browser importieren",
+        "import": {
+          "action": "Importieren",
+          "running": "Wird importiert…",
+          "noneFound": "Keine unterstützten Browser gefunden"
+        },
+        "status": {
+          "cleared": "Browser-Suchverlauf gelöscht.",
+          "imported": "{count} von {total} Einträgen importiert.",
+          "failed": "Aktion fehlgeschlagen."
+        }
       }
     },
     "store": {
@@ -643,7 +775,17 @@
       "paste": "Einfügen",
       "delete": "Löschen",
       "preferences": "Einstellungen",
-      "quit": "Beenden"
+      "quit": "Anwendung beenden",
+      "forceQuit": "Anwendung erzwungen beenden",
+      "quitApp": "{appName} beenden",
+      "forceQuitApp": "{appName} beenden erzwingen",
+      "failedQuitting": "Beenden von {appName} fehlgeschlagen",
+      "forceQuitConfirm": "\"{appName}\" beenden erzwingen? Nicht gesicherte Änderungen gehen verloren.",
+      "uninstallApplication": "Anwendung deinstallieren",
+      "enableAutoQuit": "Auto-Beenden aktivieren",
+      "disableAutoQuit": "Auto-Beenden deaktivieren",
+      "disableApplication": "Anwendung deaktivieren",
+      "disableCommand": "Befehl deaktivieren"
     },
     "empty": {
       "title": "Keine Ergebnisse",
@@ -653,6 +795,14 @@
       "preferences": "Einstellungen",
       "refresh": "Aktualisieren",
       "help": "Hilfe"
+    },
+    "browserSearch": {
+      "openUrl": "{url} öffnen",
+      "searchFor": "„{query}“ suchen",
+      "subtitle": {
+        "openUrl": "Standardbrowser",
+        "search": "Websuche"
+      }
     }
   },
   "scriptCommand": {
@@ -730,14 +880,43 @@
     "title": "Schnelllinks",
     "empty": "Keine Schnelllinks",
     "add": "Link hinzufügen",
-    "edit": "Link bearbeiten",
-    "delete": "Link löschen",
+    "edit": "Schnelllink bearbeiten",
+    "delete": "Schnelllink löschen",
+    "confirmDelete": "Erneut klicken zum Bestätigen",
     "name": "Name",
     "url": "URL",
+    "urlHint": "Mit {placeholder} kannst du dynamische Werte wie Zwischenablage oder Argumente einfügen.",
+    "openWith": "Öffnen mit",
+    "defaultBrowser": "Standardbrowser",
     "icon": "Symbol",
     "openIn": "Öffnen in",
     "browser": "Browser",
-    "app": "App"
+    "app": "App",
+    "save": "Schnelllink speichern",
+    "saved": "Gespeichert",
+    "saveFailed": "Schnelllink konnte nicht gespeichert werden.",
+    "deleteFailed": "Schnelllink konnte nicht gelöscht werden.",
+    "notFound": "Schnelllink nicht gefunden.",
+    "nameRequired": "Name ist erforderlich.",
+    "urlRequired": "URL ist erforderlich."
+  },
+  "appUninstall": {
+    "title": "{appName} deinstallieren",
+    "filesCount": "{count} Dateien",
+    "uninstallButton": "Anwendung deinstallieren",
+    "scanning": "Nach zugehörigen Dateien suchen...",
+    "noRemnants": "Keine zugehörigen Dateien gefunden",
+    "confirmMessage": "{count} Dateien ({size}) in den Papierkorb verschieben?",
+    "filterPlaceholder": "Dateien und Ordner nach Name filtern...",
+    "sortByPath": "Nach Pfad sortieren",
+    "sortBySize": "Nach Größe sortieren",
+    "markKeep": "Datei behalten",
+    "markRemove": "Datei entfernen",
+    "actions": "Aktionen",
+    "showInfo": "Informationen im Finder anzeigen",
+    "trashErrors": "Einige Dateien konnten nicht in den Papierkorb verschoben werden:\n{errors}",
+    "uninstallSuccess": "{appName} wurde deinstalliert",
+    "uninstallError": "Deinstallation von {appName} fehlgeschlagen"
   },
   "fileSearch": {
     "placeholder": "Dateien suchen...",

@@ -82,6 +82,7 @@ export type UseLauncherCommandModelParams = {
   aiMode: boolean;
   rootSearchRanking: RootSearchRankingState;
   webSearchSuggestionsEnabled: boolean;
+  rootSearchAutocompleteEnabled: boolean;
 
   rootBangState: BangParseState;
   enabledSearchBangs: SearchBangDefinition[];
@@ -293,6 +294,7 @@ export function useLauncherCommandModel({
   aiMode,
   rootSearchRanking,
   webSearchSuggestionsEnabled,
+  rootSearchAutocompleteEnabled,
   rootBangState,
   enabledSearchBangs,
   effectiveSearchBangs,
@@ -690,6 +692,9 @@ export function useLauncherCommandModel({
 
   const rootSearchAutoComplete = useMemo(() => {
     if (!hasSearchQuery || aiMode || rootBangState.mode !== 'none') return null;
+    // Inline ghost-text autocomplete applies to all root results (commands,
+    // files, browser) and has its own independent toggle.
+    if (!rootSearchAutocompleteEnabled) return null;
     if (browserSearch.enabled && !browserSearch.alphaChromiumRootSearchEnabled) {
       const legacyCompletion = browserSearch.getCompletion(searchQuery, browserSearchResultGroups);
       if (legacyCompletion?.completion && legacyCompletion.completion !== searchQuery) {
@@ -707,12 +712,16 @@ export function useLauncherCommandModel({
     if (!completion.toLowerCase().startsWith(searchQuery.toLowerCase())) return null;
     const suffix = completion.slice(searchQuery.length);
     return { completion: `${searchQuery}${suffix}`, suffix };
-  }, [hasSearchQuery, aiMode, rootBangState, searchQuery, rootRankedCandidates, browserSearch, browserSearchResultGroups]);
+  }, [hasSearchQuery, aiMode, rootBangState, searchQuery, rootRankedCandidates, browserSearch, browserSearchResultGroups, rootSearchAutocompleteEnabled]);
 
   const launcherInputValue = searchQuery;
 
   const webSearchRootDirectCommand = useMemo<CommandInfo | null>(() => {
     if (aiMode) return null;
+    // Browser search master toggle gates the synthetic "Search 'X'" entry
+    // and its suggestions. An explicit bang is still allowed — the user
+    // typed "!g …" deliberately and expects it to run regardless.
+    if (!browserSearch.enabled && rootBangState.mode !== 'active') return null;
     if (rootBangState.mode === 'none' && rootResolvedBrowserInput?.type === 'url') return null;
     const subject = rootBangState.mode === 'active'
       ? rootBangState.query.trim()
@@ -754,6 +763,9 @@ export function useLauncherCommandModel({
 
   const webSearchRootSuggestionCommands = useMemo<CommandInfo[]>(() => {
     if (aiMode) return [];
+    // Mirror the direct-search gate: hide autocomplete suggestions when
+    // browser search is disabled (unless the user typed an explicit bang).
+    if (!browserSearch.enabled && rootBangState.mode !== 'active') return [];
     if (rootBangState.mode === 'none' && rootResolvedBrowserInput?.type === 'url') return [];
     const subject = rootBangState.mode === 'active'
       ? rootBangState.query.trim()

@@ -203,6 +203,7 @@
         "italian": "意大利语",
         "japanese": "日语",
         "korean": "韩语",
+        "polish": "波兰语",
         "portugueseBrazil": "葡萄牙语（巴西）",
         "russian": "俄语",
         "spanishMexico": "西班牙语（墨西哥）",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "语音输入快捷键",
           "startStop": "开始/停止说话",
-          "setToFn": "设为 Fn 键",
-          "fnHint": "使用「设为 Fn 键」恢复默认的按住说话快捷键。",
-          "fnHintBefore": "使用",
-          "fnHintAfter": "可恢复默认的按住说话快捷键。"
+          "custom": "自定义…",
+          "holdToTalkHint": "选择按住说话的按键。按住录音，松开输入。使用自定义录制任意组合键。"
         },
         "autoClose": {
           "title": "听写后自动关闭",
@@ -707,9 +706,9 @@
         "label": "启用调试模式"
       },
       "browserSearch": {
-        "title": "浏览器个人资料",
-        "description": "连接浏览器个人资料，让 SuperCmd 使用其本地历史记录并持续刷新。",
-        "enableLabel": "在 SuperCmd 中使用浏览器个人资料",
+        "title": "浏览器搜索",
+        "description": "在查询时按 Enter，即可在默认浏览器中打开。内联自动补全会根据你的历史记录推荐网站。",
+        "enableLabel": "启用浏览器搜索",
         "alphaToggle": {
           "label": "使用 Alpha 版 Chromium 根搜索",
           "description": "在根搜索中显示个人资料历史记录、书签和打开的标签页。浏览器扩展仍处于 Alpha 阶段时，仅建议为 Chromium 个人资料开启。"
@@ -780,6 +779,11 @@
           "devMode": "要立即连接浏览器，请打开浏览器的扩展程序页面，启用开发者模式，然后选择“加载已解压的扩展程序”，并选择 browser-extension 文件夹。",
           "temporary": "（这是扩展发布到商店之前的临时步骤。）"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "内联自动补全",
+        "description": "在搜索栏中随输入显示灰色的幽灵文本补全。适用于命令、文件和浏览器结果。",
+        "label": "显示内联自动补全"
       }
     }
   },

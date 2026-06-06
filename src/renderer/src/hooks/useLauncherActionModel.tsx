@@ -509,6 +509,16 @@ export function useLauncherActionModel(options: UseLauncherActionModelOptions): 
 
   const handleActionsOverlayKeyDown = useCallback(
     async (e: React.KeyboardEvent<HTMLDivElement>) => {
+      // Cmd+K toggles the actions overlay closed (the window-level handler that
+      // normally does this is torn down while the overlay is open), returning
+      // focus to the launcher so the selected item stays keyboard-navigable.
+      if (e.metaKey && (e.key === 'k' || e.key === 'K') && !e.repeat) {
+        e.preventDefault();
+        setShowActions(false);
+        restoreLauncherFocus();
+        return;
+      }
+
       if (actionsOverlayActions.length === 0) return;
 
       // Match modifier shortcuts (Cmd+N, Ctrl+X, etc.) to actions

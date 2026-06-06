@@ -92,9 +92,24 @@ function isSearchEngineHistoryCandidate(candidate: RootSearchCandidate): boolean
 
 export function isRootResultPromotionCandidate(candidate: RootSearchCandidate, query = ''): boolean {
   const focusedFilePathCandidate = isFocusedFilePathCandidate(candidate, query);
-  if (candidate.finalScore < (focusedFilePathCandidate ? 600 : ROOT_SEARCH_PROMOTION_SCORE)) return false;
+  const isCommandSubtype =
+    candidate.subtype === 'system-command' ||
+    candidate.subtype === 'extension-command' ||
+    candidate.subtype === 'script-command';
+  // Commands are a small curated set, so a fuzzy/subsequence command match is
+  // almost always intentional and should clear a lower bar than files/history
+  // (e.g. "snipt" -> "Search Snippets"). Without this, fuzzy command matches
+  // fell below the 700 floor and lost to the always-present web-search row.
+  const minPromotionScore = focusedFilePathCandidate ? 600 : isCommandSubtype ? 500 : ROOT_SEARCH_PROMOTION_SCORE;
+  if (candidate.finalScore < minPromotionScore) return false;
 
   if (candidate.subtype === 'nickname') return true;
+
+  if (isCommandSubtype) {
+    // Promote any real name/keyword match; only exclude hits that matched
+    // nothing but the description/subtitle.
+    return candidate.matchKind !== 'description';
+  }
 
   if (candidate.subtype === 'app' || candidate.subtype === 'quicklink') {
     return candidate.matchKind !== 'contains' && candidate.matchKind !== 'subsequence' && candidate.matchKind !== 'description';
@@ -141,12 +156,18 @@ function getCommandStableKey(command: CommandInfo): string {
 
 function assembleQueryResults(input: RootSearchSectionAssemblyInput): CommandInfo[] {
   if (!input.hasSearchQuery || input.rootBangMode !== 'none') return [];
+  // File and folder results live in their own "Files" section below the top
+  // Results, never interleaved with commands. A file matching the query as a
+  // leading prefix would otherwise outrank a command whose title matches only
+  // on a later word (e.g. "onboarding" vs "SuperCmd Onboarding").
+  const isFileResult = (candidate: RootSearchCandidate) => candidate.source === 'file';
   if (input.browserSearchSyntheticCommand) {
     const openUrlKey = getCommandStableKey(input.browserSearchSyntheticCommand);
     return [
       input.browserSearchSyntheticCommand,
       ...input.rootRankedCandidates
         .filter((candidate) => candidate.stableKey !== openUrlKey)
+        .filter((candidate) => !isFileResult(candidate))
         .filter((candidate) => isRootResultPromotionCandidate(candidate, input.searchQuery))
         .slice(0, ROOT_SEARCH_RESULTS_LIMIT - 1)
         .map((candidate) => candidate.command),
@@ -161,6 +182,7 @@ function assembleQueryResults(input: RootSearchSectionAssemblyInput): CommandInf
     resultKeys.add(candidate.stableKey);
   };
   input.rootRankedCandidates
+    .filter((candidate) => !isFileResult(candidate))
     .filter((candidate) => isRootResultPromotionCandidate(candidate, input.searchQuery))
     .slice(0, ROOT_SEARCH_RESULTS_LIMIT - (input.webSearchRootDirectCommand ? 1 : 0))
     .forEach(addResult);
@@ -187,8 +209,14 @@ export function assembleRootSearchSections(input: RootSearchSectionAssemblyInput
           .slice(0, MAX_LAUNCHER_FILE_RESULTS)
           .map((candidate) => candidate.command)
       : [];
+  // Web-search suggestions only fill the space below commands when there are no
+  // file matches. If files exist they take that slot instead — files rank above
+  // search suggestions and the suggestions section is hidden entirely.
   const querySearchSectionCommands =
-    input.hasSearchQuery && input.rootBangMode === 'none' && input.webSearchSuggestionsEnabled
+    input.hasSearchQuery &&
+    input.rootBangMode === 'none' &&
+    input.webSearchSuggestionsEnabled &&
+    queryFileSectionCommands.length === 0
       ? input.webSearchRootSuggestionCommands.slice(0, MAX_LAUNCHER_FILE_RESULTS)
       : [];
 
@@ -228,8 +256,8 @@ export function assembleRootSearchSections(input: RootSearchSectionAssemblyInput
     ? [
         ...queryResultCommands,
         ...queryBrowserSectionCommands,
-        ...querySearchSectionCommands,
         ...queryFileSectionCommands,
+        ...querySearchSectionCommands,
       ]
     : [];
   return {
@@ -242,8 +270,8 @@ export function assembleRootSearchSections(input: RootSearchSectionAssemblyInput
       ? [
           { title: input.t('launcher.sections.results'), items: queryResultCommands },
           { title: input.t('launcher.categories.browser'), items: queryBrowserSectionCommands },
-          { title: input.t('launcher.categories.search'), items: querySearchSectionCommands },
           { title: input.t('launcher.categories.files'), items: queryFileSectionCommands },
+          { title: input.t('launcher.categories.search'), items: querySearchSectionCommands },
         ].filter((section) => section.items.length > 0)
       : [],
   };

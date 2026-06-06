@@ -203,6 +203,7 @@
         "italian": "Italian",
         "japanese": "Japanese",
         "korean": "Korean",
+        "polish": "Polaco",
         "portugueseBrazil": "Portuguese (Brazil)",
         "russian": "Russian",
         "spanishMexico": "Spanish (Mexico)",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "Atajos de Whisper",
           "startStop": "Iniciar/detener dictado",
-          "setToFn": "Asignar a Fn",
-          "fnHint": "Usa Asignar a Fn para restaurar la tecla predeterminada de pulsar para hablar.",
-          "fnHintBefore": "Use",
-          "fnHintAfter": "to restore the default hold-to-talk key."
+          "custom": "Personalizado…",
+          "holdToTalkHint": "Seleccione una tecla push-to-talk. Mantenga para grabar, suelte para escribir. Use Personalizado para grabar cualquier combinacion."
         },
         "autoClose": {
           "title": "Auto-Close After Dictation",
@@ -707,9 +706,9 @@
         "label": "Enable debug mode"
       },
       "browserSearch": {
-        "title": "Perfiles de navegador",
-        "description": "Conecta perfiles de navegador para que SuperCmd use su historial local y lo mantenga actualizado.",
-        "enableLabel": "Usar perfiles de navegador en SuperCmd",
+        "title": "Búsqueda en navegador",
+        "description": "Pulsa Enter en una consulta para abrirla en tu navegador predeterminado. El autocompletado en línea sugiere sitios desde tu historial.",
+        "enableLabel": "Activar búsqueda en navegador",
         "alphaToggle": {
           "label": "Usar busqueda raiz alfa de Chromium",
           "description": "Muestra historial de perfiles, marcadores y pestanas abiertas en la busqueda raiz. Activalo solo para perfiles Chromium mientras la extension del navegador sigue en alfa."
@@ -780,6 +779,11 @@
           "devMode": "Para conectar un navegador ahora, abre la página de extensiones del navegador, activa el modo de desarrollador, elige Cargar descomprimida y selecciona la carpeta browser-extension.",
           "temporary": "(Esto es temporal hasta que la extensión se publique en la tienda.)"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "Autocompletado en línea",
+        "description": "Muestra el texto fantasma gris de autocompletado en la barra de búsqueda mientras escribes. Se aplica a comandos, archivos y resultados del navegador.",
+        "label": "Mostrar autocompletado en línea"
       }
     }
   },

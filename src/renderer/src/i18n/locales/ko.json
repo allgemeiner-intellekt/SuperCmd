@@ -203,6 +203,7 @@
         "italian": "이탈리아어",
         "japanese": "일본어",
         "korean": "한국어",
+        "polish": "폴란드어",
         "portugueseBrazil": "포르투갈어(브라질)",
         "russian": "러시아어",
         "spanishMexico": "스페인어(멕시코)",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "Whisper 단축키",
           "startStop": "말하기 시작/중지",
-          "setToFn": "Fn으로 설정",
-          "fnHint": "기본 길게 눌러 말하기 키로 되돌리려면 Fn으로 설정을 사용하세요.",
-          "fnHintBefore": "사용",
-          "fnHintAfter": "하여 기본 길게 눌러 말하기 키로 복원하세요."
+          "custom": "사용자 지정…",
+          "holdToTalkHint": "길게 눌러 말하기 키를 선택하세요. 눌러서 녹음, 놓아서 입력. 사용자 지정으로 원하는 조합을 녹음할 수 있습니다."
         },
         "autoClose": {
           "title": "받아쓰기 후 자동 닫기",
@@ -707,9 +706,9 @@
         "label": "디버그 모드 활성화"
       },
       "browserSearch": {
-        "title": "브라우저 프로필",
-        "description": "브라우저 프로필을 연결해 SuperCmd가 로컬 기록을 사용하고 계속 새로 고치게 합니다.",
-        "enableLabel": "SuperCmd에서 브라우저 프로필 사용",
+        "title": "브라우저 검색",
+        "description": "검색어에서 Enter를 누르면 기본 브라우저에서 열립니다. 인라인 자동완성이 방문 기록에서 사이트를 제안합니다.",
+        "enableLabel": "브라우저 검색 사용",
         "alphaToggle": {
           "label": "알파 Chromium 루트 검색 사용",
           "description": "프로필 기록, 북마크, 열린 탭을 루트 검색에 표시합니다. 브라우저 확장 프로그램이 아직 알파인 동안에는 Chromium 프로필에서만 켜세요."
@@ -780,6 +779,11 @@
           "devMode": "지금 브라우저를 연결하려면 브라우저 확장 프로그램 페이지를 열고 개발자 모드를 켠 다음 압축해제된 확장 프로그램 로드를 선택하고 browser-extension 폴더를 선택하세요.",
           "temporary": "(확장 프로그램이 스토어에 게시될 때까지 임시로 필요한 절차입니다.)"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "인라인 자동 완성",
+        "description": "입력하는 동안 검색창에 회색 고스트 텍스트 자동 완성을 표시합니다. 명령, 파일, 브라우저 결과에 적용됩니다.",
+        "label": "인라인 자동 완성 표시"
       }
     }
   },

@@ -43,6 +43,7 @@ const electronAPI = {
     value: string | null;
     raw: number | null;
     type: string;
+    iso: string | null;
     error: string | null;
   }> => ipcRenderer.invoke('calculator-evaluate', expression),
 
@@ -534,6 +535,12 @@ const electronAPI = {
   runAppleScript: (script: string, options?: { language?: string; humanReadableOutput?: boolean; timeout?: number }): Promise<string> =>
     ipcRenderer.invoke('run-applescript', script, options),
 
+  // Menu Item Search
+  getAppMenuItems: (): Promise<{ ok: boolean; items?: Array<{ path: string; title: string; fullPath: string; shortcut?: string | null; enabled: boolean }>; error?: string }> =>
+    ipcRenderer.invoke('get-app-menu-items'),
+  pressAppMenuItem: (path: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('press-app-menu-item', { path }),
+
   // Calendar
   ensureCalendarAccess: (options?: { prompt?: boolean }): Promise<any> =>
     ipcRenderer.invoke('calendar-ensure-access', options),
@@ -645,6 +652,8 @@ const electronAPI = {
     ipcRenderer.invoke('clipboard-paste-item', id),
   clipboardTogglePin: (id: string): Promise<any | null> =>
     ipcRenderer.invoke('clipboard-toggle-pin', id),
+  clipboardMovePinned: (id: string, direction: 'up' | 'down'): Promise<boolean> =>
+    ipcRenderer.invoke('clipboard-move-pinned', id, direction),
   clipboardSaveAsSnippet: (id: string): Promise<any | null> =>
     ipcRenderer.invoke('clipboard-save-as-snippet', id),
   clipboardSaveAsFile: (id: string): Promise<boolean> =>
@@ -1010,6 +1019,8 @@ const electronAPI = {
     ipcRenderer.invoke('parakeet-download-model'),
   parakeetWarmup: (): Promise<{ ready: boolean; error?: string }> =>
     ipcRenderer.invoke('parakeet-warmup'),
+  whisperCppWarmup: (): Promise<{ ready: boolean; error?: string }> =>
+    ipcRenderer.invoke('whispercpp-warmup'),
   qwen3ModelStatus: (): Promise<any> =>
     ipcRenderer.invoke('qwen3-model-status'),
   qwen3DownloadModel: (): Promise<any> =>
@@ -1018,6 +1029,20 @@ const electronAPI = {
     ipcRenderer.invoke('qwen3-warmup'),
   whisperDebugLog: (tag: string, message: string, data?: any): void =>
     ipcRenderer.send('whisper-debug-log', { tag, message, data }),
+  audioCapturerWarmup: (): Promise<{ ready: boolean; error?: string }> =>
+    ipcRenderer.invoke('audio-capturer-warmup'),
+  audioCapturerStart: (): Promise<{ recording: boolean; error?: string }> =>
+    ipcRenderer.invoke('audio-capturer-start'),
+  audioCapturerStop: (): Promise<{ file: string | null; duration: number; error?: string }> =>
+    ipcRenderer.invoke('audio-capturer-stop'),
+  audioCapturerSnapshot: (): Promise<{ file: string | null; duration: number; error?: string }> =>
+    ipcRenderer.invoke('audio-capturer-snapshot'),
+  audioCapturerMeter: (): Promise<{ average: number; peak: number }> =>
+    ipcRenderer.invoke('audio-capturer-meter'),
+  audioCapturerStatus: (): Promise<{ engineReady: boolean; recording: boolean; processAlive: boolean }> =>
+    ipcRenderer.invoke('audio-capturer-status'),
+  whisperTranscribeFile: (audioPath: string, options?: { language?: string }): Promise<string> =>
+    ipcRenderer.invoke('whisper-transcribe-file', audioPath, options),
   whisperTranscribe: (audioBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }): Promise<string> =>
     ipcRenderer.invoke('whisper-transcribe', audioBuffer, options),
   whisperEnsureMicrophoneAccess: (

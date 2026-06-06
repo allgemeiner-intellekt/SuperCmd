@@ -25,6 +25,7 @@ import CameraExtension from './CameraExtension';
 import ScheduleExtension from './ScheduleExtension';
 import OnboardingExtension from './OnboardingExtension';
 import FileSearchExtension from './FileSearchExtension';
+import MenuItemSearch from './MenuItemSearchExtension';
 import { useDetachedPortalWindow } from './useDetachedPortalWindow';
 import { useAppViewManager } from './hooks/useAppViewManager';
 import { useAiChat } from './hooks/useAiChat';
@@ -43,7 +44,7 @@ import { useLauncherLocalSystemCommands } from './hooks/useLauncherLocalSystemCo
 import { useLauncherCommandExecution } from './hooks/useLauncherCommandExecution';
 import { useLauncherWindowShownHandler } from './hooks/useLauncherWindowShownHandler';
 import { useLauncherKeyboardControls } from './hooks/useLauncherKeyboardControls';
-import { AI_CHAT_STORAGE_KEY, LAST_EXT_KEY, MAX_RECENT_COMMANDS } from './utils/constants';
+import { AI_CHAT_STORAGE_KEY, LAST_EXT_KEY, LAST_LAUNCHER_QUERY_KEY, MAX_LAUNCHER_QUERY_HISTORY, MAX_RECENT_COMMANDS } from './utils/constants';
 import { applyBaseColor } from './utils/base-color';
 import { resetAccessToken } from './raycast-api';
 import {
@@ -165,6 +166,7 @@ const App: React.FC = () => {
     DEFAULT_BROWSER_SEARCH_RESULT_GROUPS
   );
   const [webSearchSuggestionsEnabled, setWebSearchSuggestionsEnabled] = useState(true);
+  const [rootSearchAutocompleteEnabled, setRootSearchAutocompleteEnabled] = useState(true);
   const [rootSearchRanking, setRootSearchRanking] = useState<RootSearchRankingState>({});
   const rootSearchRankingRef = useRef<RootSearchRankingState>({});
   const [launcherFileResults, setLauncherFileResults] = useState<IndexedFileSearchResult[]>([]);
@@ -188,12 +190,12 @@ const App: React.FC = () => {
   const {
     extensionView, extensionPreferenceSetup, scriptCommandSetup, scriptCommandOutput,
     showClipboardManager, clipboardManagerOpenedViaShortcut, showSnippetManager, showNotesSearch, showCanvasSearch, showQuickLinkManager, showFileSearch, showCursorPrompt,
-    showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showAppUninstall, showWhisperOnboarding, showWhisperHint, showOnboarding, aiMode,
+    showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showMenuItemSearch, showAppUninstall, showWhisperOnboarding, showWhisperHint, showOnboarding, aiMode,
     openOnboarding, openWhisper, openClipboardManager,
-    openSnippetManager, openNotesSearch, openCanvasSearch, openQuickLinkManager, openFileSearch, openCursorPrompt, openSpeak, openCamera, openSchedule, openWindowManager, openAppUninstall,
+    openSnippetManager, openNotesSearch, openCanvasSearch, openQuickLinkManager, openFileSearch, openCursorPrompt, openSpeak, openCamera, openSchedule, openWindowManager, openMenuItemSearch, openAppUninstall,
     setExtensionView, setExtensionPreferenceSetup, setScriptCommandSetup, setScriptCommandOutput,
     setShowClipboardManager, setClipboardManagerOpenedViaShortcut, setShowSnippetManager, setShowNotesSearch, setShowCanvasSearch, setShowQuickLinkManager, setShowFileSearch, setShowCursorPrompt,
-    setShowWhisper, setShowSpeak, setShowCamera, setShowSchedule, setShowWindowManager, setShowAppUninstall, setShowWhisperOnboarding, setShowWhisperHint,
+    setShowWhisper, setShowSpeak, setShowCamera, setShowSchedule, setShowWindowManager, setShowMenuItemSearch, setShowAppUninstall, setShowWhisperOnboarding, setShowWhisperHint,
     setShowOnboarding, setAiMode,
   } = useAppViewManager();
   const {
@@ -437,6 +439,7 @@ const App: React.FC = () => {
     rootSearchQuery: deferredSearchQuery,
     aiMode,
     t,
+    browserSearchEnabled: browserSearch.enabled,
   });
 
   // Configurable timeout (ms) before the launcher resets to root search after
@@ -480,6 +483,7 @@ const App: React.FC = () => {
       setShowWindowManager(false);
     },
   });
+
 
   const showLauncherFooterStatus = useCallback((type: 'success' | 'error', text: string, durationMs = 3000) => {
     if (launcherFooterStatusTimerRef.current !== null) {
@@ -557,6 +561,7 @@ const App: React.FC = () => {
       setLauncherShortcut(settings.globalShortcut || 'Alt+Space');
       setBrowserSearchResultGroups(normalizeBrowserSearchResultGroups(settings.browserSearch?.resultGroups));
       setWebSearchSuggestionsEnabled(settings.browserSearch?.webSearchSuggestionsEnabled !== false);
+      setRootSearchAutocompleteEnabled(settings.rootSearchAutocompleteEnabled !== false);
       setRootSearchRanking(settings.rootSearchRanking || {});
       hydrateWebSearchSettings(settings);
       const speakToggleHotkey = settings.commandHotkeys?.['system-supercmd-whisper-speak-toggle'] ?? '';
@@ -816,6 +821,7 @@ const App: React.FC = () => {
       setLauncherShortcut(settings.globalShortcut || 'Alt+Space');
       setBrowserSearchResultGroups(normalizeBrowserSearchResultGroups(settings.browserSearch?.resultGroups));
       setWebSearchSuggestionsEnabled(settings.browserSearch?.webSearchSuggestionsEnabled !== false);
+      setRootSearchAutocompleteEnabled(settings.rootSearchAutocompleteEnabled !== false);
       setRootSearchRanking(settings.rootSearchRanking || {});
       hydrateWebSearchSettings(settings);
       setDisableFileSearchResults(Boolean(settings.disableFileSearchResults));
@@ -997,6 +1003,10 @@ const App: React.FC = () => {
         }
         if (result.mode === 'inline') {
           await fetchCommands();
+        } else {
+                    // Silent/default mode: hide the launcher window so focus returns to the user's active app.
+                    // Mirrors the behaviour of useLauncherCommandExecution (background:false path).
+                    void window.electron.hideWindow();
         }
       })();
     };
@@ -1222,10 +1232,10 @@ const App: React.FC = () => {
   }, [contextMenu]);
 
   useEffect(() => {
-    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !bookmarkNicknamePrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showNotesSearch && !showQuickLinkManager && !showFileSearch && !showCursorPrompt && !showWhisper && !showSpeak && !showCamera && !showSchedule && !showWindowManager && !showAppUninstall && !showOnboarding && browserResultsViewQuery === null && webSearchQuery === null) {
+    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !bookmarkNicknamePrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showNotesSearch && !showQuickLinkManager && !showFileSearch && !showMenuItemSearch && !showCursorPrompt && !showWhisper && !showSpeak && !showCamera && !showSchedule && !showWindowManager && !showAppUninstall && !showOnboarding && browserResultsViewQuery === null && webSearchQuery === null) {
       restoreLauncherFocus();
     }
-  }, [showActions, contextMenu, quickLinkDynamicPrompt, bookmarkNicknamePrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showCursorPrompt, showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showAppUninstall, showOnboarding, showWhisperOnboarding, browserResultsViewQuery, webSearchQuery, restoreLauncherFocus]);
+  }, [showActions, contextMenu, quickLinkDynamicPrompt, bookmarkNicknamePrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showMenuItemSearch, showCursorPrompt, showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showAppUninstall, showOnboarding, showWhisperOnboarding, browserResultsViewQuery, webSearchQuery, restoreLauncherFocus]);
 
   const isLauncherModeActive =
     !showActions &&
@@ -1248,6 +1258,7 @@ const App: React.FC = () => {
     !showCamera &&
     !showSchedule &&
     !showWindowManager &&
+    !showMenuItemSearch &&
     !showOnboarding &&
     !showWhisperOnboarding;
   isLauncherModeActiveRef.current = isLauncherModeActive;
@@ -1559,6 +1570,7 @@ const App: React.FC = () => {
     aiMode,
     rootSearchRanking,
     webSearchSuggestionsEnabled,
+    rootSearchAutocompleteEnabled,
     rootBangState,
     enabledSearchBangs,
     effectiveSearchBangs,
@@ -1789,6 +1801,7 @@ const App: React.FC = () => {
     openCamera,
     openSpeak,
     openWindowManager,
+    openMenuItemSearch,
     openSchedule,
     setShowWhisper,
     setShowWhisperOnboarding,
@@ -1972,6 +1985,28 @@ const App: React.FC = () => {
     const launchQuery = searchQuery;
     try {
       executingCommandRef.current = true;
+      // Maintain a launcher-command history (newest first, deduped, capped)
+      // so the user can cycle back through recent commands with the Up arrow
+      // on the empty launcher. We deliberately store command titles, not the
+      // raw search text — pressing Up should bring back "Slack", not "sl".
+      const recallTitle = String(getCommandDisplayTitle(command, t) || command.title || '').trim();
+      if (recallTitle) {
+        try {
+          const raw = localStorage.getItem(LAST_LAUNCHER_QUERY_KEY);
+          const parsed = raw ? JSON.parse(raw) : [];
+          const previous = Array.isArray(parsed)
+            ? parsed.filter((entry: unknown): entry is string => typeof entry === 'string' && entry.length > 0 && entry !== recallTitle)
+            : [];
+          const next = [recallTitle, ...previous].slice(0, MAX_LAUNCHER_QUERY_HISTORY);
+          localStorage.setItem(LAST_LAUNCHER_QUERY_KEY, JSON.stringify(next));
+        } catch {
+          // localStorage may hold a stale string value from earlier versions;
+          // overwrite it with a fresh single-entry array.
+          try {
+            localStorage.setItem(LAST_LAUNCHER_QUERY_KEY, JSON.stringify([recallTitle]));
+          } catch {}
+        }
+      }
       // Browser-search synthetic action: open the resolved URL/search query
       // in the default browser. Bypasses recent-commands tracking — the
       // browser-search history module records the entry itself.
@@ -2797,6 +2832,28 @@ const App: React.FC = () => {
           onClose={() => {
             setShowFileSearch(false);
             setFileSearchInitialDetailPath(null);
+            setSearchQuery('');
+            setSelectedIndex(0);
+            setTimeout(() => inputRef.current?.focus(), 50);
+          }}
+        />
+      </LauncherViewShell>
+    );
+  }
+
+  // ─── Menu Item Search mode ─────────────────────────────────────────
+  if (showMenuItemSearch) {
+    return (
+      <LauncherViewShell
+        alwaysMountedRunners={alwaysMountedRunners}
+        backgroundImageUrl={launcherBackgroundImageUrl}
+        showBackground={shouldUseBackgroundEverywhere}
+        backgroundBlurPercent={launcherBackgroundImageBlurPercent}
+        backgroundOpacityPercent={launcherBackgroundImageOpacityPercent}
+      >
+        <MenuItemSearch
+          onClose={() => {
+            setShowMenuItemSearch(false);
             setSearchQuery('');
             setSelectedIndex(0);
             setTimeout(() => inputRef.current?.focus(), 50);

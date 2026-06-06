@@ -203,6 +203,7 @@
         "italian": "義大利語",
         "japanese": "日語",
         "korean": "韓語",
+        "polish": "波蘭語",
         "portugueseBrazil": "葡萄牙語（巴西）",
         "russian": "俄語",
         "spanishMexico": "西班牙語（墨西哥）",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "語音輸入快捷鍵",
           "startStop": "開始/停止說話",
-          "setToFn": "設為 Fn 鍵",
-          "fnHint": "使用「設為 Fn 鍵」恢復預設的按住說話快捷鍵。",
-          "fnHintBefore": "使用",
-          "fnHintAfter": "可恢復預設的按住說話快捷鍵。"
+          "custom": "自訂…",
+          "holdToTalkHint": "選擇按住說話的按鍵。按住錄音，放開輸入。使用自訂錄製任意組合鍵。"
         },
         "autoClose": {
           "title": "聽寫後自動關閉",
@@ -707,9 +706,9 @@
         "label": "啟用偵錯模式"
       },
       "browserSearch": {
-        "title": "瀏覽器個人檔案",
-        "description": "連接瀏覽器個人檔案，讓 SuperCmd 使用其本機歷史並持續重新整理。",
-        "enableLabel": "在 SuperCmd 中使用瀏覽器個人檔案",
+        "title": "瀏覽器搜尋",
+        "description": "在查詢時按 Enter，會在預設瀏覽器中開啟。內嵌自動完成會根據你的歷史記錄建議網站。",
+        "enableLabel": "啟用瀏覽器搜尋",
         "alphaToggle": {
           "label": "使用 Alpha 版 Chromium 根搜尋",
           "description": "在根搜尋中顯示個人檔案歷史記錄、書籤和開啟的分頁。瀏覽器擴充功能仍處於 Alpha 階段時，僅建議為 Chromium 個人檔案開啟。"
@@ -780,6 +779,11 @@
           "devMode": "若要立即連接瀏覽器，請開啟瀏覽器的擴充功能頁面，啟用開發人員模式，然後選擇「載入未封裝項目」，並選取 browser-extension 資料夾。",
           "temporary": "（這是在擴充功能發佈到商店之前的臨時步驟。）"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "行內自動完成",
+        "description": "在搜尋列中隨輸入顯示灰色的虛影文字補全。適用於命令、檔案與瀏覽器結果。",
+        "label": "顯示行內自動完成"
       }
     }
   },

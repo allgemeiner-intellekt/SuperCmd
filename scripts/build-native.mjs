@@ -25,6 +25,8 @@ const swift = [
     '-framework AppKit -framework CoreGraphics -framework Foundation -framework Vision'],
   ['dist/native/snippet-expander', 'src/native/snippet-expander.swift',
     '-framework AppKit'],
+  ['dist/native/menu-item-search', 'src/native/menu-item-search.swift',
+    '-framework AppKit -framework ApplicationServices'],
   ['dist/native/emoji-trigger-monitor',
     'src/native/emoji-trigger-monitor.swift src/native/ax-caret-query.swift',
     '-framework AppKit -framework ApplicationServices'],
@@ -42,6 +44,8 @@ const swift = [
     '-framework EventKit'],
   ['dist/native/settings-coordinator', 'src/native/settings-coordinator.swift',
     '-framework Foundation'],
+  ['dist/native/audio-capturer', 'src/native/audio-capturer.swift',
+    '-framework AVFoundation -framework Foundation'],
 ];
 
 for (const [out, src, frameworks] of swift) {

@@ -73,6 +73,7 @@ import {
   setClipboardMonitorEnabled,
   setClipboardAppBlacklist,
   togglePinClipboardItem,
+  moveClipboardPinnedItem,
   pruneClipboardHistoryOlderThan,
 } from './clipboard-manager';
 import {
@@ -86,10 +87,12 @@ import {
   duplicateSnippet,
   togglePinSnippet,
   getSnippetByKeyword,
+  getSnippetById,
   copySnippetToClipboard,
   copySnippetToClipboardResolved,
   getSnippetDynamicFieldsById,
   renderSnippetById,
+  resolveSnippetPlaceholdersWithCursor,
   importSnippetsFromFile,
   exportSnippetsToFile,
 } from './snippet-store';
@@ -1117,6 +1120,138 @@ function ensureWhisperCppTranscriberBinary(): string {
   return binaryPath;
 }
 
+// Persistent serve-mode process for whisper.cpp (model stays loaded in memory)
+let whisperCppServerProcess: any = null;
+let whisperCppServerReady = false;
+let whisperCppServerStarting: Promise<void> | null = null;
+let whisperCppServerBuffer = '';
+type PendingWhisperCppRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
+let whisperCppPendingRequest: PendingWhisperCppRequest | null = null;
+
+function killWhisperCppServer(): void {
+  if (whisperCppServerProcess) {
+    try {
+      whisperCppServerProcess.stdin?.write('{"command":"exit"}\n');
+      whisperCppServerProcess.kill();
+    } catch {}
+    whisperCppServerProcess = null;
+  }
+  whisperCppServerReady = false;
+  whisperCppServerStarting = null;
+  whisperCppServerBuffer = '';
+  if (whisperCppPendingRequest) {
+    whisperCppPendingRequest.reject(new Error('Whisper.cpp server killed'));
+    whisperCppPendingRequest = null;
+  }
+}
+
+function ensureWhisperCppServer(): Promise<void> {
+  if (whisperCppServerReady && whisperCppServerProcess && !whisperCppServerProcess.killed) {
+    return Promise.resolve();
+  }
+  if (whisperCppServerStarting) return whisperCppServerStarting;
+
+  whisperCppServerStarting = (async () => {
+    killWhisperCppServer();
+    const binaryPath = ensureWhisperCppTranscriberBinary();
+    const modelStatus = getWhisperCppModelStatus();
+    if (modelStatus.state !== 'downloaded' || !modelStatus.path) {
+      throw new Error('Whisper.cpp model not available');
+    }
+
+    const { spawn } = require('child_process');
+    const child = spawn(binaryPath, ['serve', '--model', modelStatus.path], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    whisperCppServerProcess = child;
+
+    child.on('exit', (code: number | null) => {
+      console.log(`[Whisper][whisper.cpp] Server process exited with code ${code}`);
+      whisperCppServerReady = false;
+      whisperCppServerProcess = null;
+      whisperCppServerStarting = null;
+      if (whisperCppPendingRequest) {
+        whisperCppPendingRequest.reject(new Error(`Whisper.cpp server exited with code ${code}`));
+        whisperCppPendingRequest = null;
+      }
+    });
+
+    child.stdout.on('data', (chunk: Buffer | string) => {
+      whisperCppServerBuffer += chunk.toString();
+      const lines = whisperCppServerBuffer.split('\n');
+      whisperCppServerBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const json = JSON.parse(trimmed);
+          if (json.ready) {
+            whisperCppServerReady = true;
+            console.log('[Whisper][whisper.cpp] Server ready (model loaded)');
+            continue;
+          }
+          if (whisperCppPendingRequest) {
+            const req = whisperCppPendingRequest;
+            whisperCppPendingRequest = null;
+            if (json.error) {
+              req.reject(new Error(json.error));
+            } else {
+              req.resolve(json);
+            }
+          }
+        } catch {}
+      }
+    });
+
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      const text = chunk.toString().trim();
+      if (text) console.warn('[Whisper][whisper.cpp][server stderr]', text);
+    });
+
+    // Wait for "ready" signal
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Whisper.cpp server startup timed out (60s)'));
+        killWhisperCppServer();
+      }, 60_000);
+
+      const checkReady = setInterval(() => {
+        if (whisperCppServerReady) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          resolve();
+        }
+        if (!whisperCppServerProcess || whisperCppServerProcess.killed) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          reject(new Error('Whisper.cpp server process died during startup'));
+        }
+      }, 50);
+    });
+
+    whisperCppServerStarting = null;
+  })();
+
+  return whisperCppServerStarting;
+}
+
+function sendWhisperCppRequest(request: Record<string, any>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!whisperCppServerProcess || whisperCppServerProcess.killed || !whisperCppServerReady) {
+      reject(new Error('Whisper.cpp server not running'));
+      return;
+    }
+
+    if (whisperCppPendingRequest) {
+      whisperCppPendingRequest.reject(new Error('Whisper.cpp request superseded'));
+      whisperCppPendingRequest = null;
+    }
+
+    whisperCppPendingRequest = { resolve, reject };
+    whisperCppServerProcess.stdin.write(JSON.stringify(request) + '\n');
+  });
+}
+
 async function transcribeAudioWithWhisperCpp(opts: {
   audioBuffer: Buffer;
   language?: string;
@@ -1127,7 +1262,6 @@ async function transcribeAudioWithWhisperCpp(opts: {
     throw new Error(`SuperCmd Whisper transcription expects WAV audio, received ${mimeType}.`);
   }
 
-  const binaryPath = ensureWhisperCppTranscriberBinary();
   const status = getWhisperCppModelStatus();
   if (status.state === 'downloading') {
     throw new Error('The SuperCmd Whisper model is still downloading. Finish setup from onboarding or Settings -> AI -> SuperCmd Whisper.');
@@ -1135,7 +1269,10 @@ async function transcribeAudioWithWhisperCpp(opts: {
   if (status.state !== 'downloaded') {
     throw new Error('The SuperCmd Whisper model has not been downloaded yet. Download it from onboarding or Settings -> AI -> SuperCmd Whisper.');
   }
-  const modelPath = status.path;
+
+  // Ensure the persistent server is running (model loaded in memory)
+  await ensureWhisperCppServer();
+
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-whispercpp-'));
   const audioPath = path.join(tempDir, 'input.wav');
 
@@ -1143,43 +1280,13 @@ async function transcribeAudioWithWhisperCpp(opts: {
     fs.writeFileSync(audioPath, opts.audioBuffer);
 
     const language = normalizeWhisperLanguageCode(opts.language);
-    const { spawn } = require('child_process');
-
-    const result = await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-      const child = spawn(binaryPath, [
-        '--model', modelPath,
-        '--file', audioPath,
-        '--language', language,
-      ], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      let stdout = '';
-      let stderr = '';
-
-      child.stdout.on('data', (chunk: Buffer | string) => {
-        stdout += chunk.toString();
-      });
-      child.stderr.on('data', (chunk: Buffer | string) => {
-        stderr += chunk.toString();
-      });
-      child.on('error', (error: Error) => reject(error));
-      child.on('exit', (code: number | null) => {
-        if (code === 0) {
-          resolve({ stdout, stderr });
-          return;
-        }
-        reject(new Error(stderr.trim() || `SuperCmd Whisper exited with code ${code}`));
-      });
+    const result = await sendWhisperCppRequest({
+      command: 'transcribe',
+      file: audioPath,
+      language,
     });
 
-    const transcriptMarker = '__TRANSCRIPT__:';
-    const markerIndex = result.stdout.lastIndexOf(transcriptMarker);
-    if (markerIndex >= 0) {
-      return result.stdout.slice(markerIndex + transcriptMarker.length).trim();
-    }
-
-    return result.stdout.trim();
+    return result.text || '';
   } finally {
     try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
   }
@@ -1263,6 +1370,242 @@ let cachedElectronLiquidGlassApi: any | null | undefined = undefined;
 let hasLoggedLiquidGlassRuntimeIncompatibility = false;
 const liquidGlassAppliedWindowIds = new Set<number>();
 let windowManagerAccessRequested = false;
+
+// ─── Native Audio Capturer ────────────────────────────────────────────
+// Persistent native audio-capturer process that uses AVAudioEngine to
+// capture microphone audio without going through the renderer's
+// getUserMedia / Web Audio API path.  This eliminates 100–500 ms of
+// latency from browser audio subsystem negotiation.
+
+let audioCapturerProcess: any = null;
+let audioCapturerReady = false;
+let audioCapturerStarting: Promise<void> | null = null;
+let audioCapturerBuffer = '';
+let audioCapturerRecording = false;
+type PendingAudioCapturerRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
+let audioCapturerPendingRequest: PendingAudioCapturerRequest | null = null;
+
+type AudioCapturerMeter = { average: number; peak: number };
+let audioCapturerMeter: AudioCapturerMeter = { average: 0, peak: 0 };
+let audioCapturerMeterListeners: Array<(meter: AudioCapturerMeter) => void> = [];
+
+function getAudioCapturerBinaryPath(): string {
+  return getNativeBinaryPath('audio-capturer');
+}
+
+function killAudioCapturer(): void {
+  if (audioCapturerProcess) {
+    try {
+      audioCapturerProcess.stdin?.write('{"command":"exit"}\n');
+      audioCapturerProcess.kill();
+    } catch {}
+    audioCapturerProcess = null;
+  }
+  audioCapturerReady = false;
+  audioCapturerStarting = null;
+  audioCapturerBuffer = '';
+  audioCapturerRecording = false;
+  if (audioCapturerPendingRequest) {
+    audioCapturerPendingRequest.reject(new Error('Audio capturer killed'));
+    audioCapturerPendingRequest = null;
+  }
+}
+
+function ensureAudioCapturerBinary(): string {
+  const binaryPath = getAudioCapturerBinaryPath();
+  try {
+    if (fs.existsSync(binaryPath)) {
+      return binaryPath;
+    }
+  } catch {}
+
+  const sourcePath = findFirstExistingPath([
+    path.join(app.getAppPath(), 'src', 'native', 'audio-capturer.swift'),
+    path.join(process.cwd(), 'src', 'native', 'audio-capturer.swift'),
+    path.join(__dirname, '..', '..', 'src', 'native', 'audio-capturer.swift'),
+  ]);
+
+  if (!sourcePath) {
+    throw new Error('Audio capturer source is missing. Run npm run build:native to regenerate the binary.');
+  }
+
+  fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
+
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('swiftc', [
+      '-O',
+      '-o', binaryPath,
+      sourcePath,
+      '-framework', 'AVFoundation',
+      '-framework', 'Foundation',
+    ]);
+    console.log('[AudioCapturer] Compiled audio-capturer binary');
+  } catch (error) {
+    console.error('[AudioCapturer] Compile failed:', error);
+    throw new Error('Failed to compile audio capturer. Ensure Xcode Command Line Tools are installed.');
+  }
+
+  return binaryPath;
+}
+
+function sendAudioCapturerRequest(request: Record<string, any>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    if (!audioCapturerProcess || audioCapturerProcess.killed) {
+      reject(new Error('Audio capturer not running'));
+      return;
+    }
+
+    if (audioCapturerPendingRequest) {
+      audioCapturerPendingRequest.reject(new Error('Audio capturer request superseded'));
+      audioCapturerPendingRequest = null;
+    }
+
+    audioCapturerPendingRequest = { resolve, reject };
+    audioCapturerProcess.stdin.write(JSON.stringify(request) + '\n');
+  });
+}
+
+function warmAudioCapturer(): Promise<void> {
+  if (audioCapturerReady && audioCapturerProcess && !audioCapturerProcess.killed) {
+    return Promise.resolve();
+  }
+  if (audioCapturerStarting) return audioCapturerStarting;
+
+  audioCapturerStarting = (async () => {
+    killAudioCapturer();
+    const binaryPath = ensureAudioCapturerBinary();
+
+    const { spawn } = require('child_process');
+    const child = spawn(binaryPath, [], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    audioCapturerProcess = child;
+
+    child.on('exit', (code: number | null) => {
+      console.log(`[AudioCapturer] Process exited with code ${code}`);
+      audioCapturerReady = false;
+      audioCapturerProcess = null;
+      audioCapturerStarting = null;
+      audioCapturerRecording = false;
+      if (audioCapturerPendingRequest) {
+        audioCapturerPendingRequest.reject(new Error(`Audio capturer exited with code ${code}`));
+        audioCapturerPendingRequest = null;
+      }
+    });
+
+    child.stdout.on('data', (chunk: Buffer | string) => {
+      audioCapturerBuffer += chunk.toString();
+      const lines = audioCapturerBuffer.split('\n');
+      audioCapturerBuffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const json = JSON.parse(trimmed);
+
+          if (json.ready) {
+            audioCapturerReady = true;
+            console.log('[AudioCapturer] Engine ready (mic hot)');
+            continue;
+          }
+
+          if (json.recording) {
+            audioCapturerRecording = true;
+            console.log('[AudioCapturer] Recording started');
+          }
+
+          if (json.file !== undefined) {
+            audioCapturerRecording = false;
+          }
+
+          if (json.meter) {
+            audioCapturerMeter = {
+              average: Number(json.meter.average ?? 0),
+              peak: Number(json.meter.peak ?? 0),
+            };
+            for (const listener of audioCapturerMeterListeners) {
+              try { listener(audioCapturerMeter); } catch {}
+            }
+          }
+
+          if (audioCapturerPendingRequest) {
+            const req = audioCapturerPendingRequest;
+            audioCapturerPendingRequest = null;
+            if (json.error) {
+              req.reject(new Error(json.error));
+            } else {
+              req.resolve(json);
+            }
+          }
+        } catch {}
+      }
+    });
+
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      const text = chunk.toString().trim();
+      if (text) console.warn('[AudioCapturer][stderr]', text);
+    });
+
+    // Send warmup command to start the audio engine
+    child.stdin.write(JSON.stringify({ command: 'warmup' }) + '\n');
+
+    // Wait for "ready" signal
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Audio capturer warmup timed out (30s)'));
+        killAudioCapturer();
+      }, 30_000);
+
+      const checkReady = setInterval(() => {
+        if (audioCapturerReady) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          resolve();
+        }
+        if (!audioCapturerProcess || audioCapturerProcess.killed) {
+          clearInterval(checkReady);
+          clearTimeout(timeout);
+          reject(new Error('Audio capturer process died during warmup'));
+        }
+      }, 50);
+    });
+
+    audioCapturerStarting = null;
+  })();
+
+  return audioCapturerStarting;
+}
+
+async function startNativeAudioCapture(): Promise<void> {
+  await warmAudioCapturer();
+  const result = await sendAudioCapturerRequest({ command: 'start' });
+  if (!result.recording) {
+    throw new Error('Audio capturer failed to start recording');
+  }
+}
+
+async function stopNativeAudioCapture(): Promise<{ file: string; duration: number }> {
+  if (!audioCapturerProcess || !audioCapturerRecording) {
+    throw new Error('Audio capturer is not recording');
+  }
+  const result = await sendAudioCapturerRequest({ command: 'stop' });
+  if (!result.file) {
+    throw new Error('Audio capturer did not return a file path');
+  }
+  return { file: String(result.file), duration: Number(result.duration || 0) };
+}
+
+async function takeNativeAudioSnapshot(): Promise<{ file: string; duration: number }> {
+  if (!audioCapturerProcess || !audioCapturerRecording) {
+    throw new Error('Audio capturer is not recording');
+  }
+  const result = await sendAudioCapturerRequest({ command: 'snapshot' });
+  if (!result.file) {
+    throw new Error('Audio capturer did not return a snapshot file path');
+  }
+  return { file: String(result.file), duration: Number(result.duration || 0) };
+}
 
 // Tracks whether macOS Automation permission for "System Events" has been
 // granted.  Starts `false`; flipped to `true` after the first *successful*
@@ -2107,6 +2450,7 @@ let promptRendererReady = false;
 let pendingPromptWindowShown: { mode: string; selectedTextSnapshot: string } | null = null;
 let memoryStatusWindow: InstanceType<typeof BrowserWindow> | null = null;
 let memoryStatusHideTimer: NodeJS.Timeout | null = null;
+let memoryStatusFadeFinalizeTimer: NodeJS.Timeout | null = null;
 let memoryStatusRenderSeq = 0;
 let memoryStatusHideTimerSeq = 0;
 let confettiWindow: InstanceType<typeof BrowserWindow> | null = null;
@@ -2308,7 +2652,16 @@ function hideMemoryStatusBar(): void {
       win.webContents.executeJavaScript('window.__scFadeOut && window.__scFadeOut()').catch(() => {});
     }
   } catch {}
-  setTimeout(() => {
+  // Track the fade-out finalization timeout so a fresh showMemoryStatusBar
+  // arriving during the 200 ms fade can cancel it. Without this, the
+  // win.hide() below fires unconditionally and yanks the freshly-shown
+  // badge off-screen ~200 ms after the new show — making rapid
+  // processing → success transitions appear to flash for only a moment.
+  if (memoryStatusFadeFinalizeTimer) clearTimeout(memoryStatusFadeFinalizeTimer);
+  const finalizeSeq = memoryStatusRenderSeq;
+  memoryStatusFadeFinalizeTimer = setTimeout(() => {
+    memoryStatusFadeFinalizeTimer = null;
+    if (finalizeSeq !== memoryStatusRenderSeq) return;
     if (!win.isDestroyed()) {
       try { win.hide(); } catch {}
     }
@@ -2659,6 +3012,39 @@ function scheduleNextAppUpdaterAutoCheck(lastCheckedAtMs: number): void {
 }
 type FrontmostAppContext = { name: string; path: string; bundleId?: string };
 let lastFrontmostApp: FrontmostAppContext | null = null;
+
+/** Resolve a macOS .app bundle path to a PNG data URL of its icon, or null. */
+function resolveAppIconDataUrl(appPath: string, size = 32): string | null {
+  try {
+    if (!appPath) return null;
+    const plistPath = path.join(appPath, 'Contents', 'Info.plist');
+    if (!fs.existsSync(plistPath)) return null;
+    let iconFileName = '';
+    try {
+      iconFileName = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIconFile', plistPath], {
+        encoding: 'utf-8',
+        timeout: 3000,
+      }).trim();
+    } catch { return null; }
+    if (!iconFileName) return null;
+    if (!iconFileName.endsWith('.icns')) iconFileName += '.icns';
+    const icnsPath = path.join(appPath, 'Contents', 'Resources', iconFileName);
+    if (!fs.existsSync(icnsPath)) return null;
+    const os = require('os');
+    const tmpPng = path.join(os.tmpdir(), `sc-icon-${Date.now()}.png`);
+    try {
+      execFileSync('/usr/bin/sips', ['-s', 'format', 'png', '-z', String(size * 2), String(size * 2), icnsPath, '--out', tmpPng], {
+        timeout: 5000,
+      });
+      const pngBuf = fs.readFileSync(tmpPng);
+      return `data:image/png;base64,${pngBuf.toString('base64')}`;
+    } finally {
+      try { fs.unlinkSync(tmpPng); } catch {}
+    }
+  } catch {
+    return null;
+  }
+}
 let launcherEntryFrontmostApp: FrontmostAppContext | null = null;
 const registeredHotkeys = new Map<string, string>(); // shortcut → commandId
 const activeAIRequests = new Map<string, AbortController>(); // requestId → controller
@@ -2666,6 +3052,12 @@ const pendingOAuthCallbackUrls: string[] = [];
 let snippetExpanderProcess: any = null;
 let snippetExpanderStdoutBuffer = '';
 const snippetExpanderIntentionalKills = new WeakSet<object>();
+// Guards against a duplicate expansion for the same keyword arriving within a
+// few ms — e.g. when a lingering (killed-but-not-yet-dead) expander process and
+// its replacement both emit the same keystroke. Expansion is destructive
+// (backspaces + paste), so a double-fire corrupts the typed text.
+let lastSnippetExpansion: { keyword: string; delimiter: string; at: number } | null = null;
+const SNIPPET_EXPANSION_DEDUPE_MS = 250;
 
 // Serial queue for clipboard-based paste operations.
 // Both snippet expansion and pasteTextToActiveApp write to the clipboard temporarily.
@@ -2703,6 +3095,7 @@ let hyperKeyMonitorRestartTimer: NodeJS.Timeout | null = null;
 let hyperKeyMonitorEnabled = false;
 let fnSpeakToggleLastPressedAt = 0;
 let fnSpeakToggleIsPressed = false;
+let fnSpeakToggleCurrentShortcut = 'Fn';
 type LocalSpeakBackend = 'edge-tts' | 'system-say';
 let edgeTtsConstructorResolved = false;
 let edgeTtsConstructor: any | null = null;
@@ -2887,6 +3280,8 @@ const WINDOW_MANAGEMENT_PRESET_COMMAND_IDS = new Set<string>([
   'system-window-management-center',
   'system-window-management-center-80',
   'system-window-management-fill',
+  'system-window-management-maximize-width',
+  'system-window-management-maximize-height',
   'system-window-management-top-left',
   'system-window-management-top-right',
   'system-window-management-bottom-left',
@@ -2950,6 +3345,8 @@ const WINDOW_MANAGEMENT_LAYOUT_COMMAND_IDS = new Set<string>([
   'system-window-management-center',
   'system-window-management-center-80',
   'system-window-management-fill',
+  'system-window-management-maximize-width',
+  'system-window-management-maximize-height',
   'system-window-management-top-left',
   'system-window-management-top-right',
   'system-window-management-bottom-left',
@@ -3458,7 +3855,8 @@ function sortNodeWindowsForLayout(windows: NodeWindowInfo[]): NodeWindowInfo[] {
 
 function computeWindowManagementLayoutBounds(
   commandId: string,
-  area: { x: number; y: number; width: number; height: number }
+  area: { x: number; y: number; width: number; height: number },
+  windowBounds?: NodeWindowBounds | null
 ): NodeWindowBounds | null {
   const normalized = String(commandId || '').trim();
   const halfWidthLeft = Math.max(1, Math.floor(area.width / 2));
@@ -3514,6 +3912,36 @@ function computeWindowManagementLayoutBounds(
         width: area.width,
         height: area.height,
       };
+    case 'system-window-management-maximize-width': {
+      // Span the full work-area width, keep the current vertical position/height.
+      if (!windowBounds) return null;
+      const height = clampWindowManagementFineTuneValue(
+        Math.round(windowBounds.height),
+        WINDOW_MANAGEMENT_FINE_TUNE_MIN_HEIGHT,
+        area.height
+      );
+      const y = clampWindowManagementFineTuneValue(
+        Math.round(windowBounds.y),
+        area.y,
+        areaBottom - height
+      );
+      return { x: area.x, y, width: area.width, height };
+    }
+    case 'system-window-management-maximize-height': {
+      // Span the full work-area height, keep the current horizontal position/width.
+      if (!windowBounds) return null;
+      const width = clampWindowManagementFineTuneValue(
+        Math.round(windowBounds.width),
+        WINDOW_MANAGEMENT_FINE_TUNE_MIN_WIDTH,
+        area.width
+      );
+      const x = clampWindowManagementFineTuneValue(
+        Math.round(windowBounds.x),
+        area.x,
+        areaRight - width
+      );
+      return { x, y: area.y, width, height: area.height };
+    }
     case 'system-window-management-center': {
       const width = clampWindowManagementFineTuneValue(
         Math.round(area.width * 0.6),
@@ -3938,7 +4366,7 @@ async function executeWindowManagementLayoutCommand(
       return await queueWindowMutations(entries);
     }
 
-    const next = computeWindowManagementLayoutBounds(normalized, area);
+    const next = computeWindowManagementLayoutBounds(normalized, area, target.bounds);
     if (!next) return false;
     return await queueWindowMutations([
       {
@@ -5959,7 +6387,7 @@ function normalizeAccelerator(shortcut: string): string {
       else normalizedModifiers.control = true;
       continue;
     }
-    if (token === 'cmd' || token === 'command' || token === 'meta' || token === 'super') {
+    if (token === 'cmd' || token === 'command' || token === 'meta' || token === 'super' || token === 'leftcmd' || token === 'leftcommand' || token === 'leftmeta' || token === 'rightcmd' || token === 'rightcommand' || token === 'rightmeta') {
       normalizedModifiers.command = true;
       continue;
     }
@@ -5967,7 +6395,7 @@ function normalizeAccelerator(shortcut: string): string {
       normalizedModifiers.control = true;
       continue;
     }
-    if (token === 'alt' || token === 'option') {
+    if (token === 'alt' || token === 'option' || token === 'leftalt' || token === 'leftoption' || token === 'rightalt' || token === 'rightoption') {
       normalizedModifiers.alt = true;
       continue;
     }
@@ -6065,6 +6493,29 @@ function isFnShortcut(shortcut: string): boolean {
   return Boolean(config?.fn);
 }
 
+// Standalone modifier keys that need a native CGEventTap watcher
+// instead of Electron's globalShortcut (which ignores bare modifiers).
+const STANDALONE_MODIFIER_KEYCODES: Record<string, number> = {
+  alt: 58, option: 58,                     // Left Option
+  leftoption: 58, leftalt: 58,             // Left Option (explicit)
+  rightoption: 61, rightalt: 61,           // Right Option
+  command: 55, cmd: 55, meta: 55,           // Left Command
+  leftcommand: 55, leftcmd: 55, leftmeta: 55, // Left Command (explicit)
+  rightcommand: 54, rightcmd: 54, rightmeta: 54, // Right Command
+  control: 59, ctrl: 59,                   // Left Control
+  shift: 56,                                // Left Shift
+};
+
+function isStandaloneModifierShortcut(shortcut: string): boolean {
+  const normalized = normalizeAccelerator(shortcut).trim().toLowerCase();
+  return normalized in STANDALONE_MODIFIER_KEYCODES;
+}
+
+function needsNativeHoldWatcher(shortcut: string): boolean {
+  if (!shortcut) return false;
+  return isFnOnlyShortcut(shortcut) || isFnShortcut(shortcut) || isStandaloneModifierShortcut(shortcut);
+}
+
 function parseHoldShortcutConfig(shortcut: string): {
   keyCode: number;
   cmd: boolean;
@@ -6093,16 +6544,32 @@ function parseHoldShortcutConfig(shortcut: string): {
     home: 115, end: 119, pageup: 116, pagedown: 121,
     f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100,
     f9: 101, f10: 109, f11: 103, f12: 111,
+    // Standalone modifier keys for CGEventTap monitoring
+    alt: 58, option: 58,
+    leftoption: 58, leftalt: 58,
+    rightoption: 61, rightalt: 61,
+    command: 55, cmd: 55, meta: 55,
+    leftcommand: 55, leftcmd: 55, leftmeta: 55,
+    rightcommand: 54, rightcmd: 54, rightmeta: 54,
+    control: 59, ctrl: 59,
+    shift: 56,
   };
   const keyCode = map[keyToken];
   if (!Number.isFinite(keyCode)) return null;
   const fnAsModifier = mods.has('fn') || mods.has('function');
+  // When the key token itself is a standalone modifier, set the corresponding
+  // flag so the Swift monitor checks that the modifier flag is active when
+  // the physical key is pressed (same pattern as the Fn key).
+  const isStandaloneAlt = keyToken === 'alt' || keyToken === 'option' || keyToken === 'leftoption' || keyToken === 'leftalt' || keyToken === 'rightoption' || keyToken === 'rightalt';
+  const isStandaloneCmd = keyToken === 'command' || keyToken === 'cmd' || keyToken === 'meta' || keyToken === 'leftcommand' || keyToken === 'leftcmd' || keyToken === 'leftmeta' || keyToken === 'rightcommand' || keyToken === 'rightcmd' || keyToken === 'rightmeta';
+  const isStandaloneCtrl = keyToken === 'control' || keyToken === 'ctrl';
+  const isStandaloneShift = keyToken === 'shift';
   return {
     keyCode,
-    cmd: mods.has('command') || mods.has('cmd') || mods.has('meta'),
-    ctrl: mods.has('control') || mods.has('ctrl'),
-    alt: mods.has('alt') || mods.has('option'),
-    shift: mods.has('shift'),
+    cmd: mods.has('command') || mods.has('cmd') || mods.has('meta') || isStandaloneCmd,
+    ctrl: mods.has('control') || mods.has('ctrl') || isStandaloneCtrl,
+    alt: mods.has('alt') || mods.has('option') || isStandaloneAlt,
+    shift: mods.has('shift') || isStandaloneShift,
     fn: fnAsModifier || keyToken === 'fn' || keyToken === 'function',
   };
 }
@@ -6502,7 +6969,7 @@ function startFnCommandWatcher(commandId: string, shortcut: string): void {
 
 function startFnSpeakToggleWatcher(): void {
   if (fnSpeakToggleWatcherProcess || !fnSpeakToggleWatcherEnabled) return;
-  const config = parseHoldShortcutConfig('Fn');
+  const config = parseHoldShortcutConfig(fnSpeakToggleCurrentShortcut || 'Fn');
   if (!config) return;
   const binaryPath = ensureWhisperHoldWatcherBinary();
   if (!binaryPath) return;
@@ -6541,6 +7008,16 @@ function startFnSpeakToggleWatcher(): void {
           fnSpeakToggleLastPressedAt = now;
           fnSpeakToggleIsPressed = true;
           void (async () => {
+            // Start native audio capture immediately to avoid getUserMedia latency
+            if (!audioCapturerRecording) {
+              void warmAudioCapturer().then(() => {
+                if (!fnSpeakToggleIsPressed) return;
+                void startNativeAudioCapture().then(() => {
+                  console.log('[Whisper][native-capture][fn] Recording started from Fn press');
+                }).catch(() => {});
+              }).catch(() => {});
+            }
+
             if (whisperOverlayVisible) {
               captureFrontmostAppContext();
               if (whisperChildWindow && !whisperChildWindow.isDestroyed()) {
@@ -6601,11 +7078,11 @@ function startFnSpeakToggleWatcher(): void {
 }
 
 function syncFnSpeakToggleWatcher(hotkeys: Record<string, string>): void {
-  // Do not start the CGEventTap-based Fn watcher during onboarding.
+  // Do not start the CGEventTap-based watcher during onboarding.
   // The tap requires Input Monitoring (and sometimes Accessibility) permission,
   // which would trigger system dialogs before the user reaches the Grant Access step.
   // Exception: fnWatcherOnboardingOverride is set when the user reaches the Dictation
-  // test step (step 4) so they can actually test the Fn key during setup.
+  // test step (step 4) so they can actually test the key during setup.
   if (!loadSettings().hasSeenOnboarding && !fnWatcherOnboardingOverride) {
     stopFnSpeakToggleWatcher();
     return;
@@ -6616,12 +7093,21 @@ function syncFnSpeakToggleWatcher(hotkeys: Record<string, string>): void {
     return;
   }
   const speakToggle = String(hotkeys?.['system-supercmd-whisper-speak-toggle'] || '').trim();
-  const shouldEnable = isFnOnlyShortcut(speakToggle);
+  const shouldEnable = needsNativeHoldWatcher(speakToggle);
   if (!shouldEnable) {
+    fnSpeakToggleCurrentShortcut = '';
     stopFnSpeakToggleWatcher();
     return;
   }
+  // If the shortcut changed, stop the existing watcher so it restarts with the new key.
+  const shortcutChanged = speakToggle !== fnSpeakToggleCurrentShortcut;
+  if (shortcutChanged && fnSpeakToggleWatcherProcess) {
+    try { fnSpeakToggleWatcherProcess.kill('SIGTERM'); } catch {}
+    fnSpeakToggleWatcherProcess = null;
+    fnSpeakToggleWatcherStdoutBuffer = '';
+  }
   fnSpeakToggleWatcherEnabled = true;
+  fnSpeakToggleCurrentShortcut = speakToggle;
   startFnSpeakToggleWatcher();
 }
 
@@ -6631,7 +7117,7 @@ function syncFnCommandWatchers(hotkeys: Record<string, string>): void {
     const shortcut = String(shortcutRaw || '').trim();
     if (!shortcut) continue;
     const normalized = normalizeAccelerator(shortcut);
-    const isFnSpeakToggle = commandId === 'system-supercmd-whisper-speak-toggle' && isFnOnlyShortcut(normalized);
+    const isFnSpeakToggle = commandId === 'system-supercmd-whisper-speak-toggle' && (isFnOnlyShortcut(normalized) || isStandaloneModifierShortcut(normalized));
     if (isFnSpeakToggle) continue;
     if (!isFnShortcut(normalized)) continue;
     desired.set(commandId, normalized);
@@ -7589,7 +8075,10 @@ function createWindow(): void {
           detachedPopupName !== DETACHED_MEMORY_STATUS_WINDOW_NAME,
         skipTaskbar: true,
         alwaysOnTop: true,
-        show: true,
+        // Create the whisper popup hidden then showInactive() in did-create-window
+        // so that macOS does not activate the SuperCmd app (which would briefly
+        // raise the settings window if it was previously opened).
+        show: detachedPopupName !== DETACHED_WHISPER_WINDOW_NAME,
         acceptFirstMouse: true,
         webPreferences: {
           nodeIntegration: false,
@@ -7627,6 +8116,12 @@ function createWindow(): void {
       try { childWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch {}
       // Ignore mouse events by default so clicks pass through; widget will re-enable on hover
       try { childWindow.setIgnoreMouseEvents(true, { forward: true }); } catch {}
+      // Show the window without activating the app so macOS does not raise
+      // existing windows (e.g. the settings window) to the foreground.
+      // showInactive() maps to NSWindow orderFrontRegardless: on macOS,
+      // which orders the window in front without making it key or
+      // activating the application.
+      try { childWindow.showInactive(); } catch {}
       childWindow.on('closed', () => {
         if (whisperChildWindow === childWindow) whisperChildWindow = null;
       });
@@ -8435,7 +8930,28 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
     } catch {}
   }
 
-  const shouldActivateLauncherWindow = process.platform !== 'darwin' || launcherMode === 'onboarding';
+  // When a sibling window from our own app (Settings, Extension Store, Notes,
+  // Canvas, etc.) is currently the key window, the launcher panel's
+  // mainWindow.focus() alone is not enough to take key status away from a
+  // regular activated window in the same app — so the search input never
+  // actually receives keystrokes. Detect that case and fully activate the
+  // launcher window via app.focus({ steal: true }). This only steals focus
+  // from our own sibling window, not from another app, so the selection
+  // snapshot behavior (which only matters when another app is frontmost)
+  // is unaffected.
+  const ownAppSiblingWindowFocused =
+    process.platform === 'darwin' &&
+    BrowserWindow.getAllWindows().some(
+      (win: InstanceType<typeof BrowserWindow>) =>
+        win !== mainWindow &&
+        !win.isDestroyed() &&
+        win.isVisible() &&
+        win.isFocused()
+    );
+  const shouldActivateLauncherWindow =
+    process.platform !== 'darwin' ||
+    launcherMode === 'onboarding' ||
+    ownAppSiblingWindowFocused;
   let selectionSnapshotPromise: Promise<string> | null = null;
 
   // Capture the frontmost app BEFORE showing our window.
@@ -8706,9 +9222,17 @@ async function typeTextDirectly(text: string): Promise<boolean> {
   }
 }
 
-async function pasteTextToActiveApp(text: string): Promise<boolean> {
+interface PasteTextOptions {
+  // After pasting, send this many left-arrow key presses so the caret lands
+  // at a snippet's {cursor-position} marker. Ignored when 0/undefined.
+  cursorOffsetFromEnd?: number;
+}
+
+async function pasteTextToActiveApp(text: string, options?: PasteTextOptions): Promise<boolean> {
   const value = String(text || '');
   if (!value) return false;
+
+  const cursorMoveLeft = Math.max(0, Math.floor(options?.cursorOffsetFromEnd ?? 0));
 
   // Signal caller as soon as the paste keystroke fires, but hold the queue
   // slot until the clipboard is restored so concurrent ops don't read our
@@ -8720,6 +9244,26 @@ async function pasteTextToActiveApp(text: string): Promise<boolean> {
     const { execFile } = require('child_process');
     const { promisify } = require('util');
     const execFileAsync = promisify(execFile);
+
+    const sendLeftArrows = async () => {
+      if (cursorMoveLeft <= 0) return;
+      // Small delay so the target app has a moment to process the paste before
+      // arrow keys arrive — otherwise the arrows can race and land in the
+      // wrong position (or be dropped when the app is mid-paste-handling).
+      const script = `
+        tell application "System Events"
+          delay 0.05
+          repeat ${cursorMoveLeft} times
+            key code 123
+          end repeat
+        end tell
+      `;
+      try {
+        await execFileAsync('osascript', ['-e', script]);
+      } catch (e: any) {
+        console.warn('[pasteTextToActiveApp] cursor positioning failed:', e?.message);
+      }
+    };
 
     try {
       const previousClipboardText = systemClipboard.readText();
@@ -8734,6 +9278,7 @@ async function pasteTextToActiveApp(text: string): Promise<boolean> {
           const ok = nativeHelpersAddon?.activateAndPaste?.(target);
           if (ok) {
             signalCaller(true);
+            await sendLeftArrows();
             await new Promise<void>((resolve) => setTimeout(resolve, 250));
             try { systemClipboard.writeText(previousClipboardText); } catch {}
             return;
@@ -8749,6 +9294,7 @@ async function pasteTextToActiveApp(text: string): Promise<boolean> {
         'tell application "System Events" to keystroke "v" using command down',
       ]);
       signalCaller(true);
+      await sendLeftArrows();
       await new Promise<void>((resolve) => setTimeout(resolve, 250));
       try { systemClipboard.writeText(previousClipboardText); } catch {}
     } catch (error) {
@@ -8921,6 +9467,22 @@ async function hideAndPaste(): Promise<boolean> {
 }
 
 async function expandSnippetKeywordInPlace(keyword: string, delimiter: string): Promise<void> {
+  // Drop a duplicate emit for the same keyword arriving within the dedupe window
+  // (a lingering expander process and its replacement both firing one keystroke).
+  // Expansion is destructive, so a double-fire would backspace into and corrupt
+  // the already-pasted text.
+  const now = Date.now();
+  if (
+    lastSnippetExpansion &&
+    lastSnippetExpansion.keyword === keyword &&
+    lastSnippetExpansion.delimiter === delimiter &&
+    now - lastSnippetExpansion.at < SNIPPET_EXPANSION_DEDUPE_MS
+  ) {
+    console.log(`[SnippetExpander] ignoring duplicate trigger keyword="${keyword}"`);
+    return;
+  }
+  lastSnippetExpansion = { keyword, delimiter, at: now };
+
   // Enqueue so this never races with pasteTextToActiveApp or another concurrent expansion.
   clipboardOpQueue = clipboardOpQueue.then(async () => {
     try {
@@ -8928,26 +9490,52 @@ async function expandSnippetKeywordInPlace(keyword: string, delimiter: string): 
       const snippet = getSnippetByKeyword(keyword);
       if (!snippet) return;
 
-      const resolved = renderSnippetById(snippet.id, {});
-      if (!resolved) return;
+      const resolved = resolveSnippetPlaceholdersWithCursor(snippet.content, {});
+      if (!resolved.text && resolved.cursorOffsetFromEnd === null) return;
 
-      const fullText = `${resolved}${delimiter || ''}`;
+      const fullText = `${resolved.text}${delimiter || ''}`;
       const backspaceCount = keyword.length + (delimiter ? 1 : 0);
       if (backspaceCount <= 0) return;
+
+      // If the snippet had a {cursor-position} token, move the cursor back
+      // by that many characters after the paste so it lands on the marker.
+      // Account for the trailing delimiter (it's appended after the text and
+      // sits between the cursor target and the end of fullText).
+      const cursorMoveLeft =
+        resolved.cursorOffsetFromEnd !== null && resolved.cursorOffsetFromEnd > 0
+          ? resolved.cursorOffsetFromEnd + (delimiter ? delimiter.length : 0)
+          : 0;
 
       const originalClipboard = electron.clipboard.readText();
       electron.clipboard.writeText(fullText);
 
+      // Wait until the system pasteboard actually reflects the snippet text
+      // before pasting. Without this, Cmd+V can fire while the pasteboard still
+      // holds the user's previous clipboard content, pasting the wrong thing.
+      for (let i = 0; i < 20; i += 1) {
+        if (electron.clipboard.readText() === fullText) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+
       const { execFile } = require('child_process');
       const { promisify } = require('util');
       const execFileAsync = promisify(execFile);
+
+      // key code 51 = delete (backspace), 123 = left arrow.
+      const cursorMoveBlock = cursorMoveLeft > 0
+        ? `
+          delay 0.05
+          repeat ${cursorMoveLeft} times
+            key code 123
+          end repeat`
+        : '';
 
       const script = `
         tell application "System Events"
           repeat ${backspaceCount} times
             key code 51
           end repeat
-          keystroke "v" using command down
+          keystroke "v" using command down${cursorMoveBlock}
         end tell
       `;
 
@@ -8966,9 +9554,25 @@ async function expandSnippetKeywordInPlace(keyword: string, delimiter: string): 
 
 function stopSnippetExpander(): void {
   if (!snippetExpanderProcess) return;
-  snippetExpanderIntentionalKills.add(snippetExpanderProcess);
+  const proc = snippetExpanderProcess;
+  snippetExpanderIntentionalKills.add(proc);
+  // Detach the stdout/stderr listeners BEFORE killing. A CGEvent-tap process
+  // does not always die immediately on SIGTERM; if it lingers it keeps tapping
+  // keystrokes and would otherwise still emit into our handler, double-firing
+  // alongside the replacement process. Removing the listeners guarantees a
+  // zombie can never reach expandSnippetKeywordInPlace.
   try {
-    snippetExpanderProcess.kill();
+    proc.stdout?.removeAllListeners();
+    proc.stderr?.removeAllListeners();
+  } catch {}
+  try {
+    proc.kill();
+    // Hard-kill shortly after if SIGTERM didn't take, so no stray tap survives.
+    setTimeout(() => {
+      try {
+        if (!proc.killed) proc.kill('SIGKILL');
+      } catch {}
+    }, 1000);
   } catch {}
   snippetExpanderProcess = null;
   snippetExpanderStdoutBuffer = '';
@@ -8983,6 +9587,18 @@ function refreshSnippetExpander(): void {
     .filter((s) => Boolean(s));
 
   if (keywords.length === 0) return;
+
+  // Sweep any orphaned expander processes before spawning. A force-quit or
+  // crashed prior session can leave a snippet-expander process alive (it runs
+  // a CGEvent tap and survives an unclean parent exit). Orphans keep tapping
+  // keystrokes and emit duplicate triggers alongside the live process. We have
+  // not spawned ours yet, so killing by name only targets strays.
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('pkill', ['-f', 'native/snippet-expander'], { stdio: 'ignore' });
+  } catch {
+    // pkill exits non-zero when nothing matched — expected, ignore.
+  }
 
   const expanderPath = getNativeBinaryPath('snippet-expander');
   const fs = require('fs');
@@ -9922,6 +10538,25 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
   if (isWhisperSpeakToggleCommand) {
     const speakToggleHotkey = String(loadSettings().commandHotkeys?.['system-supercmd-whisper-speak-toggle'] ?? '').trim();
     const holdSeq = ++whisperHoldRequestSeq;
+
+    // Start native audio capture immediately — this takes ~10-30ms
+    // vs 200-500ms for the renderer getUserMedia path.
+    // The renderer overlay is opened in parallel; it will detect
+    // that native capture is already running and hook into it.
+    if (!audioCapturerRecording) {
+      void warmAudioCapturer().then(() => {
+        if (holdSeq !== whisperHoldRequestSeq) return;
+        if (whisperHoldReleasedSeq >= holdSeq) return;
+        void startNativeAudioCapture().then(() => {
+          console.log('[Whisper][native-capture] Recording started from hotkey');
+        }).catch((err: any) => {
+          console.warn('[Whisper][native-capture] Failed to start:', err?.message);
+        });
+      }).catch((err: any) => {
+        console.warn('[Whisper][native-capture] Warmup failed:', err?.message);
+      });
+    }
+
     if (whisperOverlayVisible) {
       captureFrontmostAppContext();
       // Reposition whisper window to the current cursor's screen
@@ -10189,6 +10824,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     commandId === 'system-search-bookmarks' ||
     commandId === 'system-search-history' ||
     commandId === 'system-my-schedule' ||
+    commandId === 'system-menu-item-search' ||
     commandId === 'system-camera'
   ) {
     return await openLauncherAndRunSystemCommand(commandId, {
@@ -12696,6 +13332,9 @@ function registerCommandHotkeys(hotkeys: Record<string, string>): void {
     if (commandId === 'system-supercmd-whisper-speak-toggle' && isFnOnlyShortcut(normalizedShortcut)) {
       continue;
     }
+    if (commandId === 'system-supercmd-whisper-speak-toggle' && isStandaloneModifierShortcut(normalizedShortcut)) {
+      continue;
+    }
     if (isFnShortcut(normalizedShortcut)) {
       continue;
     }
@@ -13135,6 +13774,12 @@ app.whenReady().then(async () => {
         whisperHoldRequestSeq += 1;
         whisperSuperCmdTextTargetWindow = null;
         stopWhisperHoldWatcher();
+        // Stop native audio capturer when the whisper overlay closes
+        // to release the microphone
+        if (audioCapturerProcess && !audioCapturerProcess.killed) {
+          audioCapturerProcess.stdin?.write(JSON.stringify({ command: 'stopEngine' }) + '\n');
+        }
+        audioCapturerRecording = false;
       }
       return;
     }
@@ -14028,14 +14673,35 @@ app.whenReady().then(async () => {
 
         const isFnSpeakToggle =
           commandId === 'system-supercmd-whisper-speak-toggle' &&
-          isFnOnlyShortcut(normalizedHotkey);
+          (isFnOnlyShortcut(normalizedHotkey) || isStandaloneModifierShortcut(normalizedHotkey));
         const isFnHotkey = isFnShortcut(normalizedHotkey);
         const isHyperHotkey = isHyperShortcut(normalizedHotkey);
+
+        // Standalone modifier shortcuts (Option, Command, etc.) only work for
+        // the whisper speak-toggle (hold-to-talk) command, since they require
+        // the native CGEventTap watcher. Reject them for other commands.
+        if (isStandaloneModifierShortcut(normalizedHotkey) && !isFnSpeakToggle) {
+          // Attempt to restore old mapping if the new one failed.
+          if (oldHotkey) {
+            const normalizedOldHotkey = normalizeAccelerator(oldHotkey);
+            try {
+              const restored = globalShortcut.register(normalizedOldHotkey, async () => {
+                await runCommandById(commandId, 'hotkey');
+              });
+              if (restored) {
+                registeredHotkeys.set(normalizedOldHotkey, commandId);
+              }
+            } catch {}
+          }
+          return { success: false, error: 'unavailable' as const };
+        }
 
         // Register the new one
         try {
           let success = false;
           if (isFnSpeakToggle) {
+            // Standalone modifier or Fn-only shortcuts are handled by the
+            // native CGEventTap speak-toggle watcher, not Electron globalShortcut.
             success = true;
           } else if (isFnHotkey) {
             const fnConfig = parseHoldShortcutConfig(normalizedHotkey);
@@ -15119,6 +15785,95 @@ return appURL's |path|() as text`,
     }
   });
 
+  // ─── Menu Item Search ───────────────────────────────────────────
+  // Enumerate and press menu items of the frontmost application using
+  // macOS Accessibility (AXUIElement) via the menu-item-search Swift helper.
+
+  type MenuItemInfo = {
+    path: string;
+    title: string;
+    fullPath: string;
+    shortcut?: string | null;
+    enabled: boolean;
+  };
+
+  ipcMain.handle(
+    'get-app-menu-items',
+    async (): Promise<{ ok: boolean; items?: MenuItemInfo[]; error?: string; appName?: string; appIconDataUrl?: string | null }> => {
+      try {
+        const helperPath = getNativeBinaryPath('menu-item-search');
+        // Target the app that was frontmost before the launcher opened — the
+        // launcher window itself is frontmost while menu search is showing.
+        const targetBundleId = String(lastFrontmostApp?.bundleId || '').trim();
+        const targetAppPath = String(lastFrontmostApp?.path || '').trim();
+        const { spawn } = require('child_process');
+        return await new Promise((resolve) => {
+          const proc = spawn(helperPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+          let stdout = '';
+          let stderr = '';
+          proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+          proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+          proc.on('close', () => {
+            try {
+              const result = JSON.parse(stdout.trim());
+              // Attach the app icon, resolved from the app the swift helper
+              // actually targeted (bundlePath), so it does not depend on
+              // lastFrontmostApp.path being populated.
+              const iconPath = String(result?.appPath || targetAppPath || '').trim();
+              const appIconDataUrl = iconPath ? resolveAppIconDataUrl(iconPath, 32) : null;
+              resolve({ ...result, appIconDataUrl });
+            } catch {
+              resolve({ ok: false, error: stderr || 'Failed to parse menu item search output' });
+            }
+          });
+          proc.on('error', (err: Error) => {
+            resolve({ ok: false, error: err.message });
+          });
+          proc.stdin.write(JSON.stringify({ action: 'list', bundleId: targetBundleId, appPath: targetAppPath }));
+          proc.stdin.end();
+        });
+      } catch (e: any) {
+        return { ok: false, error: e?.message || 'Menu item search failed' };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    'press-app-menu-item',
+    async (_event: any, data: { path: string }): Promise<{ ok: boolean; error?: string }> => {
+      const targetPath = String(data?.path || '').trim();
+      if (!targetPath) return { ok: false, error: 'Missing menu item path' };
+      try {
+        const helperPath = getNativeBinaryPath('menu-item-search');
+        const targetBundleId = String(lastFrontmostApp?.bundleId || '').trim();
+        const targetAppPath = String(lastFrontmostApp?.path || '').trim();
+        const { spawn } = require('child_process');
+        return await new Promise((resolve) => {
+          const proc = spawn(helperPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+          let stdout = '';
+          let stderr = '';
+          proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+          proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+          proc.on('close', () => {
+            try {
+              const result = JSON.parse(stdout.trim());
+              resolve(result);
+            } catch {
+              resolve({ ok: false, error: stderr || 'Failed to parse press result' });
+            }
+          });
+          proc.on('error', (err: Error) => {
+            resolve({ ok: false, error: err.message });
+          });
+          proc.stdin.write(JSON.stringify({ action: 'press', path: targetPath, bundleId: targetBundleId, appPath: targetAppPath }));
+          proc.stdin.end();
+        });
+      } catch (e: any) {
+        return { ok: false, error: e?.message || 'Press menu item failed' };
+      }
+    },
+  );
+
   ipcMain.handle(
     'calendar-ensure-access',
     async (_event: any, options?: { prompt?: boolean }) => {
@@ -15421,39 +16176,7 @@ return appURL's |path|() as text`,
 
   // Get .app bundle icon by reading its .icns file directly (avoids template-image transparency issues)
   ipcMain.handle('get-app-icon-data-url', async (_event: any, appPath: string, size = 32) => {
-    try {
-      const plistPath = path.join(appPath, 'Contents', 'Info.plist');
-      if (!fs.existsSync(plistPath)) return null;
-
-      let iconFileName = '';
-      try {
-        iconFileName = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIconFile', plistPath], {
-          encoding: 'utf-8',
-          timeout: 3000,
-        }).trim();
-      } catch { return null; }
-
-      if (!iconFileName) return null;
-      if (!iconFileName.endsWith('.icns')) iconFileName += '.icns';
-
-      const icnsPath = path.join(appPath, 'Contents', 'Resources', iconFileName);
-      if (!fs.existsSync(icnsPath)) return null;
-
-      // Convert .icns to PNG via sips, return as base64 data URL (avoid nativeImage crash)
-      const os = require('os');
-      const tmpPng = path.join(os.tmpdir(), `sc-icon-${Date.now()}.png`);
-      try {
-        execFileSync('/usr/bin/sips', ['-s', 'format', 'png', '-z', String(size * 2), String(size * 2), icnsPath, '--out', tmpPng], {
-          timeout: 5000,
-        });
-        const pngBuf = fs.readFileSync(tmpPng);
-        return `data:image/png;base64,${pngBuf.toString('base64')}`;
-      } finally {
-        try { fs.unlinkSync(tmpPng); } catch {}
-      }
-    } catch {
-      return null;
-    }
+    return resolveAppIconDataUrl(appPath, size);
   });
 
   ipcMain.handle('file-search-query', async (_event: any, query: string, options?: { limit?: number }) => {
@@ -15538,9 +16261,17 @@ return appURL's |path|() as text`,
       if (!success) {
         throw new Error(`Failed to install extension "${name}". Check SuperCmd main-process logs for details.`);
       }
-      // Invalidate command cache so new extensions appear in the launcher
+      // Invalidate the command cache and rebuild it BEFORE we broadcast, so
+      // the renderer's follow-up get-commands fetch lands on fresh data
+      // rather than the stale fallback that getAvailableCommands() returns
+      // immediately after an invalidation.
       invalidateCache();
+      try { await refreshCommandsNow(); } catch (e) { console.warn('refreshCommandsNow after install failed:', e); }
       broadcastExtensionsUpdated();
+      // The launcher's root list listens for 'commands-updated', not
+      // 'extensions-updated' — without this, the new extension wouldn't
+      // appear in the launcher until the next app restart.
+      broadcastCommandsUpdated();
       // Record the install in synced settings so the user's other Macs
       // auto-install on their next launch.
       addInstalledExtensionToSettings(name);
@@ -15553,13 +16284,17 @@ return appURL's |path|() as text`,
     async (_event: any, name: string) => {
       const success = await uninstallExtension(name);
       if (success) {
-        // Invalidate command cache so removed extensions disappear
+        // Invalidate the command cache and rebuild synchronously before
+        // broadcasting — see install-extension handler for context.
         invalidateCache();
+        try { await refreshCommandsNow(); } catch (e) { console.warn('refreshCommandsNow after uninstall failed:', e); }
         // Tell the launcher renderer to tear down any live runners (menu-bar
         // tray, background no-view loop, interval re-runner) for this
         // extension before its bundle keeps trying to re-mount itself.
         broadcastExtensionUninstalled(name);
         broadcastExtensionsUpdated();
+        // Mirror the install path: refresh the launcher's root list too.
+        broadcastCommandsUpdated();
         // Record the uninstall in synced settings so other Macs don't
         // re-install it on their next launch.
         removeInstalledExtensionFromSettings(name);
@@ -15663,6 +16398,10 @@ return appURL's |path|() as text`,
 
   ipcMain.handle('clipboard-toggle-pin', (_event: any, id: string) => {
     return togglePinClipboardItem(id);
+  });
+
+  ipcMain.handle('clipboard-move-pinned', (_event: any, id: string, direction: 'up' | 'down') => {
+    return moveClipboardPinnedItem(id, direction);
   });
 
   ipcMain.handle('clipboard-save-as-snippet', (_event: any, id: string) => {
@@ -16263,19 +17002,21 @@ if let tiff = image?.tiffRepresentation {
   });
 
   ipcMain.handle('snippet-paste', async (_event: any, id: string) => {
+    const snippet = getSnippetById(id);
+    if (!snippet) return false;
+    const resolved = resolveSnippetPlaceholdersWithCursor(snippet.content, {});
+
     // If the AI prompt window is open, redirect text into its textarea instead.
+    // The prompt textarea handles its own caret, so the cursor offset is unused
+    // here — the {cursor-position} marker was already stripped out.
     if (promptWindow && !promptWindow.isDestroyed() && promptWindow.isVisible()) {
-      const text = renderSnippetById(id);
-      if (text) {
+      if (resolved.text) {
         if (isVisible) hideWindow();
-        promptWindow.webContents.send('prompt-insert-text', text);
+        promptWindow.webContents.send('prompt-insert-text', resolved.text);
         promptWindow.focus();
         return true;
       }
     }
-
-    const text = renderSnippetById(id);
-    if (text == null) return false;
 
     // Hide the launcher so the paste lands in the previously focused app.
     if (isVisible) hideWindow();
@@ -16283,27 +17024,30 @@ if let tiff = image?.tiffRepresentation {
     // pasteTextToActiveApp saves the user's clipboard, writes the snippet,
     // pastes it via the active app, then restores the original clipboard —
     // so the snippet text doesn't linger on the pasteboard.
-    return await pasteTextToActiveApp(text);
+    return await pasteTextToActiveApp(resolved.text, {
+      cursorOffsetFromEnd: resolved.cursorOffsetFromEnd ?? 0,
+    });
   });
 
   ipcMain.handle('snippet-paste-resolved', async (_event: any, id: string, dynamicValues?: Record<string, string>) => {
-    // If the AI prompt window is open, redirect text into its textarea instead.
+    const snippet = getSnippetById(id);
+    if (!snippet) return false;
+    const resolved = resolveSnippetPlaceholdersWithCursor(snippet.content, dynamicValues);
+
     if (promptWindow && !promptWindow.isDestroyed() && promptWindow.isVisible()) {
-      const text = renderSnippetById(id, dynamicValues);
-      if (text) {
+      if (resolved.text) {
         if (isVisible) hideWindow();
-        promptWindow.webContents.send('prompt-insert-text', text);
+        promptWindow.webContents.send('prompt-insert-text', resolved.text);
         promptWindow.focus();
         return true;
       }
     }
 
-    const text = renderSnippetById(id, dynamicValues);
-    if (text == null) return false;
-
     if (isVisible) hideWindow();
 
-    return await pasteTextToActiveApp(text);
+    return await pasteTextToActiveApp(resolved.text, {
+      cursorOffsetFromEnd: resolved.cursorOffsetFromEnd ?? 0,
+    });
   });
 
   ipcMain.handle('snippet-import', async (event: any) => {
@@ -16910,6 +17654,174 @@ if let tiff = image?.tiffRepresentation {
     }
   });
 
+  ipcMain.handle('whispercpp-warmup', async () => {
+    const status = getWhisperCppModelStatus();
+    if (status.state !== 'downloaded') {
+      return { ready: false, error: 'Model not downloaded' };
+    }
+    if (whisperCppServerReady && whisperCppServerProcess && !whisperCppServerProcess.killed) {
+      return { ready: true };
+    }
+    try {
+      await ensureWhisperCppServer();
+      return { ready: true };
+    } catch (err: any) {
+      return { ready: false, error: err?.message || 'Warmup failed' };
+    }
+  });
+
+  // ─── IPC: Native Audio Capturer (bypasses renderer getUserMedia) ──
+
+  ipcMain.handle('audio-capturer-warmup', async () => {
+    try {
+      await warmAudioCapturer();
+      return { ready: true };
+    } catch (err: any) {
+      return { ready: false, error: err?.message || 'Warmup failed' };
+    }
+  });
+
+  ipcMain.handle('audio-capturer-start', async () => {
+    try {
+      await startNativeAudioCapture();
+      return { recording: true };
+    } catch (err: any) {
+      return { recording: false, error: err?.message || 'Start failed' };
+    }
+  });
+
+  ipcMain.handle('audio-capturer-stop', async () => {
+    try {
+      const result = await stopNativeAudioCapture();
+      return result;
+    } catch (err: any) {
+      return { file: null, duration: 0, error: err?.message || 'Stop failed' };
+    }
+  });
+
+  ipcMain.handle('audio-capturer-snapshot', async () => {
+    try {
+      const result = await takeNativeAudioSnapshot();
+      return result;
+    } catch (err: any) {
+      return { file: null, duration: 0, error: err?.message || 'Snapshot failed' };
+    }
+  });
+
+  ipcMain.handle('audio-capturer-meter', async () => {
+    return audioCapturerMeter;
+  });
+
+  ipcMain.handle('audio-capturer-status', async () => {
+    return {
+      engineReady: audioCapturerReady,
+      recording: audioCapturerRecording,
+      processAlive: !!(audioCapturerProcess && !audioCapturerProcess.killed),
+    };
+  });
+
+  // Transcribe a native-captured audio file (by path, not buffer)
+  ipcMain.handle(
+    'whisper-transcribe-file',
+    async (_event: any, audioPath: string, options?: { language?: string }) => {
+      const s = loadSettings();
+      if (isAIDisabledInSettings(s)) {
+        throw new Error('AI is disabled. Enable AI in Settings -> AI to use Whisper.');
+      }
+      if (s.ai?.whisperEnabled === false) {
+        throw new Error('SuperCmd Whisper is disabled in Settings -> AI.');
+      }
+
+      if (!fs.existsSync(audioPath)) {
+        throw new Error(`Audio file not found: ${audioPath}`);
+      }
+
+      const audioBuffer = fs.readFileSync(audioPath);
+
+      // Reuse the existing whisper-transcribe logic by reading the file into a buffer
+      const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
+      const language = normalizeWhisperLanguageCode(rawLang);
+
+      let provider: 'parakeet' | 'qwen3' | 'whispercpp' | 'openai' | 'elevenlabs' | 'mistral' = 'whispercpp';
+      let model = `ggml-${WHISPERCPP_MODEL_NAME}`;
+      const sttModel = s.ai.speechToTextModel || '';
+      if (sttModel === 'parakeet') {
+        provider = 'parakeet';
+        model = 'parakeet-tdt-0.6b-v3';
+      } else if (sttModel === 'qwen3') {
+        provider = 'qwen3';
+        model = 'qwen3-asr-0.6b';
+      } else if (!sttModel || sttModel === 'default' || sttModel === 'whispercpp') {
+        provider = 'whispercpp';
+        model = `ggml-${WHISPERCPP_MODEL_NAME}`;
+      } else if (sttModel === 'native') {
+        return '';
+      } else if (sttModel.startsWith('openai-')) {
+        provider = 'openai';
+        model = sttModel.slice('openai-'.length);
+      } else if (sttModel.startsWith('elevenlabs-')) {
+        provider = 'elevenlabs';
+        model = resolveElevenLabsSttModel(sttModel);
+      } else if (sttModel.startsWith('mistral-')) {
+        provider = 'mistral';
+        model = sttModel.slice('mistral-'.length) || 'voxtral-mini-latest';
+      } else if (sttModel) {
+        model = sttModel;
+      }
+
+      if (provider === 'openai' && !s.ai.openaiApiKey) {
+        throw new Error('OpenAI API key not configured.');
+      }
+      const elevenLabsApiKey = getElevenLabsApiKey(s);
+      if (provider === 'elevenlabs' && !elevenLabsApiKey) {
+        throw new Error('ElevenLabs API key not configured.');
+      }
+      const mistralApiKey = getMistralApiKey(s);
+      if (provider === 'mistral' && !mistralApiKey) {
+        throw new Error('Mistral API key not configured.');
+      }
+
+      // For whisper.cpp, use the file-path directly via the persistent server
+      // to avoid reading the file into a Node buffer just to write it again.
+      if (provider === 'whispercpp') {
+        const status = getWhisperCppModelStatus();
+        if (status.state === 'downloading') {
+          throw new Error('Whisper model still downloading.');
+        }
+        if (status.state !== 'downloaded') {
+          throw new Error('Whisper model not downloaded.');
+        }
+        await ensureWhisperCppServer();
+        const result = await sendWhisperCppRequest({
+          command: 'transcribe',
+          file: audioPath,
+          language,
+        });
+        // Clean up the temp file after transcription
+        try { fs.unlinkSync(audioPath); } catch {}
+        try { fs.rmdirSync(path.dirname(audioPath), { recursive: true }); } catch {}
+        return result.text || '';
+      }
+
+      // For cloud providers, use buffer-based transcription
+      const mimeType = 'audio/wav';
+      const text = provider === 'parakeet'
+        ? await transcribeAudioWithParakeet({ audioBuffer, language, mimeType })
+        : provider === 'qwen3'
+          ? await transcribeAudioWithQwen3({ audioBuffer, language, mimeType })
+          : provider === 'elevenlabs'
+            ? await transcribeAudioWithElevenLabs({ audioBuffer, apiKey: elevenLabsApiKey, model, language, mimeType })
+            : provider === 'mistral'
+              ? await transcribeAudioWithMistralVoxtral({ audioBuffer, apiKey: mistralApiKey, model, language, mimeType })
+              : await transcribeAudio({ audioBuffer, apiKey: s.ai.openaiApiKey, model, language, mimeType });
+
+      // Clean up the temp file
+      try { fs.unlinkSync(audioPath); } catch {}
+      try { fs.rmdirSync(path.dirname(audioPath), { recursive: true }); } catch {}
+
+      return text;
+    }
+  );
   ipcMain.handle(
     'whisper-transcribe',
     async (_event: any, audioArrayBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }) => {
@@ -18366,6 +19278,10 @@ app.on('will-quit', () => {
   stopAllFnCommandWatchers();
   stopHyperKeyMonitor();
   stopSpeakSession({ resetStatus: false });
+  killWhisperCppServer();
+  killParakeetServer();
+  killQwen3Server();
+  killAudioCapturer();
   stopClipboardMonitor();
   stopSnippetExpander();
   stopEmojiTriggerMonitor();

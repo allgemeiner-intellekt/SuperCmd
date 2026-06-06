@@ -203,6 +203,7 @@
         "italian": "Italiano",
         "japanese": "Giapponese",
         "korean": "Coreano",
+        "polish": "Polacco",
         "portugueseBrazil": "Portoghese (Brasile)",
         "russian": "Russo",
         "spanishMexico": "Spagnolo (Messico)",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "Scorciatoie di Whisper",
           "startStop": "Avvia/Ferma la dettatura",
-          "setToFn": "Imposta su Fn",
-          "fnHint": "Usa Imposta su Fn per ripristinare il tasto predefinito di registrazione.",
-          "fnHintBefore": "Usa",
-          "fnHintAfter": "per ripristinare il tasto predefinito di registrazione."
+          "custom": "Personalizzato…",
+          "holdToTalkHint": "Seleziona un tasto push-to-talk. Tieni premuto per registrare, rilascia per digitare. Usa Personalizzato per registrare qualsiasi combinazione."
         },
         "autoClose": {
           "title": "Chiusura automatica dopo la dettatura",
@@ -707,9 +706,9 @@
         "label": "Abilita modalità debug"
       },
       "browserSearch": {
-        "title": "Profili browser",
-        "description": "Collega profili browser così SuperCmd può usare la loro cronologia locale e mantenerla aggiornata.",
-        "enableLabel": "Usa profili browser in SuperCmd",
+        "title": "Ricerca nel browser",
+        "description": "Premi Invio su una query per aprirla nel tuo browser predefinito. L’autocompletamento inline suggerisce siti dalla tua cronologia.",
+        "enableLabel": "Abilita ricerca nel browser",
         "alphaToggle": {
           "label": "Usa la ricerca root Chromium alfa",
           "description": "Mostra cronologia dei profili, segnalibri e schede aperte nella ricerca root. Attivala solo per profili Chromium mentre l'estensione browser e ancora in alfa."
@@ -780,6 +779,11 @@
           "devMode": "Per collegare un browser ora, apri la pagina delle estensioni del browser, abilita la modalità sviluppatore, poi scegli Carica estensione non pacchettizzata e seleziona la cartella browser-extension.",
           "temporary": "(È temporaneo finché l’estensione non sarà pubblicata nello store.)"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "Completamento automatico in linea",
+        "description": "Mostra il completamento con testo grigio nella barra di ricerca durante la digitazione. Si applica a comandi, file e risultati del browser.",
+        "label": "Mostra completamento automatico in linea"
       }
     }
   },

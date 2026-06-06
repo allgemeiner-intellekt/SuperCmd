@@ -1347,6 +1347,12 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       category: 'system',
     },
     {
+      id: 'system-menu-item-search',
+      title: 'Search Menu Items',
+      keywords: ['menu', 'search', 'menu item', 'commands', 'actions', 'accessibility', 'app menu', 'toolbar'],
+      category: 'system',
+    },
+    {
       id: 'system-window-management',
       title: 'Window Management',
       keywords: ['window', 'manage', 'tile', 'snap', 'top left', 'top right', 'bottom left', 'bottom right', 'third', 'fourth', 'sixth', 'grid', 'auto organize'],
@@ -1392,6 +1398,18 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       id: 'system-window-management-fill',
       title: 'Window: Maximize',
       keywords: ['window', 'management', 'maximize', 'fill', 'fullscreen'],
+      category: 'system',
+    },
+    {
+      id: 'system-window-management-maximize-width',
+      title: 'Window: Maximize Width',
+      keywords: ['window', 'management', 'maximize', 'width', 'horizontal', 'fill', 'stretch'],
+      category: 'system',
+    },
+    {
+      id: 'system-window-management-maximize-height',
+      title: 'Window: Maximize Height',
+      keywords: ['window', 'management', 'maximize', 'height', 'vertical', 'fill', 'stretch'],
       category: 'system',
     },
     {

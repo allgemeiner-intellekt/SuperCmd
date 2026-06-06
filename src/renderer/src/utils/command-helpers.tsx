@@ -13,7 +13,7 @@
  */
 
 import React from 'react';
-import { Search, Power, Settings, Puzzle, Sparkles, FileText, Mic, Volume2, Brain, TerminalSquare, RefreshCw, LayoutGrid, Lock, Trash2, Store, Globe, PanelTop, Bookmark, Clock } from 'lucide-react';
+import { Search, Power, Settings, Puzzle, Sparkles, FileText, Mic, Volume2, Brain, TerminalSquare, RefreshCw, LayoutGrid, Lock, Trash2, Store, Globe, PanelTop, Bookmark, Clock, Menu } from 'lucide-react';
 import type { CommandInfo, EdgeTtsVoice } from '../../types/electron';
 import supercmdLogo from '../../../../supercmd.svg';
 import IconCalendar from '../icons/Calendar';
@@ -546,6 +546,8 @@ type WindowManagementGlyphId =
   | 'center'
   | 'center-80'
   | 'fill'
+  | 'maximize-width'
+  | 'maximize-height'
   | 'top-left'
   | 'top-right'
   | 'bottom-left'
@@ -595,6 +597,8 @@ const WINDOW_MANAGEMENT_GLYPH_SUFFIXES = new Set<WindowManagementGlyphId>([
   'center',
   'center-80',
   'fill',
+  'maximize-width',
+  'maximize-height',
   'top-left',
   'top-right',
   'bottom-left',
@@ -775,6 +779,12 @@ function renderWindowManagementGlyph(glyphId: WindowManagementGlyphId): JSX.Elem
       break;
     case 'fill':
       cells.push({ x: 1, y: 1, w: 18, h: 12 });
+      break;
+    case 'maximize-width':
+      cells.push({ x: 1, y: 4, w: 18, h: 6 });
+      break;
+    case 'maximize-height':
+      cells.push({ x: 7, y: 1, w: 6, h: 12 });
       break;
     case 'center':
       cells.push({ x: 4, y: 3, w: 12, h: 8 });
@@ -1316,6 +1326,14 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
     return (
       <div className="w-5 h-5 rounded bg-indigo-500/20 flex items-center justify-center">
         <Volume2 className="w-3 h-3 text-indigo-200" />
+      </div>
+    );
+  }
+
+  if (commandId === 'system-menu-item-search') {
+    return (
+      <div className="w-5 h-5 rounded bg-teal-500/20 flex items-center justify-center">
+        <Menu className="w-3 h-3 text-teal-300" />
       </div>
     );
   }

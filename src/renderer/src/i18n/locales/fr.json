@@ -203,6 +203,7 @@
         "italian": "Italian",
         "japanese": "Japanese",
         "korean": "Korean",
+        "polish": "Polonais",
         "portugueseBrazil": "Portuguese (Brazil)",
         "russian": "Russian",
         "spanishMexico": "Spanish (Mexico)",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "Raccourcis Whisper",
           "startStop": "Demarrer/arreter la dictee",
-          "setToFn": "Definir sur Fn",
-          "fnHint": "Utilisez Definir sur Fn pour restaurer la touche push-to-talk par defaut.",
-          "fnHintBefore": "Use",
-          "fnHintAfter": "to restore the default hold-to-talk key."
+          "custom": "Personnalise…",
+          "holdToTalkHint": "Selectionnez une touche push-to-talk. Maintenez pour enregistrer, relachez pour saisir. Utilisez Personnalise pour enregistrer toute combinaison."
         },
         "autoClose": {
           "title": "Auto-Close After Dictation",
@@ -707,9 +706,9 @@
         "label": "Enable debug mode"
       },
       "browserSearch": {
-        "title": "Profils de navigateur",
-        "description": "Connectez des profils de navigateur pour que SuperCmd utilise leur historique local et le garde à jour.",
-        "enableLabel": "Utiliser les profils de navigateur dans SuperCmd",
+        "title": "Recherche navigateur",
+        "description": "Appuyez sur Entrée sur une requête pour l’ouvrir dans votre navigateur par défaut. L’autocomplétion en ligne suggère des sites depuis votre historique.",
+        "enableLabel": "Activer la recherche navigateur",
         "alphaToggle": {
           "label": "Utiliser la recherche racine Chromium alpha",
           "description": "Affiche l'historique des profils, les favoris et les onglets ouverts dans la recherche racine. Activez ceci uniquement pour les profils Chromium tant que l'extension de navigateur est en alpha."
@@ -780,6 +779,11 @@
           "devMode": "Pour connecter un navigateur maintenant, ouvrez la page des extensions du navigateur, activez le mode développeur, puis choisissez Charger l’extension non empaquetée et sélectionnez le dossier browser-extension.",
           "temporary": "(C’est temporaire jusqu’à la publication de l’extension dans la boutique.)"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "Autocomplétion en ligne",
+        "description": "Affiche la complétion en texte fantôme gris dans la barre de recherche pendant la saisie. S’applique aux commandes, fichiers et résultats du navigateur.",
+        "label": "Afficher l’autocomplétion en ligne"
       }
     }
   },

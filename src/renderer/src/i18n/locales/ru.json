@@ -203,6 +203,7 @@
         "italian": "Italian",
         "japanese": "Japanese",
         "korean": "Korean",
+        "polish": "Польский",
         "portugueseBrazil": "Portuguese (Brazil)",
         "russian": "Russian",
         "spanishMexico": "Spanish (Mexico)",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "Whisper Hotkeys",
           "startStop": "Start/Stop Speaking",
-          "setToFn": "Set to Fn",
-          "fnHint": "Use Set to Fn to restore the default hold-to-talk key.",
-          "fnHintBefore": "Use",
-          "fnHintAfter": "to restore the default hold-to-talk key."
+          "custom": "Custom…",
+          "holdToTalkHint": "Select a hold-to-talk key. Hold to record, release to type. Use Custom to record any key combo."
         },
         "autoClose": {
           "title": "Auto-Close After Dictation",
@@ -707,9 +706,9 @@
         "label": "Включить режим отладки"
       },
       "browserSearch": {
-        "title": "Профили браузера",
-        "description": "Подключите профили браузера, чтобы SuperCmd использовал их локальную историю и поддерживал ее актуальной.",
-        "enableLabel": "Использовать профили браузера в SuperCmd",
+        "title": "Поиск в браузере",
+        "description": "Нажмите Enter на запросе, чтобы открыть его в браузере по умолчанию. Встроенное автозаполнение предлагает сайты из вашей истории.",
+        "enableLabel": "Включить поиск в браузере",
         "alphaToggle": {
           "label": "Use alpha Chromium root search",
           "description": "Show profile history, bookmarks, and open tabs in root search. Turn this on only for Chromium profiles while the browser extension is still in alpha."
@@ -780,6 +779,11 @@
           "devMode": "Чтобы подключить браузер сейчас, откройте страницу расширений браузера, включите режим разработчика, затем выберите загрузку распакованного расширения и укажите папку browser-extension.",
           "temporary": "(Это временно, пока расширение не опубликовано в магазине.)"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "Встроенное автодополнение",
+        "description": "Показывать серый текст-подсказку автодополнения в строке поиска при вводе. Применяется к командам, файлам и результатам браузера.",
+        "label": "Показывать встроенное автодополнение"
       }
     }
   },

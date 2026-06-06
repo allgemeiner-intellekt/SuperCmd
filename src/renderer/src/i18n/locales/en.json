@@ -203,6 +203,7 @@
         "italian": "Italian",
         "japanese": "Japanese",
         "korean": "Korean",
+        "polish": "Polish",
         "portugueseBrazil": "Portuguese (Brazil)",
         "russian": "Russian",
         "spanishMexico": "Spanish (Mexico)",
@@ -383,10 +384,8 @@
         "hotkeys": {
           "title": "Whisper Hotkeys",
           "startStop": "Start/Stop Speaking",
-          "setToFn": "Set to Fn",
-          "fnHint": "Use Set to Fn to restore the default hold-to-talk key.",
-          "fnHintBefore": "Use",
-          "fnHintAfter": "to restore the default hold-to-talk key."
+          "custom": "Custom…",
+          "holdToTalkHint": "Select a hold-to-talk key. Hold to record, release to type. Use Custom to record any key combo."
         },
         "autoClose": {
           "title": "Auto-Close After Dictation",
@@ -707,9 +706,9 @@
         "label": "Enable debug mode"
       },
       "browserSearch": {
-        "title": "Browser Profiles",
-        "description": "Connect browser profiles so SuperCmd can use their local history and keep it refreshed.",
-        "enableLabel": "Use browser profiles in SuperCmd",
+        "title": "Browser Search",
+        "description": "Press Enter on a query to open it in your default browser. Inline autocomplete suggests sites from your history.",
+        "enableLabel": "Enable browser search",
         "alphaToggle": {
           "label": "Use alpha Chromium root search",
           "description": "Show profile history, bookmarks, and open tabs in root search. Turn this on only for Chromium profiles while the browser extension is still in alpha."
@@ -780,6 +779,11 @@
           "devMode": "To connect a browser now, open the browser extension page, enable Developer mode, then choose Load unpacked and select the browser-extension folder.",
           "temporary": "(This is temporary until the extension is published on the store.)"
         }
+      },
+      "inlineAutocomplete": {
+        "title": "Inline autocomplete",
+        "description": "Show grey ghost-text completion in the search bar as you type. Applies to commands, files, and browser results.",
+        "label": "Show inline autocomplete"
       }
     }
   },

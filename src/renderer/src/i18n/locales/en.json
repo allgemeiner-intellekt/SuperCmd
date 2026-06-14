@@ -375,6 +375,12 @@
         "elevenlabsWarning": "ElevenLabs STT selected. {action} ElevenLabs API key in API Keys.",
         "elevenlabsReady": "ElevenLabs STT selected. Cloud transcription will use your ElevenLabs key.",
         "recognitionLanguage": "Recognition Language",
+        "vocabulary": {
+          "label": "Custom Vocabulary",
+          "placeholder": "Kotlin, Electron, Raycast, SuperCmd…",
+          "hint": "Optional. List uncommon words, names, or technical terms (comma or newline separated) to bias recognition toward the correct spelling.",
+          "tokenWarning": "About {count} tokens. Whisper only uses roughly the first 224 — extra words past that are ignored."
+        },
         "providerInfo": {
           "parakeet": "Offline on-device transcription via Parakeet TDT v3. Runs on Apple Neural Engine. Requires model warmup on first use. Download the model below before using dictation.",
           "qwen3": "Offline on-device transcription via Qwen3 ASR. Supports 30+ languages, requires macOS 15+, and warms up on first use.",
@@ -611,6 +617,18 @@
         "openedExisting": "Opened custom scripts folder.",
         "failed": "Failed to open custom scripts folder."
       },
+      "appSearchScope": {
+        "title": "Application Search Scope",
+        "description": "Directories where SuperCmd searches for installed applications to show in the launcher.",
+        "add": "Add Directory",
+        "remove": "Remove",
+        "empty": "No directories added. Default system application directories will be used.",
+        "added": "Directory added to search scope.",
+        "removed": "Directory removed from search scope.",
+        "duplicate": "Directory already in list.",
+        "failed": "Failed to update search scope.",
+        "restartHint": "Restart SuperCmd for directory changes to take effect."
+      },
       "emojiPicker": {
         "enabled": "Enable Emoji Picker",
         "enabledDesc": "Show emoji suggestions when typing a trigger prefix followed by a name.",
@@ -665,6 +683,11 @@
         "title": "Disable File & Folder Search",
         "description": "Hide file and folder results from the main launcher search.",
         "label": "Disable file and folder search results"
+      },
+      "menuBarIcon": {
+        "title": "Menu Bar Icon",
+        "description": "Show the SuperCmd icon in the macOS menu bar.",
+        "label": "Show menu bar icon"
       },
       "navigationStyle": {
         "title": "Navigation Style",

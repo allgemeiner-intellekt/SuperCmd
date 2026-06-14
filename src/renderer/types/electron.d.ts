@@ -218,6 +218,7 @@ export interface AISettings {
   speechCorrectionModel: string;
   speechToTextModel: string;
   speechLanguage: string;
+  speechVocabulary: string;
   textToSpeechModel: string;
   edgeTtsVoice: string;
   speechCorrectionEnabled: boolean;
@@ -631,6 +632,7 @@ export interface AppSettings {
   openAtLogin: boolean;
   disabledCommands: string[];
   enabledCommands: string[];
+  searchApplicationsScope: string[];
   customExtensionFolders: string[];
   scriptCommandFolders: string[];
   commandHotkeys: Record<string, string>;
@@ -643,6 +645,7 @@ export interface AppSettings {
   hasSeenWhisperOnboarding: boolean;
   fileSearchProtectedRootsEnabled: boolean;
   disableFileSearchResults: boolean;
+  showMenuBarIcon: boolean;
   ai: AISettings;
   commandMetadata?: Record<string, { subtitle?: string }>;
   debugMode: boolean;

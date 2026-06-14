@@ -20,7 +20,27 @@ import * as os from 'os';
 import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
 import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow } from './commands';
-import { loadSettings, saveSettings, setOAuthToken, getOAuthToken, removeOAuthToken, loadWindowState, saveWindowState, clearWindowState, loadNotesWindowState, saveNotesWindowState, loadSettingsLocation, getDefaultSettingsPath, relocateSettingsFile, resetSettingsLocation, startSettingsWatcher, setSettingsBroadcaster, setExternalSettingsChangeHandler, settingsFileExistsOrICloudPlaceholder } from './settings-store';
+import {
+  loadSettings,
+  saveSettings,
+  setOAuthToken,
+  getOAuthToken,
+  removeOAuthToken,
+  loadWindowState,
+  saveWindowState,
+  clearWindowState,
+  loadNotesWindowState,
+  saveNotesWindowState,
+  loadSettingsLocation,
+  getDefaultSettingsPath,
+  relocateSettingsFile,
+  resetSettingsLocation,
+  startSettingsWatcher,
+  setSettingsBroadcaster,
+  setExternalSettingsChangeHandler,
+  settingsFileExistsOrICloudPlaceholder,
+  getSearchApplicationsScope
+} from './settings-store';
 import type { AppSettings, BrowserProfileSetting, BrowserProfileFilters, BrowserProfileFilterKind, RelocateMode } from './settings-store';
 import { recordRootSearchLaunchInState, type RootSearchRankingState } from '../shared/root-search-ranking-state';
 import { streamAI, streamAIChat, isAIAvailable, transcribeAudio } from './ai-provider';
@@ -1256,6 +1276,7 @@ async function transcribeAudioWithWhisperCpp(opts: {
   audioBuffer: Buffer;
   language?: string;
   mimeType?: string;
+  initialPrompt?: string;
 }): Promise<string> {
   const mimeType = String(opts.mimeType || 'audio/wav').toLowerCase();
   if (mimeType && !mimeType.includes('wav')) {
@@ -1284,6 +1305,7 @@ async function transcribeAudioWithWhisperCpp(opts: {
       command: 'transcribe',
       file: audioPath,
       language,
+      initial_prompt: (opts.initialPrompt || '').trim(),
     });
 
     return result.text || '';
@@ -7385,7 +7407,12 @@ function isInvisibleTrayIcon(icon: any): boolean {
 
 function loadAppTrayIcon(): any {
   const fs = require('fs');
+  // SVG via createFromPath is handled by macOS NSImage natively → resolution-independent.
+  // PNG is the fallback for environments where SVG loading fails.
   const candidates = [
+    path.join(process.cwd(), 'supercmd.svg'),
+    path.join(app.getAppPath(), 'supercmd.svg'),
+    path.join(process.resourcesPath || '', 'supercmd.svg'),
     path.join(process.cwd(), 'supercmd.png'),
     path.join(app.getAppPath(), 'supercmd.png'),
     path.join(process.resourcesPath || '', 'supercmd.png'),
@@ -7399,7 +7426,7 @@ function loadAppTrayIcon(): any {
       if (!icon || icon.isEmpty()) return null;
       const resized = icon.resize({ width: 18, height: 18 });
       if (!resized || resized.isEmpty()) return null;
-      // Use template rendering on macOS so the icon adapts to light/dark menu bar.
+      // Template image adapts automatically to light/dark menu bar on macOS.
       if (process.platform === 'darwin') {
         try { resized.setTemplateImage(true); } catch {}
       }
@@ -7409,17 +7436,17 @@ function loadAppTrayIcon(): any {
     }
   };
 
-  const defaultTemplateIcon = buildDefaultMacTrayTemplateIcon();
-  if (defaultTemplateIcon) {
-    return defaultTemplateIcon;
-  }
-
   for (const candidate of candidates) {
     try {
       if (!candidate || !fs.existsSync(candidate)) continue;
       const trayImage = tryBuildTrayImage(nativeImage.createFromPath(candidate));
       if (trayImage) return trayImage;
     } catch {}
+  }
+
+  const defaultTemplateIcon = buildDefaultMacTrayTemplateIcon();
+  if (defaultTemplateIcon) {
+    return defaultTemplateIcon;
   }
 
   if (process.platform === 'darwin') {
@@ -7435,6 +7462,13 @@ function loadAppTrayIcon(): any {
 
 function ensureAppTray(): void {
   if (appTray) return;
+  // On macOS the menu bar icon can be disabled in Settings → Advanced. The
+  // toggle is macOS-only, so other platforms always keep their tray icon.
+  if (process.platform === 'darwin') {
+    try {
+      if ((loadSettings() as any).showMenuBarIcon === false) return;
+    } catch {}
+  }
 
   try {
     const icon = loadAppTrayIcon();
@@ -7464,6 +7498,21 @@ function ensureAppTray(): void {
 
   } catch (error) {
     console.warn('[Tray] Failed to create app tray:', error);
+    appTray = null;
+  }
+}
+
+// Create or destroy the menu bar icon to match the current setting. Called when
+// the user toggles "Show menu bar icon" in Settings → Advanced.
+function syncAppTrayVisibility(): void {
+  let shouldShow = true;
+  try {
+    shouldShow = (loadSettings() as any).showMenuBarIcon !== false;
+  } catch {}
+  if (shouldShow) {
+    ensureAppTray();
+  } else if (appTray) {
+    try { appTray.destroy(); } catch {}
     appTray = null;
   }
 }
@@ -12681,15 +12730,7 @@ function scheduleInstalledAppsRefresh(reason: string): void {
 }
 
 function startInstalledAppsWatchers(): void {
-  const appDirs = [
-    '/Applications',
-    '/Applications/Utilities',
-    '/System/Applications',
-    '/System/Applications/Utilities',
-    path.join(process.env.HOME || '', 'Applications'),
-  ]
-    .filter((dir) => Boolean(dir))
-    .filter((dir, idx, all) => all.indexOf(dir) === idx);
+  const appDirs = getSearchApplicationsScope();
 
   for (const dir of appDirs) {
     if (!dir) continue;
@@ -14320,6 +14361,9 @@ app.whenReady().then(async () => {
     async (_event: any, patch: Partial<AppSettings>) => {
       const result = saveSettings(patch);
       broadcastSettingsToAllWindows(result);
+      if (patch.showMenuBarIcon !== undefined) {
+        syncAppTrayVisibility();
+      }
       if (patch.uiStyle !== undefined) {
         const nextStyle = String(result.uiStyle || 'default').trim().toLowerCase();
         const shouldEnableGlassy = nextStyle === 'glassy';
@@ -17900,6 +17944,7 @@ if let tiff = image?.tiffRepresentation {
               audioBuffer,
               language,
               mimeType,
+              initialPrompt: s.ai.speechVocabulary,
             })
           : provider === 'elevenlabs'
             ? await transcribeAudioWithElevenLabs({

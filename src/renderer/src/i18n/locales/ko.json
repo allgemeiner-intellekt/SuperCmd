@@ -375,6 +375,12 @@
         "elevenlabsWarning": "ElevenLabs STT가 선택되었습니다. API 키에서 ElevenLabs API 키를 {action}하세요.",
         "elevenlabsReady": "ElevenLabs STT가 선택되었습니다. 클라우드 전사에 ElevenLabs 키가 사용됩니다.",
         "recognitionLanguage": "인식 언어",
+        "vocabulary": {
+          "label": "사용자 지정 어휘",
+          "placeholder": "Kotlin, Electron, Raycast, SuperCmd…",
+          "hint": "선택 사항. 인식을 올바른 철자로 유도하려면 잘 쓰이지 않는 단어, 이름, 전문 용어를 쉼표나 줄바꿈으로 구분하여 입력하세요.",
+          "tokenWarning": "약 {count}개 토큰. Whisper는 대략 처음 224개만 사용하므로 그 이후의 단어는 무시됩니다."
+        },
         "providerInfo": {
           "parakeet": "Parakeet TDT v3를 통한 오프라인 기기 내 전사. Apple Neural Engine에서 실행됩니다. 처음 사용할 때 모델 준비가 필요합니다. 받아쓰기를 사용하기 전에 아래 모델을 다운로드하세요.",
           "qwen3": "Qwen3 ASR을 통한 오프라인 온디바이스 전사. 30개 이상의 언어를 지원하고 macOS 15 이상이 필요하며 처음 사용할 때 예열됩니다.",
@@ -611,6 +617,18 @@
         "openedExisting": "사용자 정의 스크립트 폴더를 열었습니다.",
         "failed": "사용자 정의 스크립트 폴더를 열지 못했습니다."
       },
+      "appSearchScope": {
+        "title": "앱 검색 범위",
+        "description": "SuperCmd가 설치된 앱을 검색하여 런처에 표시할 디렉토리입니다.",
+        "add": "디렉토리 추가",
+        "remove": "제거",
+        "empty": "추가된 디렉토리가 없습니다. 기본 시스템 앱 디렉토리가 사용됩니다.",
+        "added": "디렉토리가 검색 범위에 추가되었습니다.",
+        "removed": "디렉토리가 검색 범위에서 제거되었습니다.",
+        "duplicate": "디렉토리가 이미 목록에 있습니다.",
+        "failed": "검색 범위 업데이트에 실패했습니다.",
+        "restartHint": "디렉토리 변경 사항을 적용하려면 SuperCmd를 다시 시작하세요."
+      },
       "emojiPicker": {
         "enabled": "이모지 선택기 활성화",
         "enabledDesc": "트리거 접두어를 입력하면 이모지 제안이 표시됩니다.",
@@ -665,6 +683,11 @@
         "title": "파일 및 폴더 검색 비활성화",
         "description": "기본 런처 검색에서 파일 및 폴더 결과를 숨깁니다.",
         "label": "파일 및 폴더 검색 결과 비활성화"
+      },
+      "menuBarIcon": {
+        "title": "메뉴 막대 아이콘",
+        "description": "macOS 메뉴 막대에 SuperCmd 아이콘을 표시합니다.",
+        "label": "메뉴 막대 아이콘 표시"
       },
       "navigationStyle": {
         "title": "탐색 스타일",

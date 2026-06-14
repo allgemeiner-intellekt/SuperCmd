@@ -52,6 +52,7 @@ export interface AISettings {
   speechCorrectionModel: string;
   speechToTextModel: string;
   speechLanguage: string;
+  speechVocabulary: string;
   textToSpeechModel: string;
   edgeTtsVoice: string;
   speechCorrectionEnabled: boolean;
@@ -215,6 +216,7 @@ export interface AppSettings {
   openAtLogin: boolean;
   disabledCommands: string[];
   enabledCommands: string[];
+  searchApplicationsScope: string[];
   customExtensionFolders: string[];
   scriptCommandFolders: string[];
   commandHotkeys: Record<string, string>;
@@ -227,6 +229,7 @@ export interface AppSettings {
   hasSeenWhisperOnboarding: boolean;
   fileSearchProtectedRootsEnabled: boolean;
   disableFileSearchResults: boolean;
+  showMenuBarIcon: boolean;
   ai: AISettings;
   commandMetadata?: Record<string, { subtitle?: string }>;
   debugMode: boolean;
@@ -308,6 +311,7 @@ const DEFAULT_AI_SETTINGS: AISettings = {
   speechCorrectionModel: '',
   speechToTextModel: 'whispercpp',
   speechLanguage: 'en-US',
+  speechVocabulary: '',
   textToSpeechModel: 'edge-tts',
   edgeTtsVoice: 'en-US-EricNeural',
   speechCorrectionEnabled: false,
@@ -329,6 +333,14 @@ const DEFAULT_SETTINGS: AppSettings = {
   openAtLogin: false,
   disabledCommands: [],
   enabledCommands: [],
+  searchApplicationsScope: [
+    '/Applications',
+    '/Applications/Utilities',
+    '/System/Applications',
+    '/System/Applications/Utilities',
+    '/System/Library/CoreServices/Applications',
+    path.join(process.env.HOME || '', 'Applications')
+  ],
   customExtensionFolders: [],
   scriptCommandFolders: [],
   commandHotkeys: {
@@ -363,6 +375,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   hasSeenWhisperOnboarding: false,
   fileSearchProtectedRootsEnabled: false,
   disableFileSearchResults: false,
+  showMenuBarIcon: true,
   ai: { ...DEFAULT_AI_SETTINGS },
   debugMode: false,
   appLanguage: 'system',
@@ -1225,6 +1238,9 @@ export function loadSettings(): AppSettings {
       openAtLogin: parsed.openAtLogin ?? DEFAULT_SETTINGS.openAtLogin,
       disabledCommands: parsed.disabledCommands ?? DEFAULT_SETTINGS.disabledCommands,
       enabledCommands: parsed.enabledCommands ?? DEFAULT_SETTINGS.enabledCommands,
+      searchApplicationsScope: Array.isArray(parsed.searchApplicationsScope) && parsed.searchApplicationsScope.length > 0
+        ? parsed.searchApplicationsScope
+        : DEFAULT_SETTINGS.searchApplicationsScope,
       customExtensionFolders: Array.isArray(parsed.customExtensionFolders)
         ? parsed.customExtensionFolders
             .map((value: any) => String(value || '').trim())
@@ -1261,6 +1277,10 @@ export function loadSettings(): AppSettings {
       disableFileSearchResults: normalizeBoolean(
         parsed.disableFileSearchResults,
         DEFAULT_SETTINGS.disableFileSearchResults
+      ),
+      showMenuBarIcon: normalizeBoolean(
+        parsed.showMenuBarIcon,
+        DEFAULT_SETTINGS.showMenuBarIcon
       ),
       ai: hydrateAISettings(parsed.ai),
       hyperKey: { ...DEFAULT_HYPER_KEY_SETTINGS, ...parsed.hyperKey },
@@ -2230,6 +2250,14 @@ export function loadNotesWindowState(): NotesWindowState | null {
     notesWindowStateCache = null;
   }
   return notesWindowStateCache;
+}
+
+export function getSearchApplicationsScope(): string[] {
+  const settings = loadSettings();
+  const appDirs: string[] = settings.searchApplicationsScope || [];
+  return appDirs
+    .filter((dir) => Boolean(dir))
+    .filter((dir, idx, all) => all.indexOf(dir) === idx);
 }
 
 export function saveNotesWindowState(state: NotesWindowState): void {

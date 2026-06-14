@@ -375,6 +375,12 @@
         "elevenlabsWarning": "ElevenLabs STT selected. {action} ElevenLabs API key in API Keys.",
         "elevenlabsReady": "ElevenLabs STT selected. Cloud transcription will use your ElevenLabs key.",
         "recognitionLanguage": "Recognition Language",
+        "vocabulary": {
+          "label": "Пользовательский словарь",
+          "placeholder": "Kotlin, Electron, Raycast, SuperCmd…",
+          "hint": "Необязательно. Перечислите редкие слова, имена или технические термины (через запятую или с новой строки), чтобы направить распознавание к правильному написанию.",
+          "tokenWarning": "Примерно {count} токенов. Whisper использует лишь около первых 224 — слова сверх этого игнорируются."
+        },
         "providerInfo": {
           "parakeet": "Offline on-device transcription via Parakeet TDT v3. Runs on Apple Neural Engine. Requires model warmup on first use. Download the model below before using dictation.",
           "qwen3": "Offline on-device transcription via Qwen3 ASR. Supports 30+ languages, requires macOS 15+, and warms up on first use.",
@@ -611,6 +617,18 @@
         "openedExisting": "Opened custom scripts folder.",
         "failed": "Failed to open custom scripts folder."
       },
+      "appSearchScope": {
+        "title": "Область поиска приложений",
+        "description": "Каталоги, в которых SuperCmd ищет установленные приложения для отображения в лаунчере.",
+        "add": "Добавить каталог",
+        "remove": "Удалить",
+        "empty": "Каталоги не добавлены. Будут использоваться системные каталоги по умолчанию.",
+        "added": "Каталог добавлен в область поиска.",
+        "removed": "Каталог удалён из области поиска.",
+        "duplicate": "Каталог уже есть в списке.",
+        "failed": "Не удалось обновить область поиска.",
+        "restartHint": "Перезапустите SuperCmd, чтобы изменения каталогов вступили в силу."
+      },
       "emojiPicker": {
         "enabled": "Включить выбор эмодзи",
         "enabledDesc": "Показывает предложения эмодзи при вводе префикса-триггера.",
@@ -665,6 +683,11 @@
         "title": "Отключить поиск файлов и папок",
         "description": "Скрыть результаты файлов и папок из основного поиска лаунчера.",
         "label": "Отключить результаты поиска файлов и папок"
+      },
+      "menuBarIcon": {
+        "title": "Значок в строке меню",
+        "description": "Показывать значок SuperCmd в строке меню macOS.",
+        "label": "Показывать значок в строке меню"
       },
       "navigationStyle": {
         "title": "Стиль навигации",

@@ -11,6 +11,7 @@
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/electron-40-blue.svg" alt="Electron"></a>
   <a href="https://discord.gg/CsdbknHqx5"><img src="https://img.shields.io/badge/Discord-Join%20chat-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="http://makeapullrequest.com"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs Welcome"></a>
+  <a href="https://buymeacoffee.com/shobhit99"><img src="https://img.shields.io/badge/Sponsor-Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
 </p>
 
 <p align="center">Open-source launcher for macOS with Raycast-compatible extensions, voice workflows, and AI-native actions.</p>
@@ -21,6 +22,10 @@
 Open-source launcher for macOS: **Raycast + Wispr Flow + Speechify + Memory + AI** in one app.
 
 SuperCmd gives you Raycast-style extension workflows, hold-to-speak dictation, natural text-to-speech, AI actions backed by configurable providers and memory, notes, canvas, clipboard history, snippet expansion, and window tiling — all from a single keyboard shortcut.
+
+<p align="center">
+  <a href="https://buymeacoffee.com/shobhit99"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="48"></a>
+</p>
 
 ## What It Is
 

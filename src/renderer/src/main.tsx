@@ -3,6 +3,11 @@ import ReactDOM from 'react-dom/client';
 import { I18nProvider } from './i18n';
 import '../styles/index.css';
 import { initializeTheme } from './utils/theme';
+import {
+  consumeAutoReloadBudget,
+  clearAutoReloadBudget,
+  STABLE_SESSION_MS,
+} from './utils/reload-budget';
 
 // Each BrowserWindow only needs one root app. Static imports of every app
 // here forced a single ~8MB bundle into every window (e.g. settings loaded
@@ -24,11 +29,26 @@ initializeTheme();
 
 const root = ReactDOM.createRoot(document.getElementById('root')!);
 
+// Auto-recovery budget for renderer render-crashes lives in
+// ./utils/reload-budget so it can be exercised by running it through a crash
+// sequence in a test. See scripts/test-renderer-error-boundary.mjs.
+
 class RendererErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { error: Error | null }
 > {
   state = { error: null as Error | null };
+  private stableTimer: ReturnType<typeof setTimeout> | null = null;
+
+  componentDidMount() {
+    // If the renderer stays healthy for a stretch, treat the session as
+    // recovered and reset the budget so a later one-off crash gets a fresh one.
+    this.stableTimer = setTimeout(clearAutoReloadBudget, STABLE_SESSION_MS);
+  }
+
+  componentWillUnmount() {
+    if (this.stableTimer) clearTimeout(this.stableTimer);
+  }
 
   static getDerivedStateFromError(error: Error) {
     return { error };
@@ -37,6 +57,14 @@ class RendererErrorBoundary extends React.Component<
   componentDidCatch(error: Error, info: React.ErrorInfo) {
     console.error('[RendererErrorBoundary] Render error:', error);
     console.error('[RendererErrorBoundary] Component stack:', info.componentStack);
+
+    if (consumeAutoReloadBudget()) {
+      console.warn('[RendererErrorBoundary] Auto-reloading to recover from render crash.');
+      // Reload from cache is fine here — the crash is in app state, not the bundle.
+      window.location.reload();
+    } else {
+      console.error('[RendererErrorBoundary] Auto-reload budget exhausted; showing fallback.');
+    }
   }
 
   render() {

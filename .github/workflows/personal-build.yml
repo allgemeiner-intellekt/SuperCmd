@@ -1,0 +1,115 @@
+name: Personal macOS Build
+run-name: Personal build · ${{ github.ref_name }} · ${{ inputs.package && 'installer' || 'checks' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Build an unsigned Apple Silicon DMG after checks
+        type: boolean
+        default: true
+      expected_sha:
+        description: Optional full commit SHA to guard against a moving branch
+        type: string
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'package*.json'
+      - 'tsconfig*.json'
+      - 'vite.config.*'
+      - '.github/workflows/personal-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'package*.json'
+      - 'tsconfig*.json'
+      - 'vite.config.*'
+      - '.github/workflows/personal-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-build-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'allgemeiner-intellekt/SuperCmd'
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify source and native runner
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$(uname -m)" = arm64
+          test -z "$EXPECTED_SHA" || test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          swift --version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --include=dev
+
+      - name: Test
+        run: npm test
+
+      - name: Check translations
+        run: npm run check:i18n
+
+      - name: Compile main process
+        run: npm run build:main
+
+      - name: Build renderer
+        run: npm run build:renderer
+
+      - name: Build native helpers
+        if: github.event_name == 'workflow_dispatch' && inputs.package
+        run: npm run build:native
+
+      - name: Package unsigned Apple Silicon installer
+        if: github.event_name == 'workflow_dispatch' && inputs.package
+        run: npx --no-install electron-builder --mac dmg --arm64 --publish never
+
+      - name: Record source and checksums
+        if: github.event_name == 'workflow_dispatch' && inputs.package
+        run: node scripts/personal-build.mjs manifest out
+
+      - name: Upload installer and provenance
+        if: github.event_name == 'workflow_dispatch' && inputs.package
+        uses: actions/upload-artifact@v4
+        with:
+          name: supercmd-macos-arm64-${{ github.sha }}
+          path: |
+            out/*.dmg
+            out/build-manifest.json
+            out/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Build summary
+        if: always()
+        env:
+          PACKAGE_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.package }}
+        run: |
+          {
+            echo "Source: $GITHUB_REPOSITORY @ $GITHUB_SHA"
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Installer requested: $PACKAGE_REQUESTED"
+            echo 'Installer artifacts are unsigned arm64 DMGs, retained for 30 days.'
+            echo 'An automatic push/PR run performs checks only; request an installer with Run workflow.'
+          } >> "$GITHUB_STEP_SUMMARY"

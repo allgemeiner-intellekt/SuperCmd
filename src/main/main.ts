@@ -12995,6 +12995,15 @@ function ensureAppUpdaterConfigured(): void {
     return;
   }
 
+  if (readAppPackageJson()?.supercmd?.updatesEnabled === false) {
+    updateAppUpdaterStatus({
+      state: 'unsupported',
+      supported: false,
+      message: '',
+    });
+    return;
+  }
+
   try {
     const { autoUpdater } = require('electron-updater');
     appUpdater = autoUpdater;

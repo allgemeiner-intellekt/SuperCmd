@@ -156,7 +156,7 @@
         "title": "Aggiornamenti app",
         "description": "Verifica e installa gli aggiornamenti dell'app pacchettizzata.",
         "defaultMessage": "Verifica e installa gli aggiornamenti dell'app pacchettizzata.",
-        "unsupported": "Gli aggiornamenti sono disponibili solo nelle build pacchettizzate.",
+        "unsupported": "Gli aggiornamenti in-app non sono disponibili in questa versione.",
         "checking": "Verifica degli aggiornamenti in corso...",
         "available": "È disponibile l'aggiornamento v{version}.",
         "notAvailable": "Stai già usando l'ultima versione.",

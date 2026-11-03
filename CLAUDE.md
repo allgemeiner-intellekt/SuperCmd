@@ -1,5 +1,10 @@
 # SuperCmd - Open Source Raycast Alternative
 
+## Personal fork skills
+
+- For upstream review, feature decisions, development, or fixes involving the owner's requirements, read [personal-requirements](.agents/skills/personal-requirements/SKILL.md). It defines this fork's scope when the upstream roadmap is broader.
+- For compilation, tests, checks, packaging, or artifact retrieval, read [cloud-build](.agents/skills/cloud-build/SKILL.md).
+
 ## Project Overview
 
 SuperCmd is an open-source alternative to Raycast, designed to provide a similar launcher experience while maintaining full compatibility with Raycast extensions. The project aims to achieve feature parity with Raycast while remaining open-source and community-driven.
@@ -208,7 +213,7 @@ The following APIs from `@raycast/api` may need additional work or verification:
 When implementing a new Raycast API:
 
 1. **Check Official Documentation**: Reference https://developers.raycast.com/api-reference/
-2. **Implement in `raycast-api/index.tsx`**: Add the API to the compatibility shim
+2. **Implement in the focused runtime module**: Use the Raycast API File Map below; wire public exports through `raycast-api/index.tsx`
 3. **Bridge to Main Process**: If system-level operations are needed, add IPC handlers in `main.ts` and `preload.ts`
 4. **Test with Extensions**: Verify compatibility with real Raycast extensions
 5. **Update This Document**: Mark the API as implemented in the status table above
@@ -239,7 +244,7 @@ Checklist when touching `en.json`:
 
 ### Code Organization
 
-- **API Shim**: All Raycast API implementations go in `src/renderer/src/raycast-api/index.tsx`
+- **API Shim**: Keep implementations in the focused `src/renderer/src/raycast-api/` runtime modules; use `index.tsx` for integration and exports
 - **Extension Loading**: Extension execution logic in `src/renderer/src/ExtensionView.tsx`
 - **System Integration**: Electron IPC handlers in `src/main/main.ts`; IPC bridge in `src/main/preload.ts`
 - **Extension Management**: Extension registry and installation in `src/main/extension-registry.ts`
@@ -556,20 +561,4 @@ Use this map when working in the Raycast compatibility layer:
 
 ## Skill routing
 
-When the user's request matches an available skill, ALWAYS invoke it using the Skill
-tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
-The skill has specialized workflows that produce better results than ad-hoc answers.
-
-Key routing rules:
-- Product ideas, "is this worth building", brainstorming → invoke office-hours
-- Bugs, errors, "why is this broken", 500 errors → invoke investigate
-- Ship, deploy, push, create PR → invoke ship
-- QA, test the site, find bugs → invoke qa
-- Code review, check my diff → invoke review
-- Update docs after shipping → invoke document-release
-- Weekly retro → invoke retro
-- Design system, brand → invoke design-consultation
-- Visual audit, design polish → invoke design-review
-- Architecture review → invoke plan-eng-review
-- Save progress, checkpoint, resume → invoke checkpoint
-- Code quality, health check → invoke health
+Choose relevant skills from the current environment's available-skill list and follow its supported loading mechanism. Repository skill pointers above also apply. Tool and skill availability varies by host; use the normal development workflow when no suitable skill is available.

@@ -5,7 +5,10 @@
   "author": "Shobhit Bhosure - (https://x.com/nullbytes00)",
   "homepage": "https://supercmd.sh",
   "main": "dist/main/main.js",
-  "repository": "https://github.com/SuperCmdLabs/SuperCmd",
+  "repository": "https://github.com/allgemeiner-intellekt/SuperCmd",
+  "supercmd": {
+    "updatesEnabled": false
+  },
   "scripts": {
     "dev": "npm run build:main && concurrently \"npm run watch:main\" \"npm run dev:renderer\" \"npm run start:electron\"",
     "watch:main": "tsc -p tsconfig.main.json --watch",
@@ -21,7 +24,7 @@
     "postinstall": "node scripts/ensure-cross-arch-esbuild.mjs && electron-builder install-app-deps",
     "start": "electron .",
     "package": "cross-env NODE_ENV=production npm run build && electron-builder",
-    "package:unsigned": "cross-env NODE_ENV=production CSC_IDENTITY_AUTO_DISCOVERY=false npm run build && electron-builder --mac dmg -c.mac.identity=null -c.mac.notarize=false"
+    "package:unsigned": "cross-env NODE_ENV=production npm run build && electron-builder --mac dmg --arm64 --publish never -c.mac.identity=null -c.mac.notarize=false"
   },
   "license": "ISC",
   "devDependencies": {
@@ -42,8 +45,6 @@
   },
   "dependencies": {
     "@aptabase/electron": "^0.3.1",
-    "@esbuild/darwin-arm64": "0.19.12",
-    "@esbuild/darwin-x64": "0.19.12",
     "@phosphor-icons/react": "^2.1.10",
     "@raycast/api": "^1.104.5",
     "electron-builder-notarize": "^1.5.2",
@@ -57,17 +58,15 @@
     "react-dom": "^18.2.0",
     "transliteration": "^2.6.1"
   },
+  "optionalDependencies": {
+    "@esbuild/darwin-arm64": "0.19.12",
+    "@esbuild/darwin-x64": "0.19.12"
+  },
   "build": {
     "appId": "com.supercmd.app",
     "productName": "SuperCmd",
-    "publish": [
-      {
-        "provider": "github",
-        "owner": "SuperCmdLabs",
-        "repo": "SuperCmd",
-        "releaseType": "release"
-      }
-    ],
+    "publish": null,
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "icon": "supercmd.icns",
     "asarUnpack": [
       "dist/native/**",
@@ -102,18 +101,15 @@
       "icon": "supercmd.icns",
       "target": [
         {
-          "target": "default",
+          "target": "dmg",
           "arch": [
-            "x64",
             "arm64"
           ]
         }
       ],
       "hardenedRuntime": true,
-      "notarize": {
-        "teamId": "T7HT4U4666"
-      },
-      "identity": "Shobhit Bhosure (T7HT4U4666)",
+      "notarize": false,
+      "identity": null,
       "entitlements": "./entitlements.mac.plist",
       "entitlementsInherit": "./entitlements.mac.plist",
       "extendInfo": {

@@ -1,5 +1,10 @@
 # SuperCmd - Open Source Raycast Alternative
 
+## Personal fork skills
+
+- For upstream review, feature decisions, development, or fixes involving the owner's requirements, read [personal-requirements](.agents/skills/personal-requirements/SKILL.md). It defines this fork's scope when the upstream roadmap is broader.
+- For compilation, tests, checks, packaging, or artifact retrieval, read [cloud-build](.agents/skills/cloud-build/SKILL.md).
+
 ## Project Overview
 
 SuperCmd is an open-source alternative to Raycast, designed to provide a similar launcher experience while maintaining full compatibility with Raycast extensions. The project aims to achieve feature parity with Raycast while remaining open-source and community-driven.
@@ -208,7 +213,7 @@ The following APIs from `@raycast/api` may need additional work or verification:
 When implementing a new Raycast API:
 
 1. **Check Official Documentation**: Reference https://developers.raycast.com/api-reference/
-2. **Implement in `raycast-api/index.tsx`**: Add the API to the compatibility shim
+2. **Implement in the focused runtime module**: Use the Raycast API File Map below; wire public exports through `raycast-api/index.tsx`
 3. **Bridge to Main Process**: If system-level operations are needed, add IPC handlers in `main.ts` and `preload.ts`
 4. **Test with Extensions**: Verify compatibility with real Raycast extensions
 5. **Update This Document**: Mark the API as implemented in the status table above
@@ -221,7 +226,7 @@ When implementing a new Raycast API:
 
 ### Code Organization
 
-- **API Shim**: All Raycast API implementations go in `src/renderer/src/raycast-api/index.tsx`
+- **API Shim**: Keep implementations in the focused `src/renderer/src/raycast-api/` runtime modules; use `index.tsx` for integration and exports
 - **Extension Loading**: Extension execution logic in `src/renderer/src/ExtensionView.tsx`
 - **System Integration**: Electron IPC handlers in `src/main/main.ts`; IPC bridge in `src/main/preload.ts`
 - **Extension Management**: Extension registry and installation in `src/main/extension-registry.ts`

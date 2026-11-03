@@ -156,7 +156,7 @@
         "title": "App Updates",
         "description": "Check for and install packaged-app updates.",
         "defaultMessage": "Check for and install packaged-app updates.",
-        "unsupported": "Updates are only available in packaged builds.",
+        "unsupported": "In dieser Version sind keine Updates innerhalb der App verfügbar.",
         "checking": "Checking for updates...",
         "available": "Update v{version} is available.",
         "notAvailable": "You are already on the latest version.",

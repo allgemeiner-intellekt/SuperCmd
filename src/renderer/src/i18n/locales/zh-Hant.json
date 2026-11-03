@@ -156,7 +156,7 @@
         "title": "應用程式更新",
         "description": "檢查並安裝打包版本的應用程式更新。",
         "defaultMessage": "檢查並安裝打包版本的應用程式更新。",
-        "unsupported": "只有打包後的應用程式版本才支援更新。",
+        "unsupported": "此版本不支援應用程式內更新。",
         "checking": "正在檢查更新...",
         "available": "發現可用更新 v{version}。",
         "notAvailable": "您已經是最新版本。",

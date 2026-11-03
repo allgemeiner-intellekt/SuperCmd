@@ -19,7 +19,10 @@ const index = await load('../src/main/file-search-index.ts');
 const launcher = await load('../src/renderer/src/utils/launcher-file-results.ts');
 
 test('Unicode names remain searchable through the file index and launcher filter', async (t) => {
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'supercmd-file-search-'));
+  // macOS exposes its temp directory through /var -> /private/var. The index
+  // confines resolved directories to the configured home, so use a canonical
+  // fixture root rather than exercise the separate symlink-home limitation.
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'supercmd-file-search-')));
   t.after(async () => {
     index.stopFileSearchIndexing();
     await fs.rm(home, { recursive: true, force: true });
@@ -42,6 +45,7 @@ test('Unicode names remain searchable through the file index and launcher filter
   await index.rebuildFileSearchIndex();
   assert.equal(index.getFileSearchIndexStatus().ready, true);
   assert.equal(index.getFileSearchIndexStatus().lastError, null);
+  assert.ok(index.getFileSearchIndexStatus().indexedEntryCount > 0, 'fixture root must be indexed before checking search behavior');
 
   for (const [query, relativePath] of [
     ['项目', '项目'], ['报告', '项目/报告.txt'], ['报告2026', '项目/报告2026.md'],

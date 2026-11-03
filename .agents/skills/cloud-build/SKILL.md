@@ -12,6 +12,7 @@ Run compilation, tests, checks, and packaging on GitHub where possible to avoid 
 - Repository: `allgemeiner-intellekt/SuperCmd`; upstream: `SuperCmdLabs/SuperCmd`.
 - Workflow: [personal-build.yml](../../../.github/workflows/personal-build.yml). Manual dispatch controls whether to package an installer or run checks only. Pushes to `main` and pull requests run checks for the paths listed there.
 - Build and packaging commands, runner selection, and retention are authoritative in the workflow and `package.json`.
+- The workflow also runs portable tests and main/renderer builds on Linux with dependency lifecycle scripts disabled. macOS-only tests self-skip there; use the separate arm64 job for platform evidence. Portable success does not replace the macOS check or installer build.
 - Artifact operations: [personal-build.mjs](../../../scripts/personal-build.mjs); use its `--help` for dispatch, status, and download usage. The helper checks the repository, selected commit, run result, and artifact provenance.
 
 ## Use a specific commit

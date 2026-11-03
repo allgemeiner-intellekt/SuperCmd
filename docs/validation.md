@@ -7,6 +7,13 @@ reading source do not require a local build. Use `package.json` and
 
 ## What each check proves
 
+The workflow runs portable tests and both TypeScript/Vite builds on Linux for
+feedback independent of macOS runner capacity. That job installs dependencies
+without lifecycle scripts and does not launch Electron or build native helpers.
+macOS-only cases self-skip there. The separate arm64 job still runs the full test
+suite and remains required for platform evidence; portable success is not macOS
+acceptance or a promise of Linux application support.
+
 | Check | Evidence | Limit |
 | --- | --- | --- |
 | `npm test` | Runs `scripts/test-*.mjs` with Node's test runner | Inspect individual tests and skips; some older tests only assert source text |

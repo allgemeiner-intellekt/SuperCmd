@@ -7,13 +7,14 @@
  * - Inline script commands (category: "script", mode: "inline"): runs the script and
  *   calls fetchCommands() to refresh the subtitle shown in the launcher
  *
- * All timers are cleared and re-registered whenever the `commands` list changes.
- * This ensures newly installed or removed commands are handled correctly.
+ * Equivalent command snapshots keep their due times. Removed/replaced commands
+ * cannot publish late results, and pending IPC/script work does not overlap.
  */
 
 import { useRef, useEffect } from 'react';
 import type { CommandInfo } from '../../types/electron';
 import { parseIntervalToMs } from '../utils/command-helpers';
+import { createBackgroundScheduler, type BackgroundTask } from '../utils/background-scheduler';
 import {
   readJsonObject,
   getScriptCmdArgsKey,
@@ -36,7 +37,9 @@ export interface UseBackgroundRefreshOptions {
 }
 
 export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommandActive }: UseBackgroundRefreshOptions): void {
-  const intervalTimerIdsRef = useRef<number[]>([]);
+  const schedulerRef = useRef<ReturnType<typeof createBackgroundScheduler> | null>(null);
+  const fetchCommandsRef = useRef(fetchCommands);
+  fetchCommandsRef.current = fetchCommands;
   const isMenuBarCommandActiveRef = useRef(isMenuBarCommandActive);
   isMenuBarCommandActiveRef.current = isMenuBarCommandActive;
 
@@ -53,10 +56,18 @@ export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommand
   };
 
   useEffect(() => {
-    for (const timerId of intervalTimerIdsRef.current) {
-      window.clearInterval(timerId);
-    }
-    intervalTimerIdsRef.current = [];
+    const scheduler = createBackgroundScheduler((error, id) => {
+      console.error('[BackgroundRefresh] Failed to run command:', id, error);
+    });
+    schedulerRef.current = scheduler;
+    return () => {
+      scheduler.dispose();
+      schedulerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const tasks: BackgroundTask[] = [];
 
     const extensionCommands = commands.filter(
       (cmd) => cmd.category === 'extension' && typeof cmd.interval === 'string' && cmd.path
@@ -70,10 +81,15 @@ export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommand
       if (!identity) continue;
       const { extName, cmdName } = identity;
 
-      const timerId = window.setInterval(async () => {
-        try {
+      tasks.push({
+        id: cmd.id,
+        intervalMs: ms,
+        revision: JSON.stringify([cmd.category, cmd.mode, cmd.path]),
+        run: async (isCurrent) => {
+          if (cmd.mode === 'menu-bar' && isMenuBarCommandActiveRef.current
+            && !isMenuBarCommandActiveRef.current(extName, cmdName)) return;
           const result = await window.electron.runExtension(extName, cmdName);
-          if (!result || !result.code) return;
+          if (!isCurrent() || !result || !result.code) return;
 
           const hydrated = hydrateExtensionBundlePreferences(result);
           if (hydrated.mode !== 'no-view' && hydrated.mode !== 'menu-bar') return;
@@ -107,12 +123,8 @@ export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommand
               },
             })
           );
-        } catch (error) {
-          console.error('[BackgroundRefresh] Failed to run command:', cmd.id, error);
-        }
-      }, ms);
-
-      intervalTimerIdsRef.current.push(timerId);
+        },
+      });
     }
 
     const inlineScriptCommands = commands.filter(
@@ -125,8 +137,11 @@ export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommand
       const ms = parseIntervalToMs(cmd.interval);
       if (!ms) continue;
 
-      const timerId = window.setInterval(async () => {
-        try {
+      tasks.push({
+        id: cmd.id,
+        intervalMs: ms,
+        revision: JSON.stringify([cmd.category, cmd.mode, cmd.path]),
+        run: async (isCurrent) => {
           const storedArgs = readJsonObject(getScriptCmdArgsKey(cmd.id));
           const missingArgs = getMissingRequiredScriptArguments(cmd, storedArgs);
           if (missingArgs.length > 0) return;
@@ -135,22 +150,13 @@ export function useBackgroundRefresh({ commands, fetchCommands, isMenuBarCommand
             arguments: storedArgs,
             background: true,
           });
-          if (result?.mode === 'inline') {
-            await fetchCommands();
+          if (isCurrent() && result?.mode === 'inline') {
+            await fetchCommandsRef.current();
           }
-        } catch (error) {
-          console.error('[BackgroundRefresh] Failed to run script command:', cmd.id, error);
-        }
-      }, ms);
-
-      intervalTimerIdsRef.current.push(timerId);
+        },
+      });
     }
 
-    return () => {
-      for (const timerId of intervalTimerIdsRef.current) {
-        window.clearInterval(timerId);
-      }
-      intervalTimerIdsRef.current = [];
-    };
-  }, [commands, fetchCommands]);
+    schedulerRef.current?.reconcile(tasks);
+  }, [commands]);
 }

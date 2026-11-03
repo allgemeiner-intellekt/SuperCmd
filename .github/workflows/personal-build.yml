@@ -55,8 +55,11 @@ jobs:
           cache: npm
       # These checks do not launch the app or rebuild native dependencies.
       # macOS-only tests self-skip here and still run in the arm64 job below.
+      # --force permits the locked darwin-only electron-liquid-glass package on
+      # this runner. --ignore-scripts prevents native installation; the ordinary
+      # macOS install below remains the platform/dependency compatibility gate.
       - name: Install locked dependencies for portable checks
-        run: npm ci --include=dev --ignore-scripts
+        run: npm ci --include=dev --ignore-scripts --force
       - name: Test portable behavior
         run: npm test
       - name: Compile main process

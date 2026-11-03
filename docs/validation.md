@@ -30,10 +30,11 @@ Both jobs upload renderer type diagnostics and label their result. An
 otherwise green build is not proof that renderer types are clean. Keep existing
 diagnostics visible; resolve the debt before making that check blocking.
 
-The inherited Claude review workflow is opt-in on forks through the repository
-variable `CLAUDE_CODE_REVIEW_ENABLED=true`. Enable it only after configuring the
-GitHub App and authentication. Its absence does not disable tests or compilation;
-it also does not count as a completed code review.
+The owner does not use the Claude GitHub App. Its inherited automatic-review and
+`@claude` comment workflows are removed; the repository-level workflows are also
+disabled so older branches cannot trigger them. Historical authentication failures
+remain visible but do not represent completed code reviews. Record reviews from
+the owner's chosen tools separately from test and build results.
 
 ## Choosing tests
 

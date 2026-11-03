@@ -22,6 +22,7 @@ This fork, `allgemeiner-intellekt/SuperCmd`, supports the owner's established da
 
 - Support Apple Silicon Macs only at this stage; Intel support is outside the current build scope.
 - Produce installation packages for the owner, using manually triggered GitHub builds and manual downloads. The owner has no Apple Developer signing identity and does not need automatic updates.
+- The owner does not use the Claude GitHub App. Keep its automatic PR-review and `@claude` comment workflows removed and disabled in this fork. Review changes through the owner's chosen tools.
 - Retain the `SuperCmd` name, `com.supercmd.app` identity, and existing user-data location. Preserve settings, extension preferences, credentials, and other existing data when making changes.
 - Application identity and data separation may be reconsidered later. That is a future possibility, not a current migration task.
 

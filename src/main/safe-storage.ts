@@ -19,6 +19,7 @@
  */
 
 import { app, safeStorage } from 'electron';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -31,6 +32,9 @@ let decryptedCache: Record<string, string> | null = null;
 // encryption was unavailable). These are passed through writes verbatim
 // so we never destroy a user's secrets we just couldn't open right now.
 let unknownRawCache: Record<string, string> | null = null;
+// Remember the bytes behind the cache so write-time revalidation does not
+// repeatedly decrypt an unchanged vault. null denotes a missing file.
+let cachedVaultContents: string | null = null;
 
 function getVaultPath(): string {
   return path.join(app.getPath('userData'), VAULT_FILENAME);
@@ -44,47 +48,60 @@ function isEncryptionAvailable(): boolean {
   }
 }
 
-function loadVault(): void {
-  if (decryptedCache && unknownRawCache) return;
-  const decrypted: Record<string, string> = {};
-  const unknownRaw: Record<string, string> = {};
+function loadVault(refresh = false): boolean {
+  if (!refresh && decryptedCache && unknownRawCache) return true;
   try {
-    const raw = fs.readFileSync(getVaultPath(), 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') {
-      const canDecrypt = isEncryptionAvailable();
-      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-        if (typeof value !== 'string' || !value) continue;
-        if (value.startsWith(ENCRYPTED_PREFIX)) {
-          if (!canDecrypt) {
-            unknownRaw[key] = value;
-            continue;
-          }
-          try {
-            const buf = Buffer.from(value.slice(ENCRYPTED_PREFIX.length), 'base64');
-            decrypted[key] = safeStorage.decryptString(buf);
-          } catch (e) {
-            console.warn(`safe-storage: failed to decrypt key "${key}", preserving raw blob:`, e);
-            unknownRaw[key] = value;
-          }
-        } else {
-          decrypted[key] = value;
+    let raw: string | null;
+    try {
+      raw = fs.readFileSync(getVaultPath(), 'utf-8');
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      raw = null; // Only a missing file is a safe first-run empty vault.
+    }
+    if (decryptedCache && unknownRawCache && raw === cachedVaultContents) return true;
+    const parsed = raw === null ? {} : JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+      || Object.values(parsed).some((value) => typeof value !== 'string')) {
+      throw new Error('Invalid vault format');
+    }
+    const decrypted: Record<string, string> = Object.create(null);
+    const unknownRaw: Record<string, string> = Object.create(null);
+    const canDecrypt = isEncryptionAvailable();
+    for (const [key, value] of Object.entries(parsed as Record<string, string>)) {
+      if (value.startsWith(ENCRYPTED_PREFIX)) {
+        if (!canDecrypt) {
+          unknownRaw[key] = value;
+          continue;
         }
+        try {
+          const buf = Buffer.from(value.slice(ENCRYPTED_PREFIX.length), 'base64');
+          decrypted[key] = safeStorage.decryptString(buf);
+        } catch (e) {
+          console.warn(`safe-storage: failed to decrypt key "${key}", preserving raw blob:`, e);
+          unknownRaw[key] = value;
+        }
+      } else {
+        decrypted[key] = value;
       }
     }
+    decryptedCache = decrypted;
+    unknownRawCache = unknownRaw;
+    cachedVaultContents = raw;
+    return true;
   } catch {
-    // vault file doesn't exist yet — first run, that's fine
+    // Do not cache an empty vault after an I/O or parse failure. Reads can
+    // recover on the next call; mutations must leave the original file alone.
+    resetVaultCache();
+    // JSON parse errors can include secret bytes, so do not log the exception.
+    console.error('safe-storage: vault unreadable or malformed; refusing writes.');
+    return false;
   }
-  decryptedCache = decrypted;
-  unknownRawCache = unknownRaw;
 }
 
-function persistVault(): boolean {
-  loadVault();
+function persistVault(decrypted: Record<string, string>, unknownRaw: Record<string, string>): boolean {
   const canEncrypt = isEncryptionAvailable();
-  const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(decryptedCache!)) {
-    if (!value) continue;
+  const out: Record<string, string> = Object.create(null);
+  for (const [key, value] of Object.entries(decrypted)) {
     if (canEncrypt) {
       try {
         const buf = safeStorage.encryptString(value);
@@ -99,21 +116,44 @@ function persistVault(): boolean {
   }
   // Preserve unreadable encrypted entries verbatim so we don't destroy them
   // by rewriting the file from a partial cache.
-  for (const [key, raw] of Object.entries(unknownRawCache!)) {
+  for (const [key, raw] of Object.entries(unknownRaw)) {
     if (key in out) continue;
     out[key] = raw;
   }
+  let tempPath: string | undefined;
+  let fd: number | undefined;
   try {
-    fs.writeFileSync(getVaultPath(), JSON.stringify(out, null, 2), { mode: 0o600 });
+    const target = getVaultPath();
+    const candidate = `${target}.${process.pid}.${randomUUID()}.tmp`;
+    const contents = JSON.stringify(out, null, 2);
+    fd = fs.openSync(candidate, 'wx', 0o600);
+    tempPath = candidate; // Clean up only a file we successfully created.
+    fs.writeFileSync(fd, contents, 'utf-8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tempPath, target);
+    tempPath = undefined;
+    // The cache represents committed disk state, never an attempted write.
+    decryptedCache = decrypted;
+    unknownRawCache = unknownRaw;
+    cachedVaultContents = contents;
     return true;
   } catch (e) {
     console.error('safe-storage: failed to write vault:', e);
     return false;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort cleanup */ }
+    }
+    if (tempPath !== undefined) {
+      try { fs.unlinkSync(tempPath); } catch { /* best-effort cleanup */ }
+    }
   }
 }
 
 export function getSecret(key: string): string {
-  loadVault();
+  if (!loadVault()) return '';
   return decryptedCache![key] || '';
 }
 
@@ -126,44 +166,31 @@ export function getSecret(key: string): string {
  * Setting an empty value is treated as a delete.
  */
 export function setSecret(key: string, value: string): boolean {
-  loadVault();
   const next = String(value ?? '');
-  if (!next) {
-    let changed = false;
-    if (decryptedCache![key] !== undefined) {
-      delete decryptedCache![key];
-      changed = true;
-    }
-    if (unknownRawCache![key] !== undefined) {
-      delete unknownRawCache![key];
-      changed = true;
-    }
-    if (!changed) return true;
-    return persistVault();
-  }
+  if (!next) return deleteSecret(key);
+  // Re-read before mutations, even with a warm cache, so an unreadable or
+  // externally changed file is never overwritten from a stale snapshot.
+  if (!loadVault(true)) return false;
   if (decryptedCache![key] === next && unknownRawCache![key] === undefined) return true;
-  decryptedCache![key] = next;
-  delete unknownRawCache![key];
-  return persistVault();
+  const decrypted = Object.assign(Object.create(null), decryptedCache!);
+  const unknownRaw = Object.assign(Object.create(null), unknownRawCache!);
+  decrypted[key] = next;
+  delete unknownRaw[key];
+  return persistVault(decrypted, unknownRaw);
 }
 
 export function deleteSecret(key: string): boolean {
-  loadVault();
-  let changed = false;
-  if (decryptedCache![key] !== undefined) {
-    delete decryptedCache![key];
-    changed = true;
-  }
-  if (unknownRawCache![key] !== undefined) {
-    delete unknownRawCache![key];
-    changed = true;
-  }
-  if (!changed) return true;
-  return persistVault();
+  if (!loadVault(true)) return false;
+  if (decryptedCache![key] === undefined && unknownRawCache![key] === undefined) return true;
+  const decrypted = Object.assign(Object.create(null), decryptedCache!);
+  const unknownRaw = Object.assign(Object.create(null), unknownRawCache!);
+  delete decrypted[key];
+  delete unknownRaw[key];
+  return persistVault(decrypted, unknownRaw);
 }
 
 export function hasSecret(key: string): boolean {
-  loadVault();
+  if (!loadVault()) return false;
   const value = decryptedCache![key];
   return typeof value === 'string' && value.length > 0;
 }
@@ -175,4 +202,5 @@ export function isSafeStorageAvailable(): boolean {
 export function resetVaultCache(): void {
   decryptedCache = null;
   unknownRawCache = null;
+  cachedVaultContents = null;
 }

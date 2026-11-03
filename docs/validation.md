@@ -26,7 +26,7 @@ acceptance or a promise of Linux application support.
 | `npm run check:i18n` | Locale key and value-shape comparison | Only configured strict locales fail the job; translation quality and interpolation correctness need review |
 | Installer workflow | Native compilation, packaging, identity/signature and artifact checks | Checks-only runs produce no installer; packaging does not grant macOS permissions |
 
-The workflow uploads renderer type diagnostics and labels their result. An
+Both jobs upload renderer type diagnostics and label their result. An
 otherwise green build is not proof that renderer types are clean. Keep existing
 diagnostics visible; resolve the debt before making that check blocking.
 

@@ -64,6 +64,19 @@ jobs:
         run: npm test
       - name: Compile main process
         run: npm run build:main
+      - name: Report renderer type diagnostics
+        id: renderer_types
+        continue-on-error: true
+        shell: bash
+        run: npm run check:renderer-types 2>&1 | tee renderer-types.log
+      - name: Upload renderer type diagnostics
+        if: always() && steps.renderer_types.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-types-linux-${{ github.sha }}
+          path: renderer-types.log
+          if-no-files-found: warn
+          retention-days: 14
       - name: Build renderer
         run: npm run build:renderer
 

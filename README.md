@@ -27,6 +27,14 @@ SuperCmd gives you Raycast-style extension workflows, hold-to-speak dictation, n
   <a href="https://buymeacoffee.com/shobhit99"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="48"></a>
 </p>
 
+## Personal fork maintenance
+
+This fork preserves existing workflows and uses manual Apple Silicon builds and
+updates. Start with [Contributing](CONTRIBUTING.md), the
+[source ownership map](docs/architecture.md), and
+[validation evidence](docs/validation.md). The feature overview below describes
+upstream capabilities; in-app automatic updates are disabled in this fork.
+
 ## What It Is
 
 SuperCmd is an Electron + React launcher that focuses on Raycast extension compatibility while remaining community-driven and open source. It ships a full `@raycast/api` and `@raycast/utils` compatibility shim so existing Raycast extensions work without modification. For anything that requires tight system integration — hotkeys, window management, speech recognition, clipboard, snippet injection — it drops into Swift and Objective-C to talk directly to macOS frameworks (ApplicationServices, EventKit, AVFoundation, Carbon) for native speed and reliability.

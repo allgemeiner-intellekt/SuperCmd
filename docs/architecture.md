@@ -45,6 +45,25 @@ Renderer paths in the last column are under `src/renderer/src/`.
 `src/shared/root-search-ranking-state.ts` owns ranking state normalization and
 limits; renderer ranking helpers compute match scores and ordering.
 
+## Boundaries introduced by the first maintenance PRs
+
+The [audit](maintenance/2026-11-03-audit.md#implementation-and-evidence) links the
+independent PRs that introduce these owners. When working on a branch that has
+not included those PRs, use the baseline locations above.
+
+| Owner | Responsibility | Integration point |
+| --- | --- | --- |
+| `src/main/command-catalog-cache.ts` | Discovery generations, shared refresh work, stale fallback, retry and publication | `commands.ts` owns discovery; `main.ts` subscribes to publication |
+| `src/main/extension-install.ts` | Staging, per-name exclusion, replacement and recovery | `extension-registry.ts` acquires candidates and `extension-runner.ts` builds them |
+| `src/main/extension-archive.ts` | Validate the complete archive before confined extraction | Registry download paths |
+| `src/main/applescript.ts` | Interpreter process, stdin/output limits, termination and settlement | The `run-applescript` IPC handler |
+| `src/renderer/src/utils/background-scheduler.ts` | Stable due times, in-flight exclusion and retired-task guards | `hooks/useBackgroundRefresh.ts` owns feature-specific effects |
+| `src/shared/file-search-text.ts` | Unicode name normalization and tokenization | Main file index and renderer file-result filter |
+
+Credential durability stays in `src/main/safe-storage.ts`: callers receive
+success only after file replacement, and caches reflect that committed state.
+These interfaces keep ownership explicit without changing public extension APIs.
+
 ## Trace a feature before editing it
 
 For a launcher command, trace discovery in `commands.ts`, the `get-commands`

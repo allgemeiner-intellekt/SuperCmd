@@ -54,6 +54,8 @@ export function createAppleScriptRunner(spawnScript: SpawnScript = spawn) {
         else stderr.push(chunk);
       });
       child.on('error', stop);
+      child.stdout.on('error', stop);
+      child.stderr.on('error', stop);
       child.stdin.on('error', (error: NodeJS.ErrnoException) => {
         // An interpreter may exit before reading stdin; its exit status/stderr
         // is more useful than EPIPE and still decides success or failure.
@@ -68,7 +70,8 @@ export function createAppleScriptRunner(spawnScript: SpawnScript = spawn) {
       if (timeout !== undefined) {
         timer = setTimeout(() => stop(new Error('AppleScript execution timed out')), timeout);
       }
-      child.stdin.end(script);
+      try { child.stdin.end(script); }
+      catch (error) { stop(error instanceof Error ? error : new Error(String(error))); }
     });
   };
 }

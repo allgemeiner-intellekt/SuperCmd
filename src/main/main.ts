@@ -14,12 +14,12 @@
 process.stdout?.on?.('error', () => {});
 process.stderr?.on?.('error', () => {});
 
+import { runAppleScript } from './applescript';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
-import { runAppleScript } from './applescript';
 import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, onCommandsPublished, refreshCommandsNow } from './commands';
 import {
   loadSettings,

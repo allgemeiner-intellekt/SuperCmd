@@ -6729,6 +6729,10 @@ function ensureHyperKeyMonitorBinary(): string | null {
   const fs = require('fs');
   const binaryPath = getNativeBinaryPath('hyper-key-monitor');
   if (fs.existsSync(binaryPath)) return binaryPath;
+  if (app.isPackaged) {
+    console.warn('[HyperKey] Packaged monitor is missing; reinstall a complete build.');
+    return null;
+  }
   try {
     const { execFileSync } = require('child_process');
     const sourceCandidates = [

@@ -16,6 +16,7 @@ This fork, `allgemeiner-intellekt/SuperCmd`, supports the owner's established da
 - Introduce features when needed. Full Raycast API parity is an upstream aspiration, not a requirement to implement every API in this personal fork. Preserve compatibility for existing extensions when changing the runtime.
 - Specific daily features and extension names have not been enumerated. Keep that uncertainty explicit; an unmentioned feature is not permission to remove or break it. Ask for a concrete workflow when a proposed trade-off needs one.
 - Chinese IME input in launcher search is a confirmed priority. While composing, Enter confirms text without executing a command; the next Enter after composition executes normally. Preserve IME candidate navigation and cancellation as well.
+- HyperKey is a confirmed usage requirement. Preserve the owner's configured source key and tap behavior across updates, and ship the native monitor in the installer.
 
 ## Confirmed choices
 

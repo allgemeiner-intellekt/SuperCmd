@@ -32,6 +32,8 @@ const swift = [
     '-framework AppKit -framework ApplicationServices'],
   ['dist/native/hotkey-hold-monitor', 'src/native/hotkey-hold-monitor.swift',
     '-framework CoreGraphics -framework AppKit -framework Carbon'],
+  ['dist/native/hyper-key-monitor', 'src/native/hyper-key-monitor.swift',
+    '-framework CoreGraphics -framework AppKit -framework Carbon'],
   ['dist/native/speech-recognizer', 'src/native/speech-recognizer.swift',
     '-framework Speech -framework AVFoundation'],
   ['dist/native/microphone-access', 'src/native/microphone-access.swift',

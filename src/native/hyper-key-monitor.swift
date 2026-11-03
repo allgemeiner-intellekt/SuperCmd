@@ -57,6 +57,7 @@ final class HyperKeyState {
     let isCapsLockToggle: Bool
     var sourceKeyDown: Bool = false
     var comboFired: Bool = false
+    var consumedComboKeys: Set<CGKeyCode> = []
     var pressSeq: Int = 0
     var eventTap: CFMachPort?
 
@@ -158,6 +159,15 @@ let callback: CGEventTapCallBack = { _, type, event, userInfo in
     let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
     let isSource = state.isSourceKeyCode(keyCode)
 
+    // Own a combination key through its release, even when Hyper is released
+    // first. Repeats after Hyper release must not become ordinary text input.
+    if type == .keyUp && state.consumedComboKeys.remove(keyCode) != nil {
+        return nil
+    }
+    if type == .keyDown && !state.sourceKeyDown && state.consumedComboKeys.contains(keyCode) {
+        return nil
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // CAPSLOCK TOGGLE MODE (no hidutil, passthrough)
     //
@@ -253,9 +263,10 @@ let callback: CGEventTapCallBack = { _, type, event, userInfo in
     if state.sourceKeyDown && !isSource {
         if type == .keyDown {
             state.comboFired = true
+            state.consumedComboKeys.insert(keyCode)
             let keyName = keyCodeToName[keyCode] ?? "unknown-\(keyCode)"
             emit(["combo": keyName])
-            return Unmanaged.passUnretained(event)
+            return nil
         }
         if type == .keyUp {
             return Unmanaged.passUnretained(event)

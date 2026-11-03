@@ -28,4 +28,8 @@ Use [Personal macOS Build](https://github.com/allgemeiner-intellekt/SuperCmd/act
 
 ## Verification status
 
-Workflow and helper are implemented. Both skills pass the skill validator; their file references resolve. The workflow passes actionlint, and the helper passes Node syntax checking. Cloud checks are pending the setup push. Full native compilation, DMG packaging, real artifact download, and installation have not been verified.
+Configured and enabled on the fork's default branch. Both skills pass the skill validator and their file references resolve; the workflow passes actionlint. The helper's status lookup and rejection of a mismatched selected commit were checked against the fork.
+
+[GitHub checks](https://github.com/allgemeiner-intellekt/SuperCmd/actions/runs/41617534187) passed for `dfb42008cd3a2edaf426bfb70ab81e33f274e143`: clean dependency installation, 31 tests with no failures or skips, main-process compilation, and renderer build. Tests exercise updater opt-out and artifact provenance/checksum verification. The translation checker exited successfully but reports two pre-existing Italian missing keys, `settings.ai.whisper.vocabulary` and `settings.extensions.appSearchScope`.
+
+This was a checks-only push run. Full native compilation, DMG packaging, a successful manual dispatch, real installer artifact download, and installation remain unverified. Documentation-only updates after that revision retain the above code/workflow evidence. Run an installer build when artifacts are first needed; successful checks alone do not establish packaged-app behavior.

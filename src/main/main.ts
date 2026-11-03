@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
+import { runAppleScript } from './applescript';
 import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, onCommandsPublished, refreshCommandsNow } from './commands';
 import {
   loadSettings,
@@ -15936,34 +15937,7 @@ return appURL's |path|() as text`,
   // Run AppleScript
   ipcMain.handle('run-applescript', async (_event: any, script: string, options?: { language?: string; humanReadableOutput?: boolean; timeout?: number }) => {
     try {
-      const { spawnSync } = require('child_process');
-      const rawLanguage = String(options?.language || 'AppleScript').trim();
-      const language = /^javascript$/i.test(rawLanguage) ? 'JavaScript' : 'AppleScript';
-      const args = ['-l', language];
-      if (options?.humanReadableOutput === false) {
-        args.push('-s', 's');
-      }
-      const timeout = typeof options?.timeout === 'number' && Number.isFinite(options.timeout)
-        ? Math.max(1, Math.min(options.timeout, 5 * 60 * 1000))
-        : undefined;
-
-      const proc = spawnSync('/usr/bin/osascript', args, {
-        input: script,
-        encoding: 'utf-8',
-        timeout,
-      });
-
-      if (proc.error) {
-        throw proc.error;
-      }
-
-      if (proc.status !== 0) {
-        const stderr = (proc.stderr || '').trim() || 'AppleScript execution failed';
-        throw new Error(stderr);
-      }
-
-      const result = proc.stdout || '';
-      return result.trim();
+      return await runAppleScript(script, options);
     } catch (e: any) {
       console.error('AppleScript error:', e);
       throw new Error(e?.message || 'AppleScript execution failed');

@@ -54,7 +54,7 @@ test('Unicode names remain searchable through the file index and launcher filter
   ]) {
     await t.test(`name query ${query} finds ${relativePath}`, async () => {
       const results = await index.searchIndexedFiles(query, { limit: 30 });
-      const result = results.find((entry) => entry.path === path.join(home, relativePath));
+      const result = results.find((entry) => entry.path.normalize('NFC') === path.join(home, relativePath).normalize('NFC'));
       assert.ok(result, `${query} should find ${relativePath} in the real index`);
       assert.ok(launcher.matchesLauncherFileNameTerms(result.name, launcher.getLauncherFileSearchTerms(query)),
         'the launcher must not filter out the matching result');

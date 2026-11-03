@@ -20,6 +20,7 @@ import { discoverInstalledExtensionCommands } from './extension-runner';
 import { discoverScriptCommands } from './script-command-runner';
 import { getAllQuickLinks, getQuickLinkCommandId, type QuickLink, type QuickLinkIcon } from './quicklink-store';
 import { loadSettings,getSearchApplicationsScope} from './settings-store';
+import { createCommandCatalogCache } from './command-catalog-cache';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -105,13 +106,15 @@ export interface CommandInfo {
 
 // ─── Cache ──────────────────────────────────────────────────────────
 
-let cachedCommands: CommandInfo[] | null = null;
-let staleCommandsFallback: CommandInfo[] | null = null;
-let cacheTimestamp = 0;
-let inflightDiscovery: Promise<CommandInfo[]> | null = null;
-let lastStaleRefreshRequestAt = 0;
 const CACHE_TTL = 30 * 60_000; // 30 min
 const STALE_REFRESH_COOLDOWN_MS = 15_000;
+const commandCatalog = createCommandCatalogCache({
+  discover: discoverAndBuildCommands,
+  ttlMs: CACHE_TTL,
+  staleRefreshCooldownMs: STALE_REFRESH_COOLDOWN_MS,
+});
+// Only valid publications reach disk; obsolete scans cannot seed the next launch.
+commandCatalog.subscribe(saveCommandsDiskCache);
 
 // ─── Commands Disk Cache ─────────────────────────────────────────────────────
 // Persists the discovered commands list across restarts so the launcher is
@@ -166,16 +169,14 @@ function saveCommandsDiskCache(commands: CommandInfo[]): void {
 export function initCommandsCache(): void {
   const cmds = loadCommandsDiskCache();
   if (cmds) {
-    cachedCommands = cmds;
-    staleCommandsFallback = cmds;
-    cacheTimestamp = 0; // mark stale so the next getAvailableCommands() triggers a background refresh
+    commandCatalog.seedStale(cmds);
     console.log(`[Commands] Loaded ${cmds.length} commands from disk cache`);
   }
 }
 
-/** Returns the current inflight background discovery promise, if any. */
-export function getInflightDiscovery(): Promise<CommandInfo[]> | null {
-  return inflightDiscovery;
+/** Subscribers run after a valid discovery has replaced the cached catalog. */
+export function onCommandsPublished(listener: (commands: CommandInfo[]) => void | Promise<void>): () => void {
+  return commandCatalog.subscribe(listener);
 }
 
 // ─── Icon Disk Cache ────────────────────────────────────────────────
@@ -2003,81 +2004,19 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
     }
   } catch {}
 
-  cachedCommands = allCommands;
-  cacheTimestamp = Date.now();
-  staleCommandsFallback = allCommands;
-
   console.log(
     `Discovered ${apps.length} apps, ${settings.length} settings panes, ${extensionCommands.length} extension commands, ${scriptCommands.length} script commands, ${quickLinkCommands.length} quick links in ${Date.now() - t0}ms`
   );
 
-  // Persist to disk so the next startup can serve commands instantly.
-  saveCommandsDiskCache(allCommands);
-
-  return cachedCommands;
+  return allCommands;
 }
 
-function ensureBackgroundRefreshForStaleCache(): void {
-  if (!cachedCommands) return;
-  if (inflightDiscovery) return;
-  const now = Date.now();
-  if (now - lastStaleRefreshRequestAt < STALE_REFRESH_COOLDOWN_MS) return;
-  lastStaleRefreshRequestAt = now;
-  inflightDiscovery = discoverAndBuildCommands()
-    .catch((error) => {
-      console.warn('[Commands] Background refresh failed:', error);
-      return cachedCommands || [];
-    })
-    .finally(() => {
-      inflightDiscovery = null;
-    });
+export function refreshCommandsNow(): Promise<CommandInfo[]> {
+  return commandCatalog.refresh();
 }
 
-export async function refreshCommandsNow(): Promise<CommandInfo[]> {
-  if (inflightDiscovery) {
-    return inflightDiscovery;
-  }
-
-  inflightDiscovery = discoverAndBuildCommands().finally(() => {
-    inflightDiscovery = null;
-  });
-  return inflightDiscovery;
-}
-
-export async function getAvailableCommands(): Promise<CommandInfo[]> {
-  const now = Date.now();
-  if (cachedCommands && now - cacheTimestamp < CACHE_TTL) {
-    return cachedCommands;
-  }
-
-  // Serve stale cache immediately and refresh in the background to avoid
-  // repeatedly blocking the launcher on app/settings discovery.
-  if (cachedCommands) {
-    ensureBackgroundRefreshForStaleCache();
-    return cachedCommands;
-  }
-
-  // cachedCommands was invalidated (e.g. FSWatcher fired) but staleCommandsFallback
-  // still has good data.  Return it immediately and kick off a background refresh
-  // so the launcher never blocks on discovery after an invalidation event.
-  if (staleCommandsFallback) {
-    if (!inflightDiscovery) {
-      inflightDiscovery = discoverAndBuildCommands()
-        .catch((error) => {
-          console.warn('[Commands] Background refresh failed:', error);
-          return staleCommandsFallback || [];
-        })
-        .finally(() => { inflightDiscovery = null; });
-    }
-    return staleCommandsFallback;
-  }
-
-  // Deduplicate concurrent cold-start calls.
-  if (inflightDiscovery) {
-    return inflightDiscovery;
-  }
-
-  return refreshCommandsNow();
+export function getAvailableCommands(): Promise<CommandInfo[]> {
+  return commandCatalog.read();
 }
 
 
@@ -2110,7 +2049,7 @@ export async function executeCommand(id: string): Promise<boolean> {
 
   // Use stale fallback when available to avoid blocking on a fresh discovery
   // while the cache is being rebuilt in the background.
-  const commands = cachedCommands ?? staleCommandsFallback ?? await getAvailableCommands();
+  const commands = await getAvailableCommands();
   const command = commands.find((c) => c.id === id);
   if (!command?.path) {
     console.error(`Command not found: ${id}`);
@@ -2131,10 +2070,5 @@ export async function executeCommand(id: string): Promise<boolean> {
 }
 
 export function invalidateCache(): void {
-  if (cachedCommands) {
-    staleCommandsFallback = cachedCommands;
-  }
-  cachedCommands = null;
-  cacheTimestamp = 0;
-  lastStaleRefreshRequestAt = 0;
+  commandCatalog.invalidate();
 }

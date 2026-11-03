@@ -20,6 +20,11 @@ The workflow uploads renderer type diagnostics and labels their result. An
 otherwise green build is not proof that renderer types are clean. Keep existing
 diagnostics visible; resolve the debt before making that check blocking.
 
+The inherited Claude review workflow is opt-in on forks through the repository
+variable `CLAUDE_CODE_REVIEW_ENABLED=true`. Enable it only after configuring the
+GitHub App and authentication. Its absence does not disable tests or compilation;
+it also does not count as a completed code review.
+
 ## Choosing tests
 
 Exercise production modules through the same interface as callers. For an async

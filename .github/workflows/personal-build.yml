@@ -41,7 +41,7 @@ concurrency:
 jobs:
   build:
     if: github.repository == 'allgemeiner-intellekt/SuperCmd'
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'

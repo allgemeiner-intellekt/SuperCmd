@@ -39,6 +39,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  portable-checks:
+    if: github.repository == 'allgemeiner-intellekt/SuperCmd'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify source
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: test -z "$EXPECTED_SHA" || test "$GITHUB_SHA" = "$EXPECTED_SHA"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      # These checks do not launch the app or rebuild native dependencies.
+      # macOS-only tests self-skip here and still run in the arm64 job below.
+      # --force permits the locked darwin-only electron-liquid-glass package on
+      # this runner. --ignore-scripts prevents native installation; the ordinary
+      # macOS install below remains the platform/dependency compatibility gate.
+      - name: Install locked dependencies for portable checks
+        run: npm ci --include=dev --ignore-scripts --force
+      - name: Test portable behavior
+        run: npm test
+      - name: Compile main process
+        run: npm run build:main
+      - name: Build renderer
+        run: npm run build:renderer
+
   build:
     if: github.repository == 'allgemeiner-intellekt/SuperCmd'
     runs-on: macos-15
@@ -73,6 +101,23 @@ jobs:
 
       - name: Compile main process
         run: npm run build:main
+
+      # Vite transpiles TypeScript without checking it. Keep existing renderer
+      # diagnostics visible while that debt is assessed; this is not a gate yet.
+      - name: Report renderer type diagnostics
+        id: renderer_types
+        continue-on-error: true
+        shell: bash
+        run: npm run check:renderer-types 2>&1 | tee renderer-types.log
+
+      - name: Upload renderer type diagnostics
+        if: always() && steps.renderer_types.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: renderer-types-${{ github.sha }}
+          path: renderer-types.log
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Build renderer
         run: npm run build:renderer
@@ -109,11 +154,13 @@ jobs:
         if: always()
         env:
           PACKAGE_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.package }}
+          RENDERER_TYPES_OUTCOME: ${{ steps.renderer_types.outcome }}
         run: |
           {
             echo "Source: $GITHUB_REPOSITORY @ $GITHUB_SHA"
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "Installer requested: $PACKAGE_REQUESTED"
+            echo "Renderer types (non-blocking diagnostic): $RENDERER_TYPES_OUTCOME"
             echo 'Installer artifacts are ad-hoc signed arm64 DMGs without notarization, retained for 30 days.'
             echo 'An automatic push/PR run performs checks only; request an installer with Run workflow.'
           } >> "$GITHUB_STEP_SUMMARY"

@@ -1,95 +1,50 @@
-# Contributing to SuperCmd
+# Contributing to this SuperCmd fork
 
-Thanks for your interest in contributing to SuperCmd! This guide will help you get started.
+This fork maintains the owner's existing workflows. Read the
+[personal requirements](.agents/skills/personal-requirements/SKILL.md) before
+proposing product changes, and [AGENTS.md](AGENTS.md) for working rules.
+Upstream feature parity is not the acceptance criterion for this fork.
 
-## Quick Links
+## Find the owner of a change
 
-- [Discord](https://discord.gg/CsdbknHqx5) — ask questions, discuss features
-- [Issues](https://github.com/SuperCmdLabs/SuperCmd/issues) — report bugs or request features
-- [README — Getting Started](./README.md#getting-started) — set up your dev environment
+The [architecture map](docs/architecture.md) follows the actual source layout.
+Use the [Raycast runtime map](docs/raycast-runtime.md) for extension work and the
+[maintenance audit](docs/maintenance/2026-11-03-audit.md) for known defects and
+follow-up scope. Historical development notes are not verification evidence.
 
-## Development Setup
+Keep a PR focused on one behavior or responsibility. Make the smallest interface
+that owns the behavior, its async lifetime, and its failure handling. Preserve
+existing command IDs, stored data, extension contracts, IME, and HyperKey.
 
-1. Follow the [Getting Started](./README.md#getting-started) section in the README to clone, install, and run the project.
-2. Make sure `npm run build` completes without errors before starting work.
+## Validate on the intended commit
 
-## Project Architecture
-```text
-src/
-├── main/           # Electron main process
-│   ├── ipc/        # IPC handlers between main and renderer
-│   ├── settings/   # App settings management
-│   └── ...
-├── renderer/       # React UI (Vite-powered)
-│   └── src/
-│       ├── raycast-api/   # Raycast API compatibility shims (@raycast/api, @raycast/utils)
-│       ├── components/    # React components
-│       ├── hooks/         # React hooks
-│       └── ...
-└── native/         # Swift helpers for macOS-native features
-```
+Follow [cloud-build](.agents/skills/cloud-build/SKILL.md) for GitHub checks and
+installer builds. See [validation](docs/validation.md) for what each check covers
+and what still requires macOS or real-extension acceptance. The authoritative
+commands live in `package.json`; no local build is required just to begin work.
 
-### Key principles
+For a bug, add a behavior regression through the production interface. Explain
+the trigger, the previous result, and the corrected result. For performance,
+record the workload and measured evidence or deterministic work counts. Avoid
+unmeasured speedup claims.
 
-- **Raycast compatibility is the priority.** Extensions built for Raycast should work in SuperCmd with minimal or no changes. Before changing anything in `src/renderer/src/raycast-api/`, verify it doesn't break existing extensions.
-- **System-level logic lives in `src/main/`.** IPC, settings, file access, and native module bridges belong here.
-- **UI code lives in `src/renderer/src/`.** Views, hooks, and components go here.
+## Submit a PR
 
-## Making a Pull Request
+Target `main` in `allgemeiner-intellekt/SuperCmd`. Include:
 
-### Branch naming
+- The concrete behavior change and compatibility impact.
+- The exact head SHA and matching GitHub run evidence.
+- Regression cases exercised and any skipped or device-only checks.
+- Remaining risks, including data migration or rollback implications.
 
-Use descriptive branch names with a prefix:
+Use a descriptive branch and commit message. Update ownership references when
+moving a module. UI string changes update every locale key and interpolation
+placeholder in the same PR. Extension compatibility changes belong in SuperCmd,
+not in an installed extension's source.
 
-- `feat/description` — new feature
-- `fix/description` — bug fix
-- `docs/description` — documentation
-- `chore/description` — maintenance, cleanup
-- `test/description` — tests
+## Report a bug
 
-### Commit messages
-
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-```
-feat: add clipboard history search
-fix: resolve hotkey not registering on Sonoma
-docs: update AI setup instructions
-chore: remove unused dependencies
-test: add unit tests for ai-provider
-```
-
-### PR checklist
-
-Before submitting your PR, verify:
-
-- [ ] `npm run build` completes without errors
-- [ ] You've tested your changes locally with `npm run dev`
-- [ ] Your PR description includes: what changed, why, compatibility impact, and how you tested it
-- [ ] If you modified the Raycast API shims, you've tested with at least one existing Raycast extension
-
-### PR size
-
-Keep PRs focused. A single PR should address one concern. If you're working on a large feature, consider breaking it into smaller PRs.
-
-## Working with Extensions
-
-SuperCmd aims for compatibility with [Raycast extensions](https://www.raycast.com/store). When working on the runtime:
-
-- Test against popular extensions (Calculator, Clipboard History, etc.)
-- The API shims are in `src/renderer/src/raycast-api/` — check the [Raycast API docs](https://developers.raycast.com/api-reference/) for reference
-- If an API is not yet implemented, add a stub that logs a warning rather than throwing
-
-## Reporting Bugs
-
-When opening an issue, include:
-
-- macOS version
-- Node.js version (`node -v`)
-- SuperCmd version (Settings → About, or check `package.json`)
-- Steps to reproduce
-- Expected vs actual behavior
-- Console logs if available (Cmd+Option+I to open DevTools)
-
-## Code of Conduct
-
-Be respectful. We're all here to build something great together.
+Include the SuperCmd version, macOS version and architecture, reproduction steps,
+expected and actual results, and relevant redacted logs. For extension failures,
+include the extension and command names. Keep credentials and personal content
+out of logs and screenshots.

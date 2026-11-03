@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       package:
-        description: Build an unsigned Apple Silicon DMG after checks
+        description: Build an Apple Silicon DMG without a Developer ID certificate
         type: boolean
         default: true
       expected_sha:
@@ -81,9 +81,13 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && inputs.package
         run: npm run build:native
 
-      - name: Package unsigned Apple Silicon installer
+      - name: Package ad-hoc signed Apple Silicon installer
         if: github.event_name == 'workflow_dispatch' && inputs.package
         run: npx --no-install electron-builder --mac dmg --arm64 --publish never
+
+      - name: Verify macOS application identity
+        if: github.event_name == 'workflow_dispatch' && inputs.package
+        run: node scripts/sign-macos.cjs --verify out/mac-arm64/SuperCmd.app
 
       - name: Record source and checksums
         if: github.event_name == 'workflow_dispatch' && inputs.package
@@ -110,6 +114,6 @@ jobs:
             echo "Source: $GITHUB_REPOSITORY @ $GITHUB_SHA"
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "Installer requested: $PACKAGE_REQUESTED"
-            echo 'Installer artifacts are unsigned arm64 DMGs, retained for 30 days.'
+            echo 'Installer artifacts are ad-hoc signed arm64 DMGs without notarization, retained for 30 days.'
             echo 'An automatic push/PR run performs checks only; request an installer with Run workflow.'
           } >> "$GITHUB_STEP_SUMMARY"

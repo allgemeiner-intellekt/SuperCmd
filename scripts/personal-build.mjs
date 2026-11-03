@@ -15,7 +15,8 @@ const help = `Personal SuperCmd cloud builds (requires authenticated gh):
   node scripts/personal-build.mjs manifest <directory>  (GitHub Actions only)
 
 Workflows: https://github.com/${repo}/actions/workflows/${workflow}
-An installer run uploads an unsigned arm64 DMG, build-manifest.json and SHA256SUMS.
+An installer run uploads an ad-hoc signed arm64 DMG, build-manifest.json and SHA256SUMS.
+No Apple Developer ID certificate or notarization is used.
 Artifacts expire after the retention period configured in the workflow.
 `;
 
@@ -64,7 +65,8 @@ async function manifest(directory) {
     version: pkg.version,
     platform: 'darwin',
     architecture: 'arm64',
-    signed: false,
+    signing: 'ad-hoc',
+    notarized: false,
     updates: 'manual',
     files: checksums,
   };

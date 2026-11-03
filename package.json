@@ -1,6 +1,6 @@
 {
   "name": "supercmd",
-  "version": "1.0.27",
+  "version": "1.0.28",
   "description": "SuperCmd — Productivity supercharged",
   "author": "Shobhit Bhosure - (https://x.com/nullbytes00)",
   "homepage": "https://supercmd.sh",
@@ -28,6 +28,7 @@
   },
   "license": "ISC",
   "devDependencies": {
+    "@electron/osx-sign": "1.0.5",
     "@types/node": "^20.11.5",
     "@types/react": "^18.2.48",
     "@types/react-dom": "^18.2.18",
@@ -63,6 +64,7 @@
     "@esbuild/darwin-x64": "0.19.12"
   },
   "build": {
+    "afterPack": "./scripts/sign-macos.cjs",
     "appId": "com.supercmd.app",
     "productName": "SuperCmd",
     "publish": null,

@@ -78,6 +78,18 @@ test('timeout kills and reaps a child even when it ignores SIGTERM', async () =>
   assert.equal(h.child.signalCode, 'SIGKILL');
 });
 
+test('pipe errors and invalid stdin input reject without leaving a child running', async () => {
+  const pipe = nodeRunner('setInterval(() => {}, 1000)');
+  const pending = pipe.run('');
+  const rejected = assert.rejects(pending, /injected pipe failure/);
+  pipe.child.stdout.destroy(new Error('injected pipe failure'));
+  await rejected;
+  assert.equal(pipe.child.signalCode, 'SIGKILL');
+  const input = nodeRunner('setInterval(() => {}, 1000)');
+  await assert.rejects(input.run({ invalid: true }), /chunk|argument/i);
+  assert.equal(input.child.signalCode, 'SIGKILL');
+});
+
 test('nonpositive timeout is normalized; nonfinite timeout retains the default', async () => {
   for (const timeout of [0, -10]) {
     const h = nodeRunner('setInterval(() => {}, 1000)');

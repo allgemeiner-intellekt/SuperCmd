@@ -19,9 +19,19 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import * as zlib from 'zlib';
+import { extractExtensionTarGz } from './extension-archive';
 import {
-  getCurrentRaycastPlatform,
+  assertExtensionSourceTree,
+  assertNoExtensionSymlinks,
+  confinedExtensionPath,
+  ExtensionInstallRecoveryError,
+  installStagedExtension,
+  isSafeExtensionName,
+  readExtensionInstallManifest,
+  validateExtensionBuild,
+  withExtensionInstallLock,
+} from './extension-install';
+import {
   getManifestPlatforms,
   isManifestPlatformCompatible,
 } from './extension-platform';
@@ -553,11 +563,12 @@ async function downloadExtensionFromTree(name: string, tmpDir: string): Promise<
   const srcDir = path.join(tmpDir, 'extensions', name);
   fs.mkdirSync(srcDir, { recursive: true });
 
-  // Create all directories upfront
-  for (const entry of fileEntries) {
+  // Validate all paths before writing anything from the remote tree.
+  const destinations = fileEntries.map((entry) => {
     const relativePath = entry.path.slice(prefix.length);
-    if (!relativePath) continue;
-    const destination = path.join(srcDir, relativePath);
+    return confinedExtensionPath(srcDir, relativePath);
+  });
+  for (const destination of destinations) {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
   }
 
@@ -569,10 +580,7 @@ async function downloadExtensionFromTree(name: string, tmpDir: string): Promise<
     while (index < fileEntries.length) {
       const i = index++;
       const entry = fileEntries[i];
-      const relativePath = entry.path.slice(prefix.length);
-      if (!relativePath) continue;
-
-      const destination = path.join(srcDir, relativePath);
+      const destination = destinations[i];
       const fileUrl = `${GITHUB_RAW}/${entry.path}`;
       const response = await fetchWithTimeout(
         fileUrl,
@@ -596,7 +604,10 @@ async function downloadExtensionFromTree(name: string, tmpDir: string): Promise<
     { length: Math.min(CONCURRENCY, fileEntries.length) },
     () => downloadOne()
   );
-  await Promise.all(workers);
+  // Do not delete staging while another worker can still write to it.
+  const results = await Promise.allSettled(workers);
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failed) throw failed.reason;
 
   console.log(`Downloaded ${fileEntries.length} files for "${name}"`);
   return srcDir;
@@ -683,6 +694,7 @@ function getExtensionsDir(): string {
 }
 
 function getInstalledPath(name: string): string {
+  if (!isSafeExtensionName(name)) throw new Error('Invalid extension name');
   return path.join(getExtensionsDir(), name);
 }
 
@@ -998,6 +1010,7 @@ export async function installExtensionDeps(
 // ─── Install / Uninstall ────────────────────────────────────────────
 
 export function isExtensionInstalled(name: string): boolean {
+  if (!isSafeExtensionName(name)) return false;
   const p = getInstalledPath(name);
   return (
     fs.existsSync(p) && fs.existsSync(path.join(p, 'package.json'))
@@ -1007,6 +1020,7 @@ export function isExtensionInstalled(name: string): boolean {
 export function getInstalledExtensionNames(): string[] {
   try {
     return fs.readdirSync(getExtensionsDir()).filter((d) => {
+      if (!isSafeExtensionName(d)) return false;
       const p = getInstalledPath(d);
       return (
         fs.statSync(p).isDirectory() &&
@@ -1023,7 +1037,8 @@ export function getInstalledExtensionNames(): string[] {
  *
  * Strategy:
  *   1. PRIMARY: Download pre-built bundle from API (no git/npm needed)
- *   2. FALLBACK: git sparse-checkout + npm install (if API returns non-2xx)
+ *   2. FALLBACK: API source + dependencies + esbuild
+ *   3. LAST RESORT: git sparse-checkout + dependencies + esbuild
  */
 export async function installExtension(
   name: string,
@@ -1032,354 +1047,106 @@ export async function installExtension(
     onProgress?: (payload: { message: string; downloadedBytes?: number; totalBytes?: number }) => void;
   },
 ): Promise<boolean> {
-  if (!/^[A-Za-z0-9._-]+$/.test(String(name || ''))) {
+  if (!isSafeExtensionName(name)) {
     console.error(`Invalid extension name: "${name}"`);
     return false;
   }
 
-  // 1. FASTEST: Pre-built bundle from S3 (~2-3s, no npm/bun/esbuild needed).
-  // Callers can opt out (e.g. recovering from an incomplete bundle that
-  // installed `.sc-build/` without source) so we go straight to the source-
-  // download path on retry.
-  if (!options?.skipBundle) {
-    try {
-      const success = await installExtensionFromBundle(name, options?.onProgress);
-      if (success) return true;
-    } catch (bundleError: any) {
-      console.warn(`Bundle install failed for "${name}":`, bundleError?.message || bundleError);
+  return withExtensionInstallLock(getExtensionsDir(), name, async () => {
+    const attempts = [
+      ...(!options?.skipBundle ? [() => installExtensionFromBundle(name, options?.onProgress)] : []),
+      () => installExtensionViaAPI(name),
+      () => installExtensionViaGit(name),
+    ];
+    for (const attempt of attempts) {
+      try {
+        await attempt();
+      } catch (error) {
+        console.warn(`Extension install attempt failed for "${name}":`, error);
+        // A failed restore needs recovery, not another fallback overwriting state.
+        if (error instanceof ExtensionInstallRecoveryError) return false;
+        continue;
+      }
+      // Tracking is not part of the transaction and cannot undo a committed install.
+      try { reportInstall(name, getMachineId()).catch(() => {}); } catch {}
+      return true;
     }
-  }
-
-  // 2. FALLBACK: Download source + bun/npm + esbuild
-  try {
-    const success = await installExtensionViaAPI(name);
-    if (success) return true;
-  } catch (apiError: any) {
-    console.warn(`API install failed for "${name}":`, apiError?.message || apiError);
-  }
-
-  // 3. LAST RESORT: git sparse-checkout
-  try {
-    const success = await installExtensionViaGit(name);
-    if (success) return true;
-  } catch (gitError: any) {
-    console.warn(`Git install also failed for "${name}":`, gitError?.message || gitError);
-  }
-
-  return false;
+    return false;
+  });
 }
 
-// ─── Pre-built Bundle Install (Fastest) ─────────────────────────────
+// ─── Pre-built Bundle Install ──────────────────────────────────────
 
-/**
- * Download a pre-built bundle from S3 via the backend API.
- * The bundle contains package.json + assets/ + .sc-build/ (esbuild output).
- * No npm, no bun, no esbuild needed. ~2-3s total.
- */
 async function installExtensionFromBundle(
   name: string,
   onProgress?: (payload: { message: string; downloadedBytes?: number; totalBytes?: number }) => void
-): Promise<boolean> {
-  const installPath = getInstalledPath(name);
-  const hadExistingInstall = fs.existsSync(installPath);
-  const backupPath = hadExistingInstall
-    ? path.join(getExtensionsDir(), `${name}.backup-${Date.now()}`)
-    : '';
-  const tmpDir = path.join(app.getPath('temp'), `supercmd-bundle-${Date.now()}`);
-
-  try {
-    const t0 = Date.now();
-
-    // Get pre-signed S3 URL from backend
+): Promise<void> {
+  await installStagedExtension(getExtensionsDir(), name, async (workDir) => {
     const { url } = await getExtensionBundleUrl(name);
-    console.log(`Downloading pre-built bundle for "${name}"…`);
+    const downloadDir = path.join(workDir, 'download');
     onProgress?.({ message: `Downloading ${name}…` });
-
-    fs.mkdirSync(tmpDir, { recursive: true });
-    await downloadAndExtractTarball(url, tmpDir, ({ downloadedBytes, totalBytes }) => {
-      onProgress?.({
-        message: `Downloading ${name}…`,
-        downloadedBytes,
-        totalBytes,
-      });
+    await downloadAndExtractTarball(url, downloadDir, ({ downloadedBytes, totalBytes }) => {
+      onProgress?.({ message: `Downloading ${name}…`, downloadedBytes, totalBytes });
     });
     onProgress?.({ message: `Extracting ${name}…` });
 
-    // Find the extension in the extracted directory
-    const nestedPath = path.join(tmpDir, name);
-    let srcDir = tmpDir;
-    if (fs.existsSync(path.join(nestedPath, 'package.json'))) {
-      srcDir = nestedPath;
-    } else if (!fs.existsSync(path.join(srcDir, 'package.json'))) {
-      // Search subdirs
-      const subdirs = fs.readdirSync(tmpDir, { withFileTypes: true }).filter(d => d.isDirectory());
-      for (const sub of subdirs) {
-        if (fs.existsSync(path.join(tmpDir, sub.name, 'package.json'))) {
-          srcDir = path.join(tmpDir, sub.name);
-          break;
-        }
-      }
-    }
-
-    if (!fs.existsSync(path.join(srcDir, 'package.json'))) {
-      throw new Error('Bundle has no package.json');
-    }
-
-    // Must have .sc-build/ — otherwise it's not a valid pre-built bundle
-    if (!fs.existsSync(path.join(srcDir, '.sc-build'))) {
-      throw new Error('Bundle has no .sc-build/ directory — not a pre-built bundle');
-    }
-
-    // Backup existing
-    if (hadExistingInstall) {
-      fs.renameSync(installPath, backupPath);
-    }
-
-    // Copy to extensions directory
-    fs.cpSync(srcDir, installPath, { recursive: true });
-
-    // Cleanup backup
-    if (backupPath && fs.existsSync(backupPath)) {
-      fs.rmSync(backupPath, { recursive: true, force: true });
-    }
-
-    // Report install (fire-and-forget)
-    reportInstall(name, getMachineId()).catch(() => {});
-
-    console.log(`Extension "${name}" installed from pre-built bundle in ${Date.now() - t0}ms`);
-    return true;
-  } catch (error) {
-    // Rollback
-    try { fs.rmSync(installPath, { recursive: true, force: true }); } catch {}
-    if (backupPath && fs.existsSync(backupPath)) {
-      try { fs.renameSync(backupPath, installPath); } catch {}
-    }
-    throw error;
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    if (backupPath && fs.existsSync(backupPath)) {
-      try { fs.rmSync(backupPath, { recursive: true, force: true }); } catch {}
-    }
-  }
+    // Accept both flat bundles and the existing single-directory layouts.
+    const candidates = [path.join(downloadDir, name), downloadDir,
+      ...fs.readdirSync(downloadDir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory()).map((entry) => path.join(downloadDir, entry.name))];
+    const srcDir = candidates.find((dir) => fs.existsSync(path.join(dir, 'package.json')));
+    if (!srcDir) throw new Error('Bundle has no package.json');
+    const pkg = readExtensionInstallManifest(srcDir);
+    validateExtensionBuild(srcDir, pkg);
+    return srcDir;
+  });
+  console.log(`Extension "${name}" installed from pre-built bundle`);
 }
 
-// ─── Source-based Install ───────────────────────────────────────────
+// ─── Source Install (API, then git fallback) ────────────────────────
 
-/**
- * Download source from GitHub raw, install deps with bun/npm, esbuild.
- * Fallback when no pre-built bundle exists.
- */
-async function installExtensionViaAPI(name: string): Promise<boolean> {
-  const installPath = getInstalledPath(name);
-  const hadExistingInstall = fs.existsSync(installPath);
-  const backupPath = hadExistingInstall
-    ? path.join(getExtensionsDir(), `${name}.backup-${Date.now()}`)
-    : '';
-  const tmpDir = path.join(app.getPath('temp'), `supercmd-api-install-${Date.now()}`);
-
-  try {
-    const t0 = Date.now();
-    console.log(`Installing extension: ${name}…`);
-    fs.mkdirSync(tmpDir, { recursive: true });
-
-    // Download extension source from GitHub raw (no git needed)
-    const srcDir = await downloadExtensionFromTree(name, tmpDir);
-    console.log(`  Download: ${Date.now() - t0}ms`);
-
-    if (!srcDir || !fs.existsSync(path.join(srcDir, 'package.json'))) {
-      throw new Error(`Extension "${name}" not found or has no package.json`);
-    }
-
-    // Platform compatibility check
-    const srcPkg = JSON.parse(fs.readFileSync(path.join(srcDir, 'package.json'), 'utf-8'));
-    if (!isManifestPlatformCompatible(srcPkg)) {
-      const supported = getManifestPlatforms(srcPkg);
-      console.error(`Extension "${name}" is not compatible with ${getCurrentRaycastPlatform()} (supports: ${supported.join(', ')})`);
-      return false;
-    }
-
-    // Backup existing installation
-    if (hadExistingInstall) {
-      fs.renameSync(installPath, backupPath);
-    }
-
-    // Copy to local extensions directory
-    fs.cpSync(srcDir, installPath, { recursive: true });
-
-    // Install dependencies and build
-    {
-      const extPkg = JSON.parse(fs.readFileSync(path.join(installPath, 'package.json'), 'utf-8'));
-      const allDeps = { ...(extPkg.dependencies || {}), ...(extPkg.optionalDependencies || {}) };
-      const thirdPartyDeps = Object.keys(allDeps).filter((d) => !d.startsWith('@raycast/'));
-
-      if (thirdPartyDeps.length === 0) {
-        console.log(`No third-party dependencies for "${name}" — skipping install`);
-      } else {
-        // Try Bun first (faster), fall back to npm
-        let depsInstalled = false;
-
-        try {
-          depsInstalled = await installDepsWithBun(installPath);
-        } catch (bunError: any) {
-          console.warn(`Bun install failed for "${name}":`, bunError?.message);
-        }
-
-        if (!depsInstalled) {
-          console.log(`Bun unavailable or failed, trying npm for "${name}"...`);
-          try {
-            await installExtensionDeps(installPath);
-            depsInstalled = true;
-          } catch (npmError: any) {
-            console.warn(`npm install also failed for "${name}":`, npmError?.message);
-          }
-        }
-
-        if (!depsInstalled) {
-          console.warn(`Could not install deps for "${name}" — extension may not work fully.`);
-        }
-      }
-
-      const t1 = Date.now();
-      console.log(`  Deps: ${t1 - t0}ms. Pre-building commands for "${name}"…`);
-      const { buildAllCommands } = require('./extension-runner');
-      const builtCount = await buildAllCommands(name);
-      console.log(`  Build: ${Date.now() - t1}ms. Extension "${name}" installed (${builtCount} commands) in ${Date.now() - t0}ms total`);
-    }
-
-    // Cleanup backup
-    if (backupPath && fs.existsSync(backupPath)) {
-      fs.rmSync(backupPath, { recursive: true, force: true });
-    }
-
-    // Report install to backend (fire-and-forget)
-    reportInstall(name, getMachineId()).catch(() => {});
-
-    return true;
-  } catch (error) {
-    console.error(`API install failed for "${name}":`, error);
-    // Rollback
-    try {
-      fs.rmSync(installPath, { recursive: true, force: true });
-    } catch {}
-    if (backupPath && fs.existsSync(backupPath)) {
-      try { fs.renameSync(backupPath, installPath); } catch {}
-    }
-    throw error; // Re-throw so the caller knows to try git fallback
-  } finally {
-    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    if (backupPath && fs.existsSync(backupPath)) {
-      try { fs.rmSync(backupPath, { recursive: true, force: true }); } catch {}
-    }
-  }
-}
-
-// ─── Git-based Install (Fallback) ───────────────────────────────────
-
-/**
- * Install a community extension via git sparse-checkout + npm install.
- * This is the legacy fallback when the API is unavailable.
- */
-async function installExtensionViaGit(name: string): Promise<boolean> {
-  const installPath = getInstalledPath(name);
-  const hadExistingInstall = fs.existsSync(installPath);
-  const backupPath = hadExistingInstall
-    ? path.join(getExtensionsDir(), `${name}.backup-${Date.now()}`)
-    : '';
-
-  const tmpDir = path.join(
-    app.getPath('temp'),
-    `supercmd-install-${Date.now()}`
-  );
-
-  try {
-    console.log(`Installing extension: ${name}…`);
-    let srcDir: string | null = null;
-
-    try {
-      // Sparse clone
-      await runGitCommand(
-        app.getPath('temp'),
-        `clone --depth 1 --filter=blob:none --sparse "${REPO_URL}" "${tmpDir}"`,
-        60_000
-      );
-
-      // Checkout only this extension
-      await runGitCommand(
-        tmpDir,
-        `sparse-checkout set "extensions/${name}"`,
-        60_000
-      );
-
-      srcDir = path.join(tmpDir, 'extensions', name);
-    } catch (acquireError: any) {
-      throw acquireError;
-    }
-
-    if (!srcDir || !fs.existsSync(srcDir)) {
-      console.error(`Extension "${name}" not found in repository.`);
-      return false;
-    }
-    const srcPkgPath = path.join(srcDir, 'package.json');
-    if (!fs.existsSync(srcPkgPath)) {
-      console.error(`Extension "${name}" has no manifest.`);
-      return false;
-    }
-    const srcPkg = JSON.parse(fs.readFileSync(srcPkgPath, 'utf-8'));
-    if (!isManifestPlatformCompatible(srcPkg)) {
-      const supported = getManifestPlatforms(srcPkg);
-      const supportedText = supported.length > 0 ? supported.join(', ') : 'unknown';
-      console.error(
-        `Extension "${name}" is not compatible with ${getCurrentRaycastPlatform()} (supports: ${supportedText}).`
-      );
-      return false;
-    }
-
-    if (hadExistingInstall) {
-      fs.renameSync(installPath, backupPath);
-    }
-
-    // Copy to local extensions directory
-    fs.cpSync(srcDir, installPath, { recursive: true });
-
-    // Step 1: Install dependencies (Bun first, npm fallback)
+async function prepareExtensionSource(name: string, srcDir: string): Promise<string> {
+  assertExtensionSourceTree(srcDir);
+  const pkg = readExtensionInstallManifest(srcDir);
+  const allDeps = { ...(pkg.dependencies || {}), ...(pkg.optionalDependencies || {}) };
+  if (Object.keys(allDeps).some((dependency) => !dependency.startsWith('@raycast/'))) {
     let depsInstalled = false;
-    try {
-      depsInstalled = await installDepsWithBun(installPath);
-    } catch {}
-    if (!depsInstalled) {
-      await installExtensionDeps(installPath);
-    }
-
-    // Step 2: Pre-build all commands with esbuild
-    console.log(`Pre-building commands for "${name}"…`);
-    const { buildAllCommands } = require('./extension-runner');
-    const builtCount = await buildAllCommands(name);
-    console.log(`Extension "${name}" installed (${builtCount} commands) at ${installPath}`);
-    if (backupPath && fs.existsSync(backupPath)) {
-      fs.rmSync(backupPath, { recursive: true, force: true });
-    }
-    return true;
-  } catch (error) {
-    console.error(`Failed to install extension "${name}" via git:`, error);
-    try {
-      fs.rmSync(installPath, { recursive: true, force: true });
-    } catch {}
-    if (backupPath && fs.existsSync(backupPath)) {
-      try {
-        fs.renameSync(backupPath, installPath);
-      } catch {}
-    }
-    return false;
-  } finally {
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch {}
-    if (backupPath && fs.existsSync(backupPath)) {
-      try {
-        fs.rmSync(backupPath, { recursive: true, force: true });
-      } catch {}
-    }
+    try { depsInstalled = await installDepsWithBun(srcDir); }
+    catch (error) { console.warn(`Bun install failed for "${name}":`, error); }
+    if (!depsInstalled) await installExtensionDeps(srcDir);
   }
+
+  // The runner catches individual command failures and returns a success count.
+  // Compare with this platform's command set and verify the output before commit.
+  const { buildAllCommands } = require('./extension-runner');
+  const builtCount = await buildAllCommands(name, srcDir);
+  validateExtensionBuild(srcDir, pkg, builtCount);
+  return srcDir;
+}
+
+async function installExtensionViaAPI(name: string): Promise<void> {
+  await installStagedExtension(getExtensionsDir(), name, async (workDir) => {
+    const srcDir = await downloadExtensionFromTree(name, workDir);
+    if (!srcDir) throw new Error(`Extension "${name}" not found in source tree`);
+    return prepareExtensionSource(name, srcDir);
+  });
+  console.log(`Extension "${name}" installed from API source`);
+}
+
+async function installExtensionViaGit(name: string): Promise<void> {
+  await installStagedExtension(getExtensionsDir(), name, async (workDir) => {
+    const checkout = path.join(workDir, 'checkout');
+    await runGitCommand(
+      workDir,
+      `clone --depth 1 --filter=blob:none --sparse "${REPO_URL}" "${checkout}"`,
+      60_000
+    );
+    await runGitCommand(checkout, `sparse-checkout set "extensions/${name}"`, 60_000);
+    const srcDir = path.join(checkout, 'extensions', name);
+    assertNoExtensionSymlinks(workDir, srcDir);
+    return prepareExtensionSource(name, srcDir);
+  });
+  console.log(`Extension "${name}" installed from git source`);
 }
 
 // ─── Download + Extract Helpers ─────────────────────────────────────
@@ -1400,18 +1167,29 @@ async function downloadAndExtractTarball(
         return;
       }
 
-      const parsedUrl = new URL(requestUrl);
-      const isHttps = parsedUrl.protocol === 'https:';
-      const transport = isHttps ? require('https') : require('http');
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(requestUrl);
+        if (!['https:', 'http:'].includes(parsedUrl.protocol)) throw new Error('Unsupported bundle URL protocol');
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      const transport = parsedUrl.protocol === 'https:' ? require('https') : require('http');
 
-      transport.get(requestUrl, { timeout: 120_000 }, (res: any) => {
+      const request = transport.get(requestUrl, { timeout: 120_000 }, (res: any) => {
+        res.on('error', reject);
+        res.on('aborted', () => reject(new Error('Bundle download aborted')));
         // Follow redirects (S3 pre-signed URLs may redirect)
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          makeRequest(res.headers.location, redirectCount + 1);
+          res.resume();
+          try { makeRequest(new URL(res.headers.location, parsedUrl).href, redirectCount + 1); }
+          catch (error) { reject(error); }
           return;
         }
 
         if (res.statusCode !== 200) {
+          res.resume();
           reject(new Error(`Download failed: ${res.statusCode} ${res.statusMessage}`));
           return;
         }
@@ -1423,70 +1201,26 @@ async function downloadAndExtractTarball(
         res.on('data', (chunk: Buffer) => {
           chunks.push(chunk);
           downloadedBytes += chunk.length;
-          onProgress?.({ downloadedBytes, ...(totalBytes !== undefined ? { totalBytes } : {}) });
+          try { onProgress?.({ downloadedBytes, ...(totalBytes !== undefined ? { totalBytes } : {}) }); }
+          catch (error) { res.destroy(error); }
         });
-        res.on('error', reject);
         res.on('end', () => {
           try {
+            if (totalBytes !== undefined && downloadedBytes !== totalBytes) throw new Error('Truncated bundle download');
             const buffer = Buffer.concat(chunks);
-            extractTarGz(buffer, destDir);
+            extractExtensionTarGz(buffer, destDir);
             resolve();
           } catch (err) {
             reject(err);
           }
         });
-      }).on('error', reject);
+      });
+      request.on('error', reject);
+      request.on('timeout', () => request.destroy(new Error('Bundle download timed out')));
     };
 
     makeRequest(url);
   });
-}
-
-/**
- * Extract a .tar.gz buffer to a directory.
- * Minimal tar parser that handles POSIX ustar format (sufficient for our bundles).
- */
-function extractTarGz(buffer: Buffer, destDir: string): void {
-  // Decompress gzip
-  const decompressed = zlib.gunzipSync(buffer);
-
-  // Parse tar entries (512-byte blocks)
-  let offset = 0;
-  while (offset < decompressed.length - 512) {
-    // Read header
-    const header = decompressed.subarray(offset, offset + 512);
-
-    // Check for end-of-archive (two zero blocks)
-    if (header.every((b) => b === 0)) break;
-
-    // Parse tar header fields
-    const nameRaw = header.subarray(0, 100).toString('utf-8').replace(/\0+$/, '');
-    const sizeOctal = header.subarray(124, 136).toString('utf-8').replace(/\0+$/, '').trim();
-    const typeFlag = header[156];
-    const prefixRaw = header.subarray(345, 500).toString('utf-8').replace(/\0+$/, '');
-
-    const fullName = prefixRaw ? `${prefixRaw}/${nameRaw}` : nameRaw;
-    const size = parseInt(sizeOctal, 8) || 0;
-
-    offset += 512; // Move past header
-
-    if (typeFlag === 53 || fullName.endsWith('/')) {
-      // Directory entry (type '5' = 53 in ASCII)
-      const dirPath = path.join(destDir, fullName);
-      fs.mkdirSync(dirPath, { recursive: true });
-    } else if (typeFlag === 0 || typeFlag === 48) {
-      // Regular file (type '0' = 48 in ASCII, or 0 = null for old tar)
-      const filePath = path.join(destDir, fullName);
-      fs.mkdirSync(path.dirname(filePath), { recursive: true });
-      const fileData = decompressed.subarray(offset, offset + size);
-      fs.writeFileSync(filePath, fileData);
-    }
-    // Skip other entry types (symlinks, etc.)
-
-    // Move past data blocks (padded to 512 bytes)
-    const dataBlocks = Math.ceil(size / 512);
-    offset += dataBlocks * 512;
-  }
 }
 
 // ─── Machine ID ─────────────────────────────────────────────────────
@@ -1527,22 +1261,21 @@ function randomHex(length: number): string {
  * Uninstall a community extension by name.
  */
 export async function uninstallExtension(name: string): Promise<boolean> {
-  const installPath = getInstalledPath(name);
-
-  if (!fs.existsSync(installPath)) {
-    return true; // Already gone
-  }
-
-  try {
-    fs.rmSync(installPath, { recursive: true, force: true });
-    console.log(`Extension "${name}" uninstalled.`);
-
-    // Report uninstall to backend (fire-and-forget)
-    reportUninstall(name, getMachineId()).catch(() => {});
-
-    return true;
-  } catch (error) {
-    console.error(`Failed to uninstall extension "${name}":`, error);
+  if (!isSafeExtensionName(name)) {
+    console.error(`Invalid extension name: "${name}"`);
     return false;
   }
+  return withExtensionInstallLock(getExtensionsDir(), name, async () => {
+    try {
+      const installPath = getInstalledPath(name);
+      if (!fs.existsSync(installPath)) return true;
+      fs.rmSync(installPath, { recursive: true, force: true });
+      console.log(`Extension "${name}" uninstalled.`);
+      try { reportUninstall(name, getMachineId()).catch(() => {}); } catch {}
+      return true;
+    } catch (error) {
+      console.error(`Failed to uninstall extension "${name}":`, error);
+      return false;
+    }
+  });
 }

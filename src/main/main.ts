@@ -19,7 +19,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { fork, execFileSync, type ChildProcess } from 'child_process';
 import { getNativeBinaryPath, resolvePackagedUnpackedPath } from './native-binary';
-import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, getInflightDiscovery, refreshCommandsNow } from './commands';
+import { getAvailableCommands, executeCommand, invalidateCache, initCommandsCache, onCommandsPublished, refreshCommandsNow } from './commands';
 import {
   loadSettings,
   saveSettings,
@@ -11161,7 +11161,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     try {
       const created = createScriptCommandTemplate();
       invalidateScriptCommandsCache();
-      invalidateCache();
+      invalidateAndRefreshCommands();
       void shell.openPath(created.scriptPath).catch(() => {});
       console.log(`[ScriptCommand] Created: ${path.basename(created.scriptPath)}`);
       if (source === 'launcher') {
@@ -12676,6 +12676,16 @@ function broadcastCommandsUpdated(): void {
   }
 }
 
+// Discovery publishes before notifying, so renderer fetches see the new catalog.
+onCommandsPublished(broadcastCommandsUpdated);
+
+function invalidateAndRefreshCommands(): void {
+  invalidateCache();
+  void refreshCommandsNow().catch((error) => {
+    console.warn('[Commands] Mutation refresh failed:', error);
+  });
+}
+
 function broadcastExtensionPreferencesUpdated(extensionName: string): void {
   const normalized = String(extensionName || '').trim();
   if (!normalized) return;
@@ -12850,9 +12860,6 @@ function scheduleInstalledAppsRefresh(reason: string): void {
     void refreshCommandsNow()
       .catch((error) => {
         console.warn(`[Commands] App change refresh failed (${reason}):`, error);
-      })
-      .finally(() => {
-        broadcastCommandsUpdated();
       });
   }, 1200);
 }
@@ -13580,7 +13587,7 @@ async function rebuildExtensions() {
       }
     }
     console.log('Extensions rebuild complete.');
-    invalidateCache();
+    invalidateAndRefreshCommands();
   }
 }
 
@@ -14275,7 +14282,7 @@ app.whenReady().then(async () => {
         }
       }
       if (removedAny) {
-        invalidateCache();
+        invalidateAndRefreshCommands();
         broadcastExtensionsUpdated();
       }
     }
@@ -14300,7 +14307,7 @@ app.whenReady().then(async () => {
         const ok = await installExtension(name);
         if (ok) {
           succeeded += 1;
-          invalidateCache();
+          invalidateAndRefreshCommands();
           broadcastExtensionsUpdated();
         } else {
           console.warn(`[auto-install] failed: ${name}`);
@@ -14537,10 +14544,10 @@ app.whenReady().then(async () => {
         }
       }
       if (patch.commandAliases !== undefined) {
-        invalidateCache();
+        invalidateAndRefreshCommands();
       }
       if (patch.customExtensionFolders !== undefined) {
-        invalidateCache();
+        invalidateAndRefreshCommands();
         try {
           await rebuildExtensions();
         } catch (error) {
@@ -14549,8 +14556,7 @@ app.whenReady().then(async () => {
       }
       if (patch.scriptCommandFolders !== undefined) {
         invalidateScriptCommandsCache();
-        invalidateCache();
-        broadcastCommandsUpdated();
+        invalidateAndRefreshCommands();
       }
       if (
         patch.emojiPickerEnabled !== undefined ||
@@ -14615,8 +14621,7 @@ app.whenReady().then(async () => {
       const result = await importRaycastConfigFromFile(getDialogParentWindow(event));
       if (!result.canceled) {
         invalidateScriptCommandsCache();
-        invalidateCache();
-        broadcastCommandsUpdated();
+        invalidateAndRefreshCommands();
         for (const extensionName of result.importedExtensionPreferenceExtensions || []) {
           broadcastExtensionPreferencesUpdated(extensionName);
         }
@@ -14663,8 +14668,7 @@ app.whenReady().then(async () => {
     });
     if (!result.canceled) {
       invalidateScriptCommandsCache();
-      invalidateCache();
-      broadcastCommandsUpdated();
+      invalidateAndRefreshCommands();
       for (const extensionName of result.importedExtensionPreferenceExtensions || []) {
         broadcastExtensionPreferencesUpdated(extensionName);
       }
@@ -15155,7 +15159,7 @@ app.whenReady().then(async () => {
             delete metadata[executed.commandId];
           }
           saveSettings({ commandMetadata: metadata });
-          invalidateCache();
+          invalidateAndRefreshCommands();
         }
 
         if (!background && (executed.mode === 'compact' || executed.mode === 'silent')) {
@@ -15250,7 +15254,7 @@ app.whenReady().then(async () => {
         saveSettings({ commandMetadata: settings.commandMetadata });
 
         // Notify all windows to refresh command list
-        invalidateCache();
+        invalidateAndRefreshCommands();
         return { success: true };
       } catch (e: any) {
         console.error('update-command-metadata error:', e);
@@ -16442,17 +16446,10 @@ return appURL's |path|() as text`,
       if (!success) {
         throw new Error(`Failed to install extension "${name}". Check SuperCmd main-process logs for details.`);
       }
-      // Invalidate the command cache and rebuild it BEFORE we broadcast, so
-      // the renderer's follow-up get-commands fetch lands on fresh data
-      // rather than the stale fallback that getAvailableCommands() returns
-      // immediately after an invalidation.
+      // The catalog publication listener notifies the launcher after refresh.
       invalidateCache();
       try { await refreshCommandsNow(); } catch (e) { console.warn('refreshCommandsNow after install failed:', e); }
       broadcastExtensionsUpdated();
-      // The launcher's root list listens for 'commands-updated', not
-      // 'extensions-updated' — without this, the new extension wouldn't
-      // appear in the launcher until the next app restart.
-      broadcastCommandsUpdated();
       // Record the install in synced settings so the user's other Macs
       // auto-install on their next launch.
       addInstalledExtensionToSettings(name);
@@ -16465,8 +16462,7 @@ return appURL's |path|() as text`,
     async (_event: any, name: string) => {
       const success = await uninstallExtension(name);
       if (success) {
-        // Invalidate the command cache and rebuild synchronously before
-        // broadcasting — see install-extension handler for context.
+        // Wait for a valid publication, even if an older scan is in flight.
         invalidateCache();
         try { await refreshCommandsNow(); } catch (e) { console.warn('refreshCommandsNow after uninstall failed:', e); }
         // Tell the launcher renderer to tear down any live runners (menu-bar
@@ -16474,8 +16470,6 @@ return appURL's |path|() as text`,
         // extension before its bundle keeps trying to re-mount itself.
         broadcastExtensionUninstalled(name);
         broadcastExtensionsUpdated();
-        // Mirror the install path: refresh the launcher's root list too.
-        broadcastCommandsUpdated();
         // Record the uninstall in synced settings so other Macs don't
         // re-install it on their next launch.
         removeInstalledExtensionFromSettings(name);
@@ -17433,16 +17427,14 @@ if let tiff = image?.tiffRepresentation {
 
   ipcMain.handle('quicklink-create', (_event: any, data: any) => {
     const created = createQuickLink(data || {});
-    invalidateCache();
-    broadcastCommandsUpdated();
+    invalidateAndRefreshCommands();
     return created;
   });
 
   ipcMain.handle('quicklink-update', (_event: any, id: string, data: any) => {
     const updated = updateQuickLink(id, data || {});
     if (updated) {
-      invalidateCache();
-      broadcastCommandsUpdated();
+      invalidateAndRefreshCommands();
     }
     return updated;
   });
@@ -17450,8 +17442,7 @@ if let tiff = image?.tiffRepresentation {
   ipcMain.handle('quicklink-delete', (_event: any, id: string) => {
     const removed = deleteQuickLink(id);
     if (removed) {
-      invalidateCache();
-      broadcastCommandsUpdated();
+      invalidateAndRefreshCommands();
     }
     return removed;
   });
@@ -17459,8 +17450,7 @@ if let tiff = image?.tiffRepresentation {
   ipcMain.handle('quicklink-duplicate', (_event: any, id: string) => {
     const duplicated = duplicateQuickLink(id);
     if (duplicated) {
-      invalidateCache();
-      broadcastCommandsUpdated();
+      invalidateAndRefreshCommands();
     }
     return duplicated;
   });
@@ -19342,21 +19332,14 @@ if let tiff = image?.tiffRepresentation {
   }
 
   // Load persisted commands from disk so the launcher is instant on next open.
-  // This populates cachedCommands with cacheTimestamp=0 (stale), so the first
-  // getAvailableCommands() call serves the disk cache immediately and kicks off
-  // a silent background refresh.
+  // Disk data stays stale until discovery publishes a valid generation.
   initCommandsCache();
 
   createWindow();
 
-  // Kick off background discovery right away.  When it finishes, broadcast so
-  // the renderer picks up fresh data (icons, newly-installed apps, etc.).
-  void getAvailableCommands().then(async () => {
-    const inflight = getInflightDiscovery();
-    if (inflight) {
-      try { await inflight; } catch {}
-    }
-    broadcastCommandsUpdated();
+  // All successful discoveries notify through the publication listener above.
+  void getAvailableCommands().catch((error) => {
+    console.warn('[Commands] Startup discovery failed:', error);
   });
 
   startInstalledAppsWatchers();

@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { normalizeFileSearchText, tokenizeFileSearchText } from '../shared/file-search-text';
 
 export type IndexedFileSearchResult = {
   path: string;
@@ -55,7 +56,7 @@ type IndexSnapshot = {
   builtAt: number;
 };
 
-const SEARCH_TOKEN_SPLIT_REGEX = /[^a-z0-9]+/g;
+const SEARCH_TOKEN_SPLIT_REGEX = /[^\p{L}\p{N}\p{M}]+/gu;
 const MAX_PREFIX_LENGTH = 12;
 const MAX_INDEX_ENTRIES = 1_200_000;
 const DEFAULT_MAX_RESULTS = 80;
@@ -155,9 +156,7 @@ type DirectoryQueueEntry = {
 };
 
 function normalizeSearchText(value: string): string {
-  return String(value || '')
-    .normalize('NFKD')
-    .toLowerCase()
+  return normalizeFileSearchText(value)
     .replace(SEARCH_TOKEN_SPLIT_REGEX, ' ')
     .trim();
 }
@@ -176,8 +175,7 @@ function isPathLikeQuery(rawQuery: string): boolean {
 }
 
 function tokenizeSearchText(value: string): string[] {
-  const normalized = normalizeSearchText(value);
-  return normalized ? normalized.split(/\s+/).filter(Boolean) : [];
+  return tokenizeFileSearchText(value);
 }
 
 function asTildePath(value: string, homeDir: string): string {

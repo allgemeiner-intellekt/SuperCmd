@@ -1,4 +1,5 @@
 import type { CommandInfo } from '../../types/electron';
+import { normalizeFileSearchText, tokenizeFileSearchText } from '../../../shared/file-search-text';
 
 export const FILE_RESULT_COMMAND_PREFIX = 'system-file-result:';
 export const MAX_LAUNCHER_FILE_RESULTS = 30;
@@ -32,7 +33,7 @@ export function getFileDirname(filePath: string): string {
 }
 
 export function normalizeLauncherFileSearchText(value: string): string {
-  return String(value || '').normalize('NFKD').toLowerCase();
+  return normalizeFileSearchText(value);
 }
 
 export function getLauncherFileSearchTerms(rawQuery: string): string[] {
@@ -71,10 +72,7 @@ export function matchesLauncherPathQuery(filePath: string, rawQuery: string, hom
 }
 
 export function splitLauncherFileNameTokens(fileName: string): string[] {
-  return normalizeLauncherFileSearchText(fileName)
-    .split(/[^a-z0-9]+/g)
-    .map((token) => token.trim())
-    .filter(Boolean);
+  return tokenizeFileSearchText(fileName);
 }
 
 export function matchesLauncherFileNameTerms(fileName: string, terms: string[]): boolean {

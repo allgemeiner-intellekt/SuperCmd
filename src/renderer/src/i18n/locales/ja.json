@@ -214,23 +214,12 @@
         "description": "AI 機能のマスタースイッチです。"
       },
       "tabs": {
-        "llm": "LLM",
-        "whisper": "SuperCmd Whisper",
-        "speak": "SuperCmd Read"
+        "llm": "LLM"
       },
       "apiKeys": {
         "openai": {
           "label": "ChatGPT (OpenAI) API キー",
           "placeholder": "sk-..."
-        },
-        "elevenlabs": {
-          "label": "ElevenLabs API キー",
-          "placeholder": "xi-..."
-        },
-        "mistral": {
-          "label": "Mistral API キー",
-          "placeholder": "Voxtral の音声文字起こし用",
-          "hint": "Voxtral の音声文字起こしを使うには、ここで Mistral API キーを設定してください。"
         }
       },
       "llm": {
@@ -271,159 +260,6 @@
         "defaultModel": {
           "label": "デフォルトモデル",
           "auto": "自動（プロバイダのデフォルト）"
-        }
-      },
-      "whisper": {
-        "enableWhisper": {
-          "title": "SuperCmd Whisper を有効にする",
-          "description": "音声認識機能を切り替えます。"
-        },
-        "title": "SuperCmd Whisper",
-        "description": "音声認識と文字起こしのクリーンアップ。",
-        "model": {
-          "label": "文字起こしモデル",
-          "native": "ネイティブ（デフォルト）",
-          "openaiGpt4o": "OpenAI GPT-4o Transcribe",
-          "openaiWhisper": "OpenAI Whisper-1",
-          "elevenlabsScribeV1": "ElevenLabs Scribe v1",
-          "elevenlabsScribeV2": "ElevenLabs Scribe v2"
-        },
-        "modelOptions": {
-          "whispercpp": "SuperCmd Whisper（デフォルト）",
-          "parakeet": "Parakeet v3（最高かつ最速、25 以上のヨーロッパ言語対応）",
-          "qwen3": "Qwen3 ASR（中国語、日本語、韓国語、タイ語、ベトナム語、ヒンディー語を含む 30 以上の言語に対応）",
-          "native": "Apple 音声認識",
-          "openaiGpt4o": "OpenAI GPT-4o Transcribe",
-          "openaiWhisper": "OpenAI Whisper-1",
-          "elevenlabsScribeV1": "ElevenLabs Scribe v1",
-          "elevenlabsScribeV2": "ElevenLabs Scribe v2"
-        },
-        "openaiWarning": "ここで OpenAI API キーを追加してください。",
-        "elevenlabsWarning": "ここで ElevenLabs API キーを{action}してください。",
-        "elevenlabsReady": "ElevenLabs STT が選択されています。クラウド文字起こしに ElevenLabs キーを使用します。",
-        "recognitionLanguage": "認識言語",
-        "vocabulary": {
-          "label": "カスタム語彙",
-          "placeholder": "Kotlin、Electron、Raycast、SuperCmd…",
-          "hint": "任意。認識を正しい表記に近づけるため、珍しい単語・名前・専門用語をカンマまたは改行で区切って入力します。",
-          "tokenWarning": "約 {count} トークン。Whisper は先頭の約 224 トークンしか使用しないため、それを超える単語は無視されます。"
-        },
-        "providerInfo": {
-          "parakeet": "Parakeet TDT v3 によるオフラインのオンデバイス文字起こし。Apple Neural Engine 上で実行されます。初回使用時にモデルのウォームアップが必要です。ディクテーションを使用する前に下からモデルをダウンロードしてください。",
-          "qwen3": "Qwen3 ASR によるオフラインのオンデバイス文字起こし。30 以上の言語をサポート、macOS 15 以上が必要、初回使用時にウォームアップします。",
-          "whispercpp": "Whisper.cpp によるオフラインのオンデバイス文字起こし。ディクテーションを使用する前に下からデフォルトの ggml base モデルをダウンロードしてください。",
-          "native": "SuperCmd Whisper の代わりに Apple 音声認識を使用します。"
-        },
-        "hotkeys": {
-          "title": "Whisper ホットキー",
-          "startStop": "発話の開始/停止",
-          "custom": "カスタム…",
-          "holdToTalkHint": "押しっぱなし発話キーを選択してください。押して録音、離して入力。カスタムで任意のキー組み合わせを録音できます。"
-        },
-        "autoClose": {
-          "title": "ディクテーション後に自動で閉じる",
-          "description": "ディクテーションが終了したら Whisper バーを自動的に閉じます。"
-        },
-        "smoothOutput": {
-          "title": "出力をスムーズに",
-          "description": "フィラー語や自己修正をクリーンアップします。"
-        },
-        "smoothingModel": {
-          "label": "スムージングモデル",
-          "useDefault": "汎用デフォルトモデルを使用",
-          "hint": "現在のプロバイダのモデルを使用します。"
-        },
-        "downloadCards": {
-          "modelDownloadFailed": "モデルのダウンロードに失敗しました。",
-          "actions": {
-            "downloaded": "モデルをダウンロード済み",
-            "downloading": "ダウンロード中...",
-            "download": "モデルをダウンロード"
-          },
-          "parakeet": {
-            "title": "Parakeet TDT v3",
-            "description": "多言語対応のオンデバイス文字起こし。Apple Neural Engine 上で実行されます。",
-            "ready": "ダウンロード済み。Parakeet v3 はオフラインで使用できます。",
-            "downloading": "Parakeet v3 モデルをダウンロード中",
-            "notDownloaded": "モデルはまだダウンロードされていません。Parakeet ディクテーションを使用するには今すぐダウンロードしてください。"
-          },
-          "qwen3": {
-            "title": "Qwen3 ASR",
-            "description": "30 言語対応のオンデバイス文字起こし。macOS 15 以上が必要。",
-            "ready": "ダウンロード済み。Qwen3 ASR はオフラインで使用できます。",
-            "downloading": "Qwen3 ASR モデルをダウンロード中",
-            "notDownloaded": "モデルはまだダウンロードされていません。Qwen3 ディクテーションを使用するには約 900 MB の int8 モデルをダウンロードしてください。"
-          },
-          "whispercpp": {
-            "title": "SuperCmd Whisper",
-            "description": "ローカルディクテーションを有効にするため、ggml base モデルを一度ダウンロードしてください。",
-            "ready": "ダウンロード済み。SuperCmd Whisper はオフラインで使用できます。",
-            "downloading": "SuperCmd Whisper をダウンロード中",
-            "notDownloaded": "モデルはまだダウンロードされていません。SuperCmd Whisper ディクテーションを使用するには今すぐダウンロードしてください。"
-          }
-        }
-      },
-      "speak": {
-        "enableRead": {
-          "title": "SuperCmd Read を有効にする",
-          "description": "テキスト読み上げ機能を切り替えます。"
-        },
-        "title": "SuperCmd Read",
-        "description": "選択したテキストを音声で読み上げます。",
-        "provider": {
-          "label": "音声プロバイダ",
-          "edgeTTS": "Edge TTS（デフォルト）",
-          "elevenlabsMultilingual": "ElevenLabs Multilingual v2",
-          "elevenlabsFlash": "ElevenLabs Flash v2.5",
-          "elevenlabsTurbo": "ElevenLabs Turbo v2.5",
-          "elevenlabsV3": "ElevenLabs v3 (Alpha)"
-        },
-        "edgeTTS": {
-          "voice": "Edge TTS の音声",
-          "fetching": "音声リストを取得中...",
-          "language": {
-            "label": "言語"
-          },
-          "gender": {
-            "label": "音声の性別",
-            "female": "女性",
-            "male": "男性"
-          },
-          "voiceLabel": {
-            "label": "音声"
-          },
-          "playSample": {
-            "idle": "サンプル音声を再生",
-            "playing": "サンプル再生中..."
-          }
-        },
-        "elevenlabs": {
-          "model": {
-            "label": "ElevenLabs モデル"
-          },
-          "voice": {
-            "label": "ElevenLabs 音声",
-            "fetching": "あなたの音声を取得中...",
-            "fetchFailed": "音声の取得に失敗しました。",
-            "builtIn": "組み込み音声",
-            "premade": "追加の既製音声",
-            "custom": "あなたのカスタム音声（クローン/生成）",
-            "professional": "プロフェッショナル音声クローン",
-            "available": "{count} 個のカスタム音声{plural}が ElevenLabs アカウントから利用可能です"
-          },
-          "playSample": {
-            "idle": "サンプル音声を再生",
-            "playing": "サンプル再生中..."
-          },
-          "storageHint": "SuperCmd はこれを {value} として保存します。",
-          "apiKeyWarning": "ここで ElevenLabs API キーを追加してください。"
-        },
-        "notes": {
-          "title": "メモ",
-          "whisperDefault": "Whisper のデフォルトはローカルの ggml base モデルを使用した SuperCmd Whisper です。",
-          "speakDefault": "Speak のデフォルトは言語ごとに男性/女性音声を選択できる Edge TTS です。",
-          "englishVoice": "英語の音声オプションは意図的に米国版と英国版に限定されています。",
-          "elevenlabsVoices": "ElevenLabs のカスタム音声（クローン/生成）は API キーが設定されると自動的に表示されます。"
         }
       },
       "hotkeyUpdated": "ホットキーを更新しました。",
@@ -1113,167 +949,36 @@
         "description": "AI とチャット、音声認識を使い、文章の作成や編集を AI にサポートしてもらえます。"
       }
     },
-    "whisper": {
-      "quick": {
-        "title": "Whisper クイックオンボーディング",
-        "subtitle": "押したまま録音、離して入力",
-        "instructions": {
-          "before": "押し続けてください ",
-          "after": " を押しながら話してください。離すと処理され、現在のカーソル位置に入力されます。"
-        },
-        "practiceTitle": "練習用段落",
-        "practicePlaceholder": "今日はロードマップをレビューし、今週の上位 3 つのタスクに優先順位をつけました。短いサマリーを作成し、昼食前にチームに共有してください。",
-        "practiceHint": "このエディタで練習してください: ホットキーを押したまま、この 2 文を読み、離して出力を確認してください。",
-        "footerHint": "Whisper はアクティブ時に下部付近に表示されます。"
-      }
-    },
-    "voice": {
+    "setup": {
       "steps": {
         "welcome": "ようこそ",
         "coreFeatures": "主要機能",
         "hotkeySetup": "ホットキー設定",
         "permissions": "権限",
-        "dictationMode": "ディクテーションモード",
-        "readMode": "読み上げモード",
         "finalCheck": "最終確認"
-      },
-      "featureCards": {
-        "whisper": {
-          "title": "Whisper",
-          "description": "押したまま話し、離すと入力されます。"
-        },
-        "read": {
-          "title": "Read",
-          "description": "選択したテキストを自然な音声で読み上げます。"
-        }
       },
       "permissions": {
         "inputMonitoringTitle": "入力監視",
-        "inputMonitoringDescription": "Whisper モードでの Fn 押しっぱなし検出およびその他のグローバルキー監視に必要です。",
-        "speechRecognitionTitle": "音声認識",
-        "speechRecognitionDescription": "任意。Whisper を Apple 音声認識のフォールバックに切り替える場合のみ必要です。",
-        "microphoneTitle": "マイク",
-        "microphoneDescription": "SuperCmd Whisper ディクテーションに必要です。"
+        "inputMonitoringDescription": "HyperKey とグローバルなキー監視に必要です。"
       },
       "permissionNotes": {
-        "blocked": "{target} アクセスがブロックされています。システム設定で SuperCmd を有効にしてから戻ってきてください。",
-        "promptFailed": "権限プロンプトを表示できませんでした。システム設定 -> プライバシーとセキュリティを開き、SuperCmd を有効にしてから再度リクエストを押してください。",
-        "notShown": "権限プロンプトが表示されませんでした。Whisper を一度開いて、これを再度押してください。",
         "homeFolder": "プロンプトが表示されたらホームフォルダを選択し、必要に応じてファイルとフォルダの下で SuperCmd を有効にしてください。",
         "inputMonitoring": "入力監視で左下の「+」をクリックし、アプリケーションフォルダから SuperCmd を追加してください。"
-      },
-      "dictation": {
-        "title": "ディクテーションモード",
-        "howToTest": "テスト方法",
-        "howToTestHint": "キーを押したままサンプルを読み上げ、離して挿入します。",
-        "holdKeyUpdated": "押しっぱなしキーを更新しました",
-        "language": "ディクテーション言語",
-        "sampleTitle": "メッセージサンプル",
-        "sampleHint": "キーを押したまま、上のメッセージを読んでください:",
-        "placeholder": "ディクテーションされたテキストがここに表示されます...",
-        "footerHint": "SuperCmd Whisper はデフォルトでローカルの ggml base モデルを使用します。Apple 音声認識は設定からフォールバックとして利用できます。",
-        "models": {
-          "downloadFailed": "モデルのダウンロードに失敗しました。今すぐ再試行するか、設定 -> AI -> SuperCmd Whisper を使用してください。",
-          "actions": {
-            "downloaded": "ダウンロード済み",
-            "downloading": "ダウンロード中...",
-            "download": "モデルをダウンロード"
-          },
-          "parakeet": {
-            "title": "Parakeet TDT v3",
-            "ready": "ダウンロードが完了しました。Parakeet v3 ディクテーションの準備が整いました。",
-            "downloadingLead": "モデルをダウンロード中、少しお待ちください。",
-            "downloading": "Parakeet v3 CoreML モデルをダウンロード中",
-            "notDownloaded": "SuperCmd はこのステップで Parakeet v3 モデルのダウンロードを開始し、初回使用前にディクテーションの準備が整います。"
-          },
-          "whispercpp": {
-            "title": "SuperCmd Whisper",
-            "ready": "ダウンロードが完了しました。SuperCmd Whisper ディクテーションの準備が整いました。",
-            "downloadingLead": "モデルをダウンロード中、少しお待ちください。",
-            "downloading": "約 300 MB の ggml base モデルをダウンロード中",
-            "notDownloaded": "SuperCmd はこのステップで SuperCmd Whisper モデルのダウンロードを開始し、初回使用前にディクテーションの準備が整います。"
-          },
-          "cloud": {
-            "title": "クラウド文字起こし",
-            "description": "クラウドベースの文字起こしを使用しています。モデルのダウンロードは不要です。"
-          }
-        },
-        "sampleText": "それは最良の時代であり、最悪の時代であった。知恵の時代であり、愚かさの時代であった。"
-      },
-      "read": {
-        "badge": "古典文学",
-        "readTime": "1 分で読める",
-        "articleTitle": "高慢と偏見",
-        "instructions": {
-          "before": "上のテキストを選択して",
-          "after": "を押すと読み上げが聞けます。"
-        },
-        "sampleText": "ボイスファーストインターフェースは今まさに注目されています。長年ギミックとして見なされてきた後、追いつく文字起こし、スマートな修正、既存のワークフローに違和感なく組み込めるショートカットキーにより、話すほうが入力よりも実際に速くなる新しいツールが登場しています。"
       },
       "final": {
         "title": "最終ステップ: どこからでも SuperCmd を起動",
         "description": "今すぐグローバルショートカットを押して、任意のアプリから SuperCmd を起動してください。",
         "nextStep": "次のステップ：SuperCmd 設定 → 拡張機能で Inline AI Prompt のショートカットを設定してください。"
       },
-      "setupDescription": "ランチャーのホットキー、プライバシー権限、Whisper モードを一度に設定します。",
-      "setupSummary": "Whisper ディクテーションと Read モードの練習",
+      "setupDescription": "ランチャーのショートカットとプライバシー権限を設定します。",
+      "setupSummary": "ランチャーのショートカットと権限",
       "summary": {
         "title": "今すぐ設定される内容:",
         "hotkey": "1. ランチャーのホットキー",
-        "permissions": "2. アクセシビリティ、入力監視、音声認識、マイク"
+        "permissions": "2. アクセシビリティ、入力監視、ホームフォルダ"
       },
-      "setupTitle": "起動、質問、ディクテーション、読み上げのための統一されたコマンドサーフェス。"
+      "setupTitle": "アプリの起動、AI への質問、コマンドの実行。"
     }
-  },
-  "whisper": {
-    "title": "SuperCmd Whisper",
-    "description": "シンプルに使える音声認識",
-    "start": "発話を開始",
-    "stop": "発話を停止",
-    "listening": "聞いています...",
-    "processing": "処理中...",
-    "placeholder": "話してください...",
-    "close": "Whisper を閉じる",
-    "coachmark": {
-      "holdToTalk": "Whisper はここにあります。{shortcut} を押したままにすると話せ、離すと入力されます。",
-      "warmingUp": "初回セットアップ - モデルをウォームアップ中..."
-    },
-    "status": {
-      "idle": "開始を押して話し始めてください。",
-      "apiError": "Whisper API エラーが発生しました。",
-      "nativeFallback": "Whisper モデルは Apple 音声認識です。開始を押して Apple フォールバックを使用してください。",
-      "transcriptionFailedLocal": "SuperCmd Whisper の文字起こしに失敗しました。",
-      "transcriptionFailed": "Whisper の文字起こしに失敗しました。",
-      "microphonePermissionRequired": "マイクの権限が必要です。",
-      "microphonePermissionCheckFailed": "マイクの権限確認に失敗しました。",
-      "microphoneAccessDenied": "マイクへのアクセスが拒否されました。",
-      "startingMicrophone": "マイクを開始中...",
-      "loadingModels": "Whisper モデルを読み込み中...",
-      "nativeRecognizerStartFailed": "音声認識の開始に失敗しました。",
-      "finishing": "文字起こしを完了中...",
-      "listeningReleaseToProcess": "聞いています。離すと処理されます。",
-      "listeningPressAgainToFinish": "聞いています。もう一度押すと終了します。",
-      "recordingFailed": "録音に失敗しました。",
-      "speechRecognitionError": "音声認識エラーが発生しました。"
-    },
-    "errors": {
-      "typeIntoActiveApp": "アクティブなアプリに入力できませんでした。",
-      "enableMicrophonePermission": "システム設定 -> プライバシーとセキュリティ -> マイクで SuperCmd を有効にしてから再試行してください。",
-      "allowMicrophonePermission": "SuperCmd Whisper を使用するには、マイクの権限を許可してください。",
-      "microphoneUnavailable": "マイクにアクセスできませんでした。システム設定 -> プライバシーとセキュリティ -> マイクを確認してください。",
-      "nativeRecognizerStartFailed": "ネイティブ音声認識の開始に失敗しました。",
-      "liveTypingRetry": "ライブタイピングが遅れました。もう一度お試しください。",
-      "modelNotReady": "モデルはまだウォームアップ中です。しばらくしてからもう一度お試しください。",
-      "recordingFailed": "音声録音を開始できませんでした。"
-    }
-  },
-  "read": {
-    "title": "SuperCmd Read",
-    "description": "選択されたテキストのテキスト読み上げ",
-    "start": "読み上げを開始",
-    "stop": "読み上げを停止",
-    "reading": "読み上げ中...",
-    "noText": "テキストが選択されていません"
   },
   "camera": {
     "title": "カメラ",

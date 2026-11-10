@@ -1,3 +1,4 @@
+import { isRetiredSystemCommand } from '../shared/retired-commands';
 import { isRemovedAIModel } from '../shared/ai-models';
 /**
  * Main Process — SuperCmd
@@ -45,7 +46,7 @@ import {
 } from './settings-store';
 import type { AppSettings, BrowserProfileSetting, BrowserProfileFilters, BrowserProfileFilterKind, RelocateMode } from './settings-store';
 import { recordRootSearchLaunchInState, type RootSearchRankingState } from '../shared/root-search-ranking-state';
-import { streamAI, streamAIChat, isAIAvailable, transcribeAudio } from './ai-provider';
+import { streamAI, streamAIChat, isAIAvailable } from './ai-provider';
 import { scanAppRemnants } from './app-uninstaller';
 import * as soulverCalculator from './soulver-calculator';
 import {
@@ -230,1153 +231,6 @@ try {
 
 // ─── Native Binary Helpers ──────────────────────────────────────────
 
-
-const WHISPERCPP_FRAMEWORK_VERSION = 'v1.8.3';
-const WHISPERCPP_MODEL_NAME = 'base';
-const WHISPERCPP_MODEL_URL = `https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPERCPP_MODEL_NAME}.bin`;
-
-let whisperCppModelEnsurePromise: Promise<string> | null = null;
-type WhisperCppModelStatus = {
-  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-  modelName: string;
-  path: string;
-  bytesDownloaded: number;
-  totalBytes: number | null;
-  error?: string;
-};
-let whisperCppModelStatus: WhisperCppModelStatus | null = null;
-
-// ─── Parakeet TDT v3 (FluidAudio) ─────────────────────────────────
-type ParakeetModelStatus = {
-  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-  modelName: string;
-  path: string;
-  progress: number; // 0-1 fraction
-  error?: string;
-};
-let parakeetModelStatus: ParakeetModelStatus | null = null;
-let parakeetModelEnsurePromise: Promise<string> | null = null;
-
-// Persistent serve-mode process for fast transcription (models stay loaded in memory)
-let parakeetServerProcess: any = null; // ChildProcess
-let parakeetServerReady = false;
-let parakeetServerStarting: Promise<void> | null = null;
-let parakeetServerBuffer = '';
-type PendingParakeetRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
-let parakeetPendingRequest: PendingParakeetRequest | null = null;
-
-function killParakeetServer(): void {
-  if (parakeetServerProcess) {
-    try {
-      parakeetServerProcess.stdin?.write('{"command":"exit"}\n');
-      parakeetServerProcess.kill();
-    } catch {}
-    parakeetServerProcess = null;
-  }
-  parakeetServerReady = false;
-  parakeetServerStarting = null;
-  parakeetServerBuffer = '';
-  if (parakeetPendingRequest) {
-    parakeetPendingRequest.reject(new Error('Parakeet server killed'));
-    parakeetPendingRequest = null;
-  }
-}
-
-function ensureParakeetServer(): Promise<void> {
-  if (parakeetServerReady && parakeetServerProcess && !parakeetServerProcess.killed) {
-    return Promise.resolve();
-  }
-  if (parakeetServerStarting) return parakeetServerStarting;
-
-  parakeetServerStarting = (async () => {
-    killParakeetServer();
-    const binaryPath = getParakeetTranscriberBinaryPath();
-    if (!fs.existsSync(binaryPath)) {
-      throw new Error('parakeet-transcriber binary not found');
-    }
-
-    const { spawn } = require('child_process');
-    const child = spawn(binaryPath, ['serve'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    parakeetServerProcess = child;
-
-    child.stderr.on('data', (chunk: Buffer) => {
-      console.log(`[Parakeet][server stderr] ${chunk.toString().trim()}`);
-    });
-
-    child.on('exit', (code: number | null) => {
-      console.log(`[Parakeet] Server process exited with code ${code}`);
-      parakeetServerReady = false;
-      parakeetServerProcess = null;
-      parakeetServerStarting = null;
-      if (parakeetPendingRequest) {
-        parakeetPendingRequest.reject(new Error(`Parakeet server exited with code ${code}`));
-        parakeetPendingRequest = null;
-      }
-    });
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      parakeetServerBuffer += chunk.toString();
-      const lines = parakeetServerBuffer.split('\n');
-      parakeetServerBuffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const json = JSON.parse(trimmed);
-          if (json.ready) {
-            parakeetServerReady = true;
-            console.log('[Parakeet] Server ready (models loaded)');
-            continue;
-          }
-          if (parakeetPendingRequest) {
-            const req = parakeetPendingRequest;
-            parakeetPendingRequest = null;
-            if (json.error) {
-              req.reject(new Error(json.error));
-            } else {
-              req.resolve(json);
-            }
-          }
-        } catch {}
-      }
-    });
-
-    // Wait for "ready" signal
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Parakeet server startup timed out (120s)'));
-        killParakeetServer();
-      }, 120_000);
-
-      const checkReady = setInterval(() => {
-        if (parakeetServerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-        }
-        if (!parakeetServerProcess || parakeetServerProcess.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Parakeet server process died during startup'));
-        }
-      }, 50);
-    });
-
-    parakeetServerStarting = null;
-  })();
-
-  return parakeetServerStarting;
-}
-
-function sendParakeetRequest(request: Record<string, any>): Promise<any> {
-  return new Promise((resolve, reject) => {
-    if (!parakeetServerProcess || parakeetServerProcess.killed || !parakeetServerReady) {
-      reject(new Error('Parakeet server not running'));
-      return;
-    }
-    if (parakeetPendingRequest) {
-      reject(new Error('Another Parakeet request is already in flight'));
-      return;
-    }
-    parakeetPendingRequest = { resolve, reject };
-    try {
-      parakeetServerProcess.stdin.write(JSON.stringify(request) + '\n');
-    } catch (err: any) {
-      parakeetPendingRequest = null;
-      reject(err);
-    }
-  });
-}
-
-function getParakeetTranscriberBinaryPath(): string {
-  return getNativeBinaryPath('parakeet-transcriber');
-}
-
-function getParakeetModelStatus(): ParakeetModelStatus {
-  if (parakeetModelStatus?.state === 'downloading') {
-    return { ...parakeetModelStatus };
-  }
-  if (parakeetModelStatus?.state === 'error') {
-    return { ...parakeetModelStatus };
-  }
-
-  // Ask the binary for the real status
-  const binaryPath = getParakeetTranscriberBinaryPath();
-  try {
-    if (!fs.existsSync(binaryPath)) {
-      parakeetModelStatus = {
-        state: 'error',
-        modelName: 'parakeet-tdt-0.6b-v3',
-        path: '',
-        progress: 0,
-        error: 'parakeet-transcriber binary not found. Rebuild with: node scripts/build-parakeet.mjs',
-      };
-      return parakeetModelStatus;
-    }
-    const { spawnSync } = require('child_process');
-    const result = spawnSync(binaryPath, ['status'], { timeout: 10_000 });
-    if (result.status === 0 && result.stdout) {
-      const json = JSON.parse(result.stdout.toString().trim());
-      if (json.state === 'downloaded') {
-        parakeetModelStatus = {
-          state: 'downloaded',
-          modelName: json.modelName || 'parakeet-tdt-0.6b-v3',
-          path: json.path || '',
-          progress: 1,
-        };
-      } else {
-        parakeetModelStatus = {
-          state: 'not-downloaded',
-          modelName: json.modelName || 'parakeet-tdt-0.6b-v3',
-          path: '',
-          progress: 0,
-        };
-      }
-      return parakeetModelStatus;
-    }
-  } catch {}
-
-  parakeetModelStatus = {
-    state: 'not-downloaded',
-    modelName: 'parakeet-tdt-0.6b-v3',
-    path: '',
-    progress: 0,
-  };
-  return parakeetModelStatus;
-}
-
-async function ensureParakeetModelDownloaded(): Promise<string> {
-  // Check if already downloaded
-  const status = getParakeetModelStatus();
-  if (status.state === 'downloaded' && status.path) {
-    return status.path;
-  }
-
-  if (parakeetModelEnsurePromise) {
-    return await parakeetModelEnsurePromise;
-  }
-
-  parakeetModelEnsurePromise = (async () => {
-    const binaryPath = getParakeetTranscriberBinaryPath();
-    if (!fs.existsSync(binaryPath)) {
-      throw new Error('parakeet-transcriber binary not found');
-    }
-
-    parakeetModelStatus = {
-      state: 'downloading',
-      modelName: 'parakeet-tdt-0.6b-v3',
-      path: '',
-      progress: 0,
-    };
-
-    try {
-      console.log('[Parakeet] Downloading Parakeet TDT v3 models');
-      const { spawn } = require('child_process');
-      const modelPath = await new Promise<string>((resolve, reject) => {
-        const child = spawn(binaryPath, ['download'], {
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        let lastLine = '';
-        let stderr = '';
-
-        child.stdout.on('data', (chunk: Buffer) => {
-          const lines = chunk.toString().split('\n').filter(Boolean);
-          for (const line of lines) {
-            try {
-              const json = JSON.parse(line);
-              if (json.state === 'downloading') {
-                parakeetModelStatus = {
-                  state: 'downloading',
-                  modelName: 'parakeet-tdt-0.6b-v3',
-                  path: '',
-                  progress: typeof json.progress === 'number' ? json.progress : 0,
-                };
-              }
-              lastLine = line;
-            } catch {}
-          }
-        });
-
-        child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString();
-        });
-
-        child.on('error', (error: Error) => reject(error));
-        child.on('exit', (code: number | null) => {
-          if (code === 0 && lastLine) {
-            try {
-              const json = JSON.parse(lastLine);
-              if (json.state === 'downloaded') {
-                resolve(json.path || '');
-                return;
-              }
-              if (json.error) {
-                reject(new Error(json.error));
-                return;
-              }
-            } catch {}
-          }
-          reject(new Error(stderr.trim() || `parakeet-transcriber download exited with code ${code}`));
-        });
-      });
-
-      parakeetModelStatus = {
-        state: 'downloaded',
-        modelName: 'parakeet-tdt-0.6b-v3',
-        path: modelPath,
-        progress: 1,
-      };
-      console.log(`[Parakeet] Models ready at ${modelPath}`);
-      return modelPath;
-    } catch (error) {
-      parakeetModelStatus = {
-        state: 'error',
-        modelName: 'parakeet-tdt-0.6b-v3',
-        path: '',
-        progress: 0,
-        error: error instanceof Error ? error.message : String(error),
-      };
-      throw error;
-    } finally {
-      parakeetModelEnsurePromise = null;
-    }
-  })();
-
-  return await parakeetModelEnsurePromise;
-}
-
-/** Pad a 16kHz 16-bit mono WAV to at least 1 second by appending silence. */
-function padWavToMinDuration(wavBuffer: Buffer, minSamples = 16000): Buffer {
-  // WAV header is 44 bytes; data follows as 16-bit PCM samples (2 bytes each)
-  if (wavBuffer.length < 44) return wavBuffer;
-  const dataBytesPresent = wavBuffer.length - 44;
-  const samplesPresent = Math.floor(dataBytesPresent / 2);
-  if (samplesPresent >= minSamples) return wavBuffer;
-
-  const samplesToAdd = minSamples - samplesPresent;
-  const silenceBytes = Buffer.alloc(samplesToAdd * 2, 0);
-  const newDataSize = dataBytesPresent + silenceBytes.length;
-  const padded = Buffer.concat([wavBuffer, silenceBytes]);
-
-  // Patch RIFF chunk size (bytes 4-7) = file size - 8
-  padded.writeUInt32LE(padded.length - 8, 4);
-  // Patch data sub-chunk size (bytes 40-43)
-  padded.writeUInt32LE(newDataSize, 40);
-
-  return padded;
-}
-
-async function transcribeAudioWithParakeet(opts: {
-  audioBuffer: Buffer;
-  language?: string;
-  mimeType?: string;
-}): Promise<string> {
-  const status = getParakeetModelStatus();
-  if (status.state === 'downloading') {
-    throw new Error('Parakeet models are still downloading. Finish setup from onboarding or Settings -> AI -> SuperCmd Whisper.');
-  }
-  if (status.state !== 'downloaded') {
-    throw new Error('Parakeet models have not been downloaded yet. Download them from onboarding or Settings -> AI -> SuperCmd Whisper.');
-  }
-
-  // Ensure the persistent server process is running (models loaded in memory)
-  await ensureParakeetServer();
-
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-parakeet-'));
-  const audioPath = path.join(tempDir, 'input.wav');
-
-  try {
-    fs.writeFileSync(audioPath, padWavToMinDuration(opts.audioBuffer));
-
-    const result = await sendParakeetRequest({
-      command: 'transcribe',
-      file: audioPath,
-    });
-
-    return result.text || '';
-  } finally {
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
-  }
-}
-
-// ─── Qwen3 ASR (FluidAudio) — macOS 15+ ──────────────────────────
-type Qwen3ModelStatus = {
-  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-  modelName: string;
-  path: string;
-  progress: number;
-  error?: string;
-};
-let qwen3ModelStatus: Qwen3ModelStatus | null = null;
-let qwen3ModelEnsurePromise: Promise<string> | null = null;
-
-let qwen3ServerProcess: any = null;
-let qwen3ServerReady = false;
-let qwen3ServerStarting: Promise<void> | null = null;
-let qwen3ServerBuffer = '';
-type PendingQwen3Request = { resolve: (json: any) => void; reject: (err: Error) => void };
-let qwen3PendingRequest: PendingQwen3Request | null = null;
-
-function killQwen3Server(): void {
-  if (qwen3ServerProcess) {
-    try {
-      qwen3ServerProcess.stdin?.write('{"command":"exit"}\n');
-      qwen3ServerProcess.kill();
-    } catch {}
-    qwen3ServerProcess = null;
-  }
-  qwen3ServerReady = false;
-  qwen3ServerStarting = null;
-  qwen3ServerBuffer = '';
-  if (qwen3PendingRequest) {
-    qwen3PendingRequest.reject(new Error('Qwen3 server killed'));
-    qwen3PendingRequest = null;
-  }
-}
-
-function ensureQwen3Server(): Promise<void> {
-  if (qwen3ServerReady && qwen3ServerProcess && !qwen3ServerProcess.killed) {
-    return Promise.resolve();
-  }
-  if (qwen3ServerStarting) return qwen3ServerStarting;
-
-  qwen3ServerStarting = (async () => {
-    killQwen3Server();
-    const binaryPath = getParakeetTranscriberBinaryPath();
-    if (!fs.existsSync(binaryPath)) {
-      throw new Error('parakeet-transcriber binary not found');
-    }
-
-    const { spawn } = require('child_process');
-    const child = spawn(binaryPath, ['serve', '--model', 'qwen3'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    qwen3ServerProcess = child;
-
-    child.stderr.on('data', (chunk: Buffer) => {
-      console.log(`[Qwen3][server stderr] ${chunk.toString().trim()}`);
-    });
-
-    child.on('exit', (code: number | null) => {
-      console.log(`[Qwen3] Server process exited with code ${code}`);
-      qwen3ServerReady = false;
-      qwen3ServerProcess = null;
-      qwen3ServerStarting = null;
-      if (qwen3PendingRequest) {
-        qwen3PendingRequest.reject(new Error(`Qwen3 server exited with code ${code}`));
-        qwen3PendingRequest = null;
-      }
-    });
-
-    child.stdout.on('data', (chunk: Buffer) => {
-      qwen3ServerBuffer += chunk.toString();
-      const lines = qwen3ServerBuffer.split('\n');
-      qwen3ServerBuffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const json = JSON.parse(trimmed);
-          if (json.ready) {
-            qwen3ServerReady = true;
-            console.log('[Qwen3] Server ready (models loaded)');
-            continue;
-          }
-          if (qwen3PendingRequest) {
-            const req = qwen3PendingRequest;
-            qwen3PendingRequest = null;
-            if (json.error) {
-              req.reject(new Error(json.error));
-            } else {
-              req.resolve(json);
-            }
-          }
-        } catch {}
-      }
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Qwen3 server startup timed out (120s)'));
-        killQwen3Server();
-      }, 120_000);
-
-      const checkReady = setInterval(() => {
-        if (qwen3ServerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-        }
-        if (!qwen3ServerProcess || qwen3ServerProcess.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Qwen3 server process died during startup'));
-        }
-      }, 50);
-    });
-
-    qwen3ServerStarting = null;
-  })();
-
-  return qwen3ServerStarting;
-}
-
-function sendQwen3Request(request: Record<string, any>): Promise<any> {
-  return new Promise((resolve, reject) => {
-    if (!qwen3ServerProcess || qwen3ServerProcess.killed || !qwen3ServerReady) {
-      reject(new Error('Qwen3 server not running'));
-      return;
-    }
-    if (qwen3PendingRequest) {
-      reject(new Error('Another Qwen3 request is already in flight'));
-      return;
-    }
-    qwen3PendingRequest = { resolve, reject };
-    try {
-      qwen3ServerProcess.stdin.write(JSON.stringify(request) + '\n');
-    } catch (err: any) {
-      qwen3PendingRequest = null;
-      reject(err);
-    }
-  });
-}
-
-function getQwen3ModelStatus(): Qwen3ModelStatus {
-  if (qwen3ModelStatus?.state === 'downloading') return { ...qwen3ModelStatus };
-  if (qwen3ModelStatus?.state === 'error') return { ...qwen3ModelStatus };
-
-  const binaryPath = getParakeetTranscriberBinaryPath();
-  try {
-    if (!fs.existsSync(binaryPath)) {
-      qwen3ModelStatus = { state: 'error', modelName: 'qwen3-asr-0.6b', path: '', progress: 0, error: 'Binary not found' };
-      return qwen3ModelStatus;
-    }
-    const { spawnSync } = require('child_process');
-    const result = spawnSync(binaryPath, ['status', '--model', 'qwen3'], { timeout: 10_000 });
-    if (result.status === 0 && result.stdout) {
-      const json = JSON.parse(result.stdout.toString().trim());
-      qwen3ModelStatus = {
-        state: json.state === 'downloaded' ? 'downloaded' : 'not-downloaded',
-        modelName: json.modelName || 'qwen3-asr-0.6b',
-        path: json.path || '',
-        progress: json.state === 'downloaded' ? 1 : 0,
-      };
-      return qwen3ModelStatus;
-    }
-  } catch {}
-
-  qwen3ModelStatus = { state: 'not-downloaded', modelName: 'qwen3-asr-0.6b', path: '', progress: 0 };
-  return qwen3ModelStatus;
-}
-
-async function ensureQwen3ModelDownloaded(): Promise<string> {
-  const status = getQwen3ModelStatus();
-  if (status.state === 'downloaded' && status.path) return status.path;
-  if (qwen3ModelEnsurePromise) return await qwen3ModelEnsurePromise;
-
-  qwen3ModelEnsurePromise = (async () => {
-    const binaryPath = getParakeetTranscriberBinaryPath();
-    if (!fs.existsSync(binaryPath)) throw new Error('parakeet-transcriber binary not found');
-
-    qwen3ModelStatus = { state: 'downloading', modelName: 'qwen3-asr-0.6b', path: '', progress: 0 };
-
-    try {
-      console.log('[Qwen3] Downloading Qwen3 ASR models (int8)');
-      const { spawn } = require('child_process');
-      const modelPath = await new Promise<string>((resolve, reject) => {
-        const child = spawn(binaryPath, ['download', '--model', 'qwen3'], { stdio: ['ignore', 'pipe', 'pipe'] });
-        let lastLine = '';
-        let stderr = '';
-
-        child.stdout.on('data', (chunk: Buffer) => {
-          for (const line of chunk.toString().split('\n').filter(Boolean)) {
-            try {
-              const json = JSON.parse(line);
-              if (json.state === 'downloading') {
-                qwen3ModelStatus = { state: 'downloading', modelName: 'qwen3-asr-0.6b', path: '', progress: typeof json.progress === 'number' ? json.progress : 0 };
-              }
-              lastLine = line;
-            } catch {}
-          }
-        });
-
-        child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-        child.on('error', (error: Error) => reject(error));
-        child.on('exit', (code: number | null) => {
-          if (code === 0 && lastLine) {
-            try {
-              const json = JSON.parse(lastLine);
-              if (json.state === 'downloaded') { resolve(json.path || ''); return; }
-              if (json.error) { reject(new Error(json.error)); return; }
-            } catch {}
-          }
-          reject(new Error(stderr.trim() || `download exited with code ${code}`));
-        });
-      });
-
-      qwen3ModelStatus = { state: 'downloaded', modelName: 'qwen3-asr-0.6b', path: modelPath, progress: 1 };
-      console.log(`[Qwen3] Models ready at ${modelPath}`);
-      return modelPath;
-    } catch (error) {
-      qwen3ModelStatus = { state: 'error', modelName: 'qwen3-asr-0.6b', path: '', progress: 0, error: error instanceof Error ? error.message : String(error) };
-      throw error;
-    } finally {
-      qwen3ModelEnsurePromise = null;
-    }
-  })();
-
-  return await qwen3ModelEnsurePromise;
-}
-
-async function transcribeAudioWithQwen3(opts: {
-  audioBuffer: Buffer;
-  language?: string;
-  mimeType?: string;
-}): Promise<string> {
-  const status = getQwen3ModelStatus();
-  if (status.state === 'downloading') throw new Error('Qwen3 models are still downloading.');
-  if (status.state !== 'downloaded') throw new Error('Qwen3 models have not been downloaded yet. Download them from Settings -> AI -> SuperCmd Whisper.');
-
-  await ensureQwen3Server();
-
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-qwen3-'));
-  const audioPath = path.join(tempDir, 'input.wav');
-
-  try {
-    fs.writeFileSync(audioPath, padWavToMinDuration(opts.audioBuffer));
-    const request: Record<string, any> = { command: 'transcribe', file: audioPath };
-    if (opts.language) request.language = opts.language;
-    const result = await sendQwen3Request(request);
-    return result.text || '';
-  } finally {
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
-  }
-}
-
-function getWhisperCppRuntimeDir(): string {
-  const base = path.join(__dirname, '..', 'native', 'whisper-runtime');
-  return resolvePackagedUnpackedPath(base);
-}
-
-function getWhisperCppFrameworkPath(): string {
-  return path.join(getWhisperCppRuntimeDir(), 'whisper.framework');
-}
-
-function getWhisperCppTranscriberBinaryPath(): string {
-  return getNativeBinaryPath('whisper-transcriber');
-}
-
-function getWhisperCppModelPath(): string {
-  return path.join(app.getPath('userData'), 'whispercpp', 'models', `ggml-${WHISPERCPP_MODEL_NAME}.bin`);
-}
-
-function getWhisperCppModelStatus(): WhisperCppModelStatus {
-  const modelPath = getWhisperCppModelPath();
-  try {
-    if (fs.existsSync(modelPath)) {
-      const stats = fs.statSync(modelPath);
-      whisperCppModelStatus = {
-        state: 'downloaded',
-        modelName: WHISPERCPP_MODEL_NAME,
-        path: modelPath,
-        bytesDownloaded: Math.max(0, Number(stats.size) || 0),
-        totalBytes: Math.max(0, Number(stats.size) || 0),
-      };
-      return whisperCppModelStatus;
-    }
-  } catch {}
-
-  if (whisperCppModelStatus?.state === 'downloading') {
-    return {
-      ...whisperCppModelStatus,
-      modelName: WHISPERCPP_MODEL_NAME,
-      path: modelPath,
-    };
-  }
-
-  if (whisperCppModelStatus?.state === 'error') {
-    return {
-      ...whisperCppModelStatus,
-      modelName: WHISPERCPP_MODEL_NAME,
-      path: modelPath,
-    };
-  }
-
-  whisperCppModelStatus = {
-    state: 'not-downloaded',
-    modelName: WHISPERCPP_MODEL_NAME,
-    path: modelPath,
-    bytesDownloaded: 0,
-    totalBytes: null,
-  };
-  return whisperCppModelStatus;
-}
-
-function findFirstExistingPath(candidates: string[]): string | null {
-  for (const candidate of candidates) {
-    try {
-      if (candidate && fs.existsSync(candidate)) {
-        return candidate;
-      }
-    } catch {}
-  }
-  return null;
-}
-
-async function downloadFileWithRedirects(
-  url: string,
-  destinationPath: string,
-  redirectsRemaining: number = 5,
-  onProgress?: (bytesDownloaded: number, totalBytes: number | null) => void,
-): Promise<void> {
-  if (redirectsRemaining < 0) {
-    throw new Error(`Too many redirects while downloading ${url}`);
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const parsedUrl = new URL(url);
-    const transport = parsedUrl.protocol === 'https:' ? require('https') : require('http');
-    const request = transport.get(
-      parsedUrl.toString(),
-      {
-        headers: {
-          'User-Agent': 'SuperCmd/1.0 whisper.cpp bootstrap',
-          'Accept': '*/*',
-        },
-      },
-      (response: any) => {
-        const statusCode = Number(response?.statusCode || 0);
-        const location = String(response?.headers?.location || '');
-
-        if (statusCode >= 300 && statusCode < 400 && location) {
-          response.resume();
-          const nextUrl = new URL(location, parsedUrl).toString();
-          void downloadFileWithRedirects(nextUrl, destinationPath, redirectsRemaining - 1, onProgress)
-            .then(() => {
-              if (settled) return;
-              settled = true;
-              resolve();
-            })
-            .catch((error) => {
-              if (settled) return;
-              settled = true;
-              reject(error);
-            });
-          return;
-        }
-
-        if (statusCode >= 400) {
-          response.resume();
-          if (!settled) {
-            settled = true;
-            reject(new Error(`HTTP ${statusCode} while downloading ${url}`));
-          }
-          return;
-        }
-
-        const fileStream = fs.createWriteStream(destinationPath);
-        const totalBytesHeader = Number.parseInt(String(response?.headers?.['content-length'] || ''), 10);
-        const totalBytes = Number.isFinite(totalBytesHeader) && totalBytesHeader > 0 ? totalBytesHeader : null;
-        let bytesDownloaded = 0;
-
-        response.on('data', (chunk: Buffer) => {
-          bytesDownloaded += chunk.length;
-          onProgress?.(bytesDownloaded, totalBytes);
-        });
-
-        response.pipe(fileStream);
-
-        fileStream.on('finish', () => {
-          fileStream.close(() => {
-            if (settled) return;
-            settled = true;
-            resolve();
-          });
-        });
-
-        fileStream.on('error', (error) => {
-          try { fileStream.close(); } catch {}
-          try { fs.unlinkSync(destinationPath); } catch {}
-          if (settled) return;
-          settled = true;
-          reject(error);
-        });
-
-        response.on('error', (error: Error) => {
-          try { fileStream.close(); } catch {}
-          try { fs.unlinkSync(destinationPath); } catch {}
-          if (settled) return;
-          settled = true;
-          reject(error);
-        });
-      }
-    );
-
-    request.on('error', (error: Error) => {
-      try { fs.unlinkSync(destinationPath); } catch {}
-      if (settled) return;
-      settled = true;
-      reject(error);
-    });
-  });
-}
-
-async function ensureWhisperCppModelDownloaded(): Promise<string> {
-  const modelPath = getWhisperCppModelPath();
-  try {
-    if (fs.existsSync(modelPath)) {
-      whisperCppModelStatus = {
-        state: 'downloaded',
-        modelName: WHISPERCPP_MODEL_NAME,
-        path: modelPath,
-        bytesDownloaded: Math.max(0, Number(fs.statSync(modelPath).size) || 0),
-        totalBytes: Math.max(0, Number(fs.statSync(modelPath).size) || 0),
-      };
-      return modelPath;
-    }
-  } catch {}
-
-  if (whisperCppModelEnsurePromise) {
-    return await whisperCppModelEnsurePromise;
-  }
-
-  whisperCppModelEnsurePromise = (async () => {
-    const modelDir = path.dirname(modelPath);
-    const tempPath = `${modelPath}.download`;
-    fs.mkdirSync(modelDir, { recursive: true });
-    whisperCppModelStatus = {
-      state: 'downloading',
-      modelName: WHISPERCPP_MODEL_NAME,
-      path: modelPath,
-      bytesDownloaded: 0,
-      totalBytes: null,
-    };
-
-    try {
-      console.log(`[Whisper][whisper.cpp] Downloading ${WHISPERCPP_MODEL_NAME} model`);
-      await downloadFileWithRedirects(WHISPERCPP_MODEL_URL, tempPath, 5, (bytesDownloaded, totalBytes) => {
-        whisperCppModelStatus = {
-          state: 'downloading',
-          modelName: WHISPERCPP_MODEL_NAME,
-          path: modelPath,
-          bytesDownloaded,
-          totalBytes,
-        };
-      });
-      fs.renameSync(tempPath, modelPath);
-      const finalSize = Math.max(0, Number(fs.statSync(modelPath).size) || 0);
-      whisperCppModelStatus = {
-        state: 'downloaded',
-        modelName: WHISPERCPP_MODEL_NAME,
-        path: modelPath,
-        bytesDownloaded: finalSize,
-        totalBytes: finalSize,
-      };
-      console.log(`[Whisper][whisper.cpp] Model ready at ${modelPath}`);
-      return modelPath;
-    } catch (error) {
-      try { fs.unlinkSync(tempPath); } catch {}
-      whisperCppModelStatus = {
-        state: 'error',
-        modelName: WHISPERCPP_MODEL_NAME,
-        path: modelPath,
-        bytesDownloaded: 0,
-        totalBytes: null,
-        error: error instanceof Error ? error.message : String(error),
-      };
-      throw error;
-    } finally {
-      whisperCppModelEnsurePromise = null;
-    }
-  })();
-
-  return await whisperCppModelEnsurePromise;
-}
-
-function ensureWhisperCppTranscriberBinary(): string {
-  const binaryPath = getWhisperCppTranscriberBinaryPath();
-  try {
-    if (fs.existsSync(binaryPath)) {
-      return binaryPath;
-    }
-  } catch {}
-
-  const frameworkPath = getWhisperCppFrameworkPath();
-  const runtimeDir = getWhisperCppRuntimeDir();
-  if (!fs.existsSync(frameworkPath)) {
-    throw new Error(
-      `SuperCmd Whisper runtime is missing. Rebuild native helpers to download the official ${WHISPERCPP_FRAMEWORK_VERSION} macOS framework.`
-    );
-  }
-
-  const sourcePath = findFirstExistingPath([
-    path.join(app.getAppPath(), 'src', 'native', 'whisper-transcriber.swift'),
-    path.join(process.cwd(), 'src', 'native', 'whisper-transcriber.swift'),
-    path.join(__dirname, '..', '..', 'src', 'native', 'whisper-transcriber.swift'),
-  ]);
-
-  if (!sourcePath) {
-    throw new Error('SuperCmd Whisper transcriber source is missing. Run npm run build:native to regenerate the binary.');
-  }
-
-  fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
-
-  try {
-    const { execFileSync } = require('child_process');
-    execFileSync('swiftc', [
-      '-O',
-      '-module-cache-path', path.join(os.tmpdir(), 'supercmd-swift-module-cache'),
-      '-F', runtimeDir,
-      '-framework', 'whisper',
-      '-Xlinker', '-rpath',
-      '-Xlinker', '@executable_path/whisper-runtime',
-      '-o', binaryPath,
-      sourcePath,
-    ]);
-    console.log('[Whisper][whisper.cpp] Compiled whisper-transcriber binary');
-  } catch (error) {
-    console.error('[Whisper][whisper.cpp] Compile failed:', error);
-    throw new Error('Failed to compile SuperCmd Whisper transcriber. Ensure Xcode Command Line Tools are installed.');
-  }
-
-  return binaryPath;
-}
-
-// Persistent serve-mode process for whisper.cpp (model stays loaded in memory)
-let whisperCppServerProcess: any = null;
-let whisperCppServerReady = false;
-let whisperCppServerStarting: Promise<void> | null = null;
-let whisperCppServerBuffer = '';
-type PendingWhisperCppRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
-let whisperCppPendingRequest: PendingWhisperCppRequest | null = null;
-
-function killWhisperCppServer(): void {
-  if (whisperCppServerProcess) {
-    try {
-      whisperCppServerProcess.stdin?.write('{"command":"exit"}\n');
-      whisperCppServerProcess.kill();
-    } catch {}
-    whisperCppServerProcess = null;
-  }
-  whisperCppServerReady = false;
-  whisperCppServerStarting = null;
-  whisperCppServerBuffer = '';
-  if (whisperCppPendingRequest) {
-    whisperCppPendingRequest.reject(new Error('Whisper.cpp server killed'));
-    whisperCppPendingRequest = null;
-  }
-}
-
-function ensureWhisperCppServer(): Promise<void> {
-  if (whisperCppServerReady && whisperCppServerProcess && !whisperCppServerProcess.killed) {
-    return Promise.resolve();
-  }
-  if (whisperCppServerStarting) return whisperCppServerStarting;
-
-  whisperCppServerStarting = (async () => {
-    killWhisperCppServer();
-    const binaryPath = ensureWhisperCppTranscriberBinary();
-    const modelStatus = getWhisperCppModelStatus();
-    if (modelStatus.state !== 'downloaded' || !modelStatus.path) {
-      throw new Error('Whisper.cpp model not available');
-    }
-
-    const { spawn } = require('child_process');
-    const child = spawn(binaryPath, ['serve', '--model', modelStatus.path], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    whisperCppServerProcess = child;
-
-    child.on('exit', (code: number | null) => {
-      console.log(`[Whisper][whisper.cpp] Server process exited with code ${code}`);
-      whisperCppServerReady = false;
-      whisperCppServerProcess = null;
-      whisperCppServerStarting = null;
-      if (whisperCppPendingRequest) {
-        whisperCppPendingRequest.reject(new Error(`Whisper.cpp server exited with code ${code}`));
-        whisperCppPendingRequest = null;
-      }
-    });
-
-    child.stdout.on('data', (chunk: Buffer | string) => {
-      whisperCppServerBuffer += chunk.toString();
-      const lines = whisperCppServerBuffer.split('\n');
-      whisperCppServerBuffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const json = JSON.parse(trimmed);
-          if (json.ready) {
-            whisperCppServerReady = true;
-            console.log('[Whisper][whisper.cpp] Server ready (model loaded)');
-            continue;
-          }
-          if (whisperCppPendingRequest) {
-            const req = whisperCppPendingRequest;
-            whisperCppPendingRequest = null;
-            if (json.error) {
-              req.reject(new Error(json.error));
-            } else {
-              req.resolve(json);
-            }
-          }
-        } catch {}
-      }
-    });
-
-    child.stderr.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString().trim();
-      if (text) console.warn('[Whisper][whisper.cpp][server stderr]', text);
-    });
-
-    // Wait for "ready" signal
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Whisper.cpp server startup timed out (60s)'));
-        killWhisperCppServer();
-      }, 60_000);
-
-      const checkReady = setInterval(() => {
-        if (whisperCppServerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-        }
-        if (!whisperCppServerProcess || whisperCppServerProcess.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Whisper.cpp server process died during startup'));
-        }
-      }, 50);
-    });
-
-    whisperCppServerStarting = null;
-  })();
-
-  return whisperCppServerStarting;
-}
-
-function sendWhisperCppRequest(request: Record<string, any>): Promise<any> {
-  return new Promise((resolve, reject) => {
-    if (!whisperCppServerProcess || whisperCppServerProcess.killed || !whisperCppServerReady) {
-      reject(new Error('Whisper.cpp server not running'));
-      return;
-    }
-
-    if (whisperCppPendingRequest) {
-      whisperCppPendingRequest.reject(new Error('Whisper.cpp request superseded'));
-      whisperCppPendingRequest = null;
-    }
-
-    whisperCppPendingRequest = { resolve, reject };
-    whisperCppServerProcess.stdin.write(JSON.stringify(request) + '\n');
-  });
-}
-
-async function transcribeAudioWithWhisperCpp(opts: {
-  audioBuffer: Buffer;
-  language?: string;
-  mimeType?: string;
-  initialPrompt?: string;
-}): Promise<string> {
-  const mimeType = String(opts.mimeType || 'audio/wav').toLowerCase();
-  if (mimeType && !mimeType.includes('wav')) {
-    throw new Error(`SuperCmd Whisper transcription expects WAV audio, received ${mimeType}.`);
-  }
-
-  const status = getWhisperCppModelStatus();
-  if (status.state === 'downloading') {
-    throw new Error('The SuperCmd Whisper model is still downloading. Finish setup from onboarding or Settings -> AI -> SuperCmd Whisper.');
-  }
-  if (status.state !== 'downloaded') {
-    throw new Error('The SuperCmd Whisper model has not been downloaded yet. Download it from onboarding or Settings -> AI -> SuperCmd Whisper.');
-  }
-
-  // Ensure the persistent server is running (model loaded in memory)
-  await ensureWhisperCppServer();
-
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'supercmd-whispercpp-'));
-  const audioPath = path.join(tempDir, 'input.wav');
-
-  try {
-    fs.writeFileSync(audioPath, opts.audioBuffer);
-
-    const language = normalizeWhisperLanguageCode(opts.language);
-    const result = await sendWhisperCppRequest({
-      command: 'transcribe',
-      file: audioPath,
-      language,
-      initial_prompt: (opts.initialPrompt || '').trim(),
-    });
-
-    return result.text || '';
-  } finally {
-    try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
-  }
-}
-
-const WHISPER_LANGUAGE_CODE_MAP: Record<string, string> = {
-  ar: 'ar',
-  'ar-eg': 'ar',
-  arabic: 'ar',
-  zh: 'zh',
-  'zh-cn': 'zh',
-  chinese: 'zh',
-  mandarin: 'zh',
-  'chinese (mandarin)': 'zh',
-  en: 'en',
-  'en-us': 'en',
-  'en-gb': 'en',
-  english: 'en',
-  fr: 'fr',
-  'fr-ca': 'fr',
-  'fr-fr': 'fr',
-  french: 'fr',
-  de: 'de',
-  'de-de': 'de',
-  german: 'de',
-  hi: 'hi',
-  'hi-in': 'hi',
-  hindi: 'hi',
-  it: 'it',
-  'it-it': 'it',
-  italian: 'it',
-  ja: 'ja',
-  'ja-jp': 'ja',
-  japanese: 'ja',
-  ko: 'ko',
-  'ko-kr': 'ko',
-  korean: 'ko',
-  pt: 'pt',
-  'pt-br': 'pt',
-  portuguese: 'pt',
-  'portuguese (brazil)': 'pt',
-  ru: 'ru',
-  'ru-ru': 'ru',
-  russian: 'ru',
-  es: 'es',
-  'es-mx': 'es',
-  'es-es': 'es',
-  spanish: 'es',
-  'spanish (mexico)': 'es',
-  'spanish (spain)': 'es',
-};
-
-function normalizeWhisperLanguageCode(rawLanguage?: string): string {
-  const normalized = String(rawLanguage || '').trim().toLowerCase().replace(/_/g, '-');
-  if (!normalized) return 'en';
-
-  const directMatch = WHISPER_LANGUAGE_CODE_MAP[normalized];
-  if (directMatch) return directMatch;
-
-  const shortCode = normalized.split('-')[0];
-  return WHISPER_LANGUAGE_CODE_MAP[shortCode] || shortCode || 'en';
-}
 type WindowManagementLayoutItem = {
   id: string;
   bounds?: {
@@ -1398,242 +252,6 @@ let cachedElectronLiquidGlassApi: any | null | undefined = undefined;
 let hasLoggedLiquidGlassRuntimeIncompatibility = false;
 const liquidGlassAppliedWindowIds = new Set<number>();
 let windowManagerAccessRequested = false;
-
-// ─── Native Audio Capturer ────────────────────────────────────────────
-// Persistent native audio-capturer process that uses AVAudioEngine to
-// capture microphone audio without going through the renderer's
-// getUserMedia / Web Audio API path.  This eliminates 100–500 ms of
-// latency from browser audio subsystem negotiation.
-
-let audioCapturerProcess: any = null;
-let audioCapturerReady = false;
-let audioCapturerStarting: Promise<void> | null = null;
-let audioCapturerBuffer = '';
-let audioCapturerRecording = false;
-type PendingAudioCapturerRequest = { resolve: (json: any) => void; reject: (err: Error) => void };
-let audioCapturerPendingRequest: PendingAudioCapturerRequest | null = null;
-
-type AudioCapturerMeter = { average: number; peak: number };
-let audioCapturerMeter: AudioCapturerMeter = { average: 0, peak: 0 };
-let audioCapturerMeterListeners: Array<(meter: AudioCapturerMeter) => void> = [];
-
-function getAudioCapturerBinaryPath(): string {
-  return getNativeBinaryPath('audio-capturer');
-}
-
-function killAudioCapturer(): void {
-  if (audioCapturerProcess) {
-    try {
-      audioCapturerProcess.stdin?.write('{"command":"exit"}\n');
-      audioCapturerProcess.kill();
-    } catch {}
-    audioCapturerProcess = null;
-  }
-  audioCapturerReady = false;
-  audioCapturerStarting = null;
-  audioCapturerBuffer = '';
-  audioCapturerRecording = false;
-  if (audioCapturerPendingRequest) {
-    audioCapturerPendingRequest.reject(new Error('Audio capturer killed'));
-    audioCapturerPendingRequest = null;
-  }
-}
-
-function ensureAudioCapturerBinary(): string {
-  const binaryPath = getAudioCapturerBinaryPath();
-  try {
-    if (fs.existsSync(binaryPath)) {
-      return binaryPath;
-    }
-  } catch {}
-
-  const sourcePath = findFirstExistingPath([
-    path.join(app.getAppPath(), 'src', 'native', 'audio-capturer.swift'),
-    path.join(process.cwd(), 'src', 'native', 'audio-capturer.swift'),
-    path.join(__dirname, '..', '..', 'src', 'native', 'audio-capturer.swift'),
-  ]);
-
-  if (!sourcePath) {
-    throw new Error('Audio capturer source is missing. Run npm run build:native to regenerate the binary.');
-  }
-
-  fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
-
-  try {
-    const { execFileSync } = require('child_process');
-    execFileSync('swiftc', [
-      '-O',
-      '-o', binaryPath,
-      sourcePath,
-      '-framework', 'AVFoundation',
-      '-framework', 'Foundation',
-    ]);
-    console.log('[AudioCapturer] Compiled audio-capturer binary');
-  } catch (error) {
-    console.error('[AudioCapturer] Compile failed:', error);
-    throw new Error('Failed to compile audio capturer. Ensure Xcode Command Line Tools are installed.');
-  }
-
-  return binaryPath;
-}
-
-function sendAudioCapturerRequest(request: Record<string, any>): Promise<any> {
-  return new Promise((resolve, reject) => {
-    if (!audioCapturerProcess || audioCapturerProcess.killed) {
-      reject(new Error('Audio capturer not running'));
-      return;
-    }
-
-    if (audioCapturerPendingRequest) {
-      audioCapturerPendingRequest.reject(new Error('Audio capturer request superseded'));
-      audioCapturerPendingRequest = null;
-    }
-
-    audioCapturerPendingRequest = { resolve, reject };
-    audioCapturerProcess.stdin.write(JSON.stringify(request) + '\n');
-  });
-}
-
-function warmAudioCapturer(): Promise<void> {
-  if (audioCapturerReady && audioCapturerProcess && !audioCapturerProcess.killed) {
-    return Promise.resolve();
-  }
-  if (audioCapturerStarting) return audioCapturerStarting;
-
-  audioCapturerStarting = (async () => {
-    killAudioCapturer();
-    const binaryPath = ensureAudioCapturerBinary();
-
-    const { spawn } = require('child_process');
-    const child = spawn(binaryPath, [], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    audioCapturerProcess = child;
-
-    child.on('exit', (code: number | null) => {
-      console.log(`[AudioCapturer] Process exited with code ${code}`);
-      audioCapturerReady = false;
-      audioCapturerProcess = null;
-      audioCapturerStarting = null;
-      audioCapturerRecording = false;
-      if (audioCapturerPendingRequest) {
-        audioCapturerPendingRequest.reject(new Error(`Audio capturer exited with code ${code}`));
-        audioCapturerPendingRequest = null;
-      }
-    });
-
-    child.stdout.on('data', (chunk: Buffer | string) => {
-      audioCapturerBuffer += chunk.toString();
-      const lines = audioCapturerBuffer.split('\n');
-      audioCapturerBuffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const json = JSON.parse(trimmed);
-
-          if (json.ready) {
-            audioCapturerReady = true;
-            console.log('[AudioCapturer] Engine ready (mic hot)');
-            continue;
-          }
-
-          if (json.recording) {
-            audioCapturerRecording = true;
-            console.log('[AudioCapturer] Recording started');
-          }
-
-          if (json.file !== undefined) {
-            audioCapturerRecording = false;
-          }
-
-          if (json.meter) {
-            audioCapturerMeter = {
-              average: Number(json.meter.average ?? 0),
-              peak: Number(json.meter.peak ?? 0),
-            };
-            for (const listener of audioCapturerMeterListeners) {
-              try { listener(audioCapturerMeter); } catch {}
-            }
-          }
-
-          if (audioCapturerPendingRequest) {
-            const req = audioCapturerPendingRequest;
-            audioCapturerPendingRequest = null;
-            if (json.error) {
-              req.reject(new Error(json.error));
-            } else {
-              req.resolve(json);
-            }
-          }
-        } catch {}
-      }
-    });
-
-    child.stderr.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString().trim();
-      if (text) console.warn('[AudioCapturer][stderr]', text);
-    });
-
-    // Send warmup command to start the audio engine
-    child.stdin.write(JSON.stringify({ command: 'warmup' }) + '\n');
-
-    // Wait for "ready" signal
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        reject(new Error('Audio capturer warmup timed out (30s)'));
-        killAudioCapturer();
-      }, 30_000);
-
-      const checkReady = setInterval(() => {
-        if (audioCapturerReady) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          resolve();
-        }
-        if (!audioCapturerProcess || audioCapturerProcess.killed) {
-          clearInterval(checkReady);
-          clearTimeout(timeout);
-          reject(new Error('Audio capturer process died during warmup'));
-        }
-      }, 50);
-    });
-
-    audioCapturerStarting = null;
-  })();
-
-  return audioCapturerStarting;
-}
-
-async function startNativeAudioCapture(): Promise<void> {
-  await warmAudioCapturer();
-  const result = await sendAudioCapturerRequest({ command: 'start' });
-  if (!result.recording) {
-    throw new Error('Audio capturer failed to start recording');
-  }
-}
-
-async function stopNativeAudioCapture(): Promise<{ file: string; duration: number }> {
-  if (!audioCapturerProcess || !audioCapturerRecording) {
-    throw new Error('Audio capturer is not recording');
-  }
-  const result = await sendAudioCapturerRequest({ command: 'stop' });
-  if (!result.file) {
-    throw new Error('Audio capturer did not return a file path');
-  }
-  return { file: String(result.file), duration: Number(result.duration || 0) };
-}
-
-async function takeNativeAudioSnapshot(): Promise<{ file: string; duration: number }> {
-  if (!audioCapturerProcess || !audioCapturerRecording) {
-    throw new Error('Audio capturer is not recording');
-  }
-  const result = await sendAudioCapturerRequest({ command: 'snapshot' });
-  if (!result.file) {
-    throw new Error('Audio capturer did not return a snapshot file path');
-  }
-  return { file: String(result.file), duration: Number(result.duration || 0) };
-}
 
 // Tracks whether macOS Automation permission for "System Events" has been
 // granted.  Starts `false`; flipped to `true` after the first *successful*
@@ -2301,11 +919,7 @@ const CURSOR_PROMPT_WINDOW_WIDTH = 500;
 const CURSOR_PROMPT_WINDOW_HEIGHT = 100;
 const CURSOR_PROMPT_LEFT_OFFSET = 20;
 const PROMPT_WINDOW_PREWARM_DELAY_MS = 420;
-const WHISPER_WINDOW_WIDTH = 266;
-const WHISPER_WINDOW_HEIGHT = 84;
-const DETACHED_WHISPER_WINDOW_NAME = 'supercmd-whisper-window';
-const DETACHED_WHISPER_ONBOARDING_WINDOW_NAME = 'supercmd-whisper-onboarding-window';
-const DETACHED_SPEAK_WINDOW_NAME = 'supercmd-speak-window';
+
 const DETACHED_WINDOW_MANAGER_WINDOW_NAME = 'supercmd-window-manager-window';
 const DETACHED_PROMPT_WINDOW_NAME = 'supercmd-prompt-window';
 const DETACHED_MEMORY_STATUS_WINDOW_NAME = 'supercmd-memory-status-window';
@@ -2313,7 +927,7 @@ const DETACHED_WINDOW_QUERY_KEY = 'sc_detached';
 const MEMORY_STATUS_WINDOW_WIDTH = 340;
 const MEMORY_STATUS_WINDOW_HEIGHT = 60;
 const MEMORY_STATUS_AUTOHIDE_MS = 3000;
-type LauncherMode = 'default' | 'onboarding' | 'whisper' | 'speak' | 'prompt';
+type LauncherMode = 'default' | 'onboarding' | 'prompt';
 
 function parsePopupFeatures(rawFeatures: string): {
   width?: number;
@@ -2340,22 +954,13 @@ function parsePopupFeatures(rawFeatures: string): {
 function resolveDetachedPopupName(details: any): string | null {
   const byFrameName = String(details?.frameName || '').trim();
   if (
-    byFrameName === DETACHED_WHISPER_WINDOW_NAME ||
-    byFrameName === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME ||
-    byFrameName === DETACHED_SPEAK_WINDOW_NAME ||
     byFrameName === DETACHED_WINDOW_MANAGER_WINDOW_NAME ||
     byFrameName === DETACHED_PROMPT_WINDOW_NAME ||
     byFrameName === DETACHED_MEMORY_STATUS_WINDOW_NAME ||
-    byFrameName.startsWith(`${DETACHED_WHISPER_WINDOW_NAME}-`) ||
-    byFrameName.startsWith(`${DETACHED_WHISPER_ONBOARDING_WINDOW_NAME}-`) ||
-    byFrameName.startsWith(`${DETACHED_SPEAK_WINDOW_NAME}-`) ||
     byFrameName.startsWith(`${DETACHED_WINDOW_MANAGER_WINDOW_NAME}-`) ||
     byFrameName.startsWith(`${DETACHED_PROMPT_WINDOW_NAME}-`) ||
     byFrameName.startsWith(`${DETACHED_MEMORY_STATUS_WINDOW_NAME}-`)
   ) {
-    if (byFrameName.startsWith(DETACHED_WHISPER_WINDOW_NAME)) return DETACHED_WHISPER_WINDOW_NAME;
-    if (byFrameName.startsWith(DETACHED_WHISPER_ONBOARDING_WINDOW_NAME)) return DETACHED_WHISPER_ONBOARDING_WINDOW_NAME;
-    if (byFrameName.startsWith(DETACHED_SPEAK_WINDOW_NAME)) return DETACHED_SPEAK_WINDOW_NAME;
     if (byFrameName.startsWith(DETACHED_WINDOW_MANAGER_WINDOW_NAME)) return DETACHED_WINDOW_MANAGER_WINDOW_NAME;
     if (byFrameName.startsWith(DETACHED_PROMPT_WINDOW_NAME)) return DETACHED_PROMPT_WINDOW_NAME;
     if (byFrameName.startsWith(DETACHED_MEMORY_STATUS_WINDOW_NAME)) return DETACHED_MEMORY_STATUS_WINDOW_NAME;
@@ -2367,9 +972,6 @@ function resolveDetachedPopupName(details: any): string | null {
     const parsed = new URL(rawUrl);
     const byQuery = String(parsed.searchParams.get(DETACHED_WINDOW_QUERY_KEY) || '').trim();
     if (
-      byQuery === DETACHED_WHISPER_WINDOW_NAME ||
-      byQuery === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME ||
-      byQuery === DETACHED_SPEAK_WINDOW_NAME ||
       byQuery === DETACHED_WINDOW_MANAGER_WINDOW_NAME ||
       byQuery === DETACHED_PROMPT_WINDOW_NAME ||
       byQuery === DETACHED_MEMORY_STATUS_WINDOW_NAME
@@ -2388,13 +990,6 @@ function computeDetachedPopupPosition(
   const cursorPoint = screen.getCursorScreenPoint();
   const display = screen.getDisplayNearestPoint(cursorPoint);
   const workArea = display?.workArea || screen.getPrimaryDisplay().workArea;
-
-  if (popupName === DETACHED_SPEAK_WINDOW_NAME) {
-    return {
-      x: workArea.x + workArea.width - width - 20,
-      y: workArea.y + 16,
-    };
-  }
 
   if (popupName === DETACHED_WINDOW_MANAGER_WINDOW_NAME) {
     return {
@@ -2456,13 +1051,6 @@ function computeDetachedPopupPosition(
       ? preferred
       : clamp(baseY + 16, area.y + 8, area.y + area.height - height - 8);
     return { x, y };
-  }
-
-  if (popupName === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME) {
-    return {
-      x: workArea.x + Math.floor((workArea.width - width) / 2),
-      y: workArea.y + Math.floor((workArea.height - height) / 2),
-    };
   }
 
   return {
@@ -3097,70 +1685,20 @@ let emojiPickerWindow: InstanceType<typeof BrowserWindow> | null = null;
 let emojiPickerCurrentQuery = '';
 let emojiPickerCurrentPrefixLen = 1;
 let emojiPickerSelectedIdx = 0;
-let nativeSpeechProcess: any = null;
-let nativeSpeechStdoutBuffer = '';
+
 let nativeColorPickerPromise: Promise<any> | null = null;
 let keyboardLockProcess: any = null;
 let keyboardLockReleaseResolvers: Array<() => void> = [];
-let whisperHoldWatcherProcess: any = null;
-let whisperHoldWatcherStdoutBuffer = '';
-let whisperHoldRequestSeq = 0;
-let whisperHoldReleasedSeq = 0;
-let whisperHoldWatcherSeq = 0;
-let fnSpeakToggleWatcherProcess: any = null;
-let fnSpeakToggleWatcherStdoutBuffer = '';
-let fnSpeakToggleWatcherRestartTimer: NodeJS.Timeout | null = null;
-let fnSpeakToggleWatcherEnabled = false;
+
 const fnCommandWatcherProcesses = new Map<string, any>();
 const fnCommandWatcherStdoutBuffers = new Map<string, string>();
 const fnCommandWatcherRestartTimers = new Map<string, NodeJS.Timeout>();
 const fnCommandWatcherConfigs = new Map<string, string>();
 // When true, the Fn watcher is allowed to start even during onboarding (step 4 — Dictation test).
-let fnWatcherOnboardingOverride = false;
 let hyperKeyMonitorProcess: any = null;
 let hyperKeyMonitorStdoutBuffer = '';
 let hyperKeyMonitorRestartTimer: NodeJS.Timeout | null = null;
 let hyperKeyMonitorEnabled = false;
-let fnSpeakToggleLastPressedAt = 0;
-let fnSpeakToggleIsPressed = false;
-let fnSpeakToggleCurrentShortcut = 'Fn';
-type LocalSpeakBackend = 'edge-tts' | 'system-say';
-let edgeTtsConstructorResolved = false;
-let edgeTtsConstructor: any | null = null;
-let edgeTtsConstructorError = '';
-type SpeakChunkPrepared = {
-  index: number;
-  text: string;
-  audioPath: string;
-  wordCues: Array<{ start: number; end: number; wordIndex: number }>;
-  durationMs?: number;
-  wordOffset?: number;
-  spokenWordCount?: number;
-};
-type SpeakRuntimeOptions = {
-  voice: string;
-  rate: string;
-};
-type EdgeTtsVoiceCatalogEntry = {
-  id: string;
-  label: string;
-  languageCode: string;
-  languageLabel: string;
-  gender: 'female' | 'male';
-  style?: string;
-};
-let speakStatusSnapshot: {
-  state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error';
-  text: string;
-  index: number;
-  total: number;
-  message?: string;
-  wordIndex?: number;
-} = { state: 'idle', text: '', index: 0, total: 0 };
-let speakRuntimeOptions: SpeakRuntimeOptions = {
-  voice: 'en-US-EricNeural',
-  rate: '+0%',
-};
 
 function setLauncherOverlayTopmost(enabled: boolean): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -3278,27 +1816,9 @@ function setOAuthBlurHideSuppression(active: boolean): void {
   }
   setLauncherOverlayTopmost(true);
 }
-let edgeVoiceCatalogCache: { expiresAt: number; voices: EdgeTtsVoiceCatalogEntry[] } | null = null;
-let speakSessionCounter = 0;
-let activeSpeakSession: {
-  id: number;
-  stopRequested: boolean;
-  paused: boolean;
-  playbackGeneration: number;
-  currentIndex: number;
-  chunks: string[];
-  paragraphStartIndexes: number[];
-  chunkParagraphIndexes: number[];
-  resumeWordOffset: number | null;
-  tmpDir: string;
-  chunkPromises: Map<string, Promise<SpeakChunkPrepared>>;
-  afplayProc: any | null;
-  ttsProcesses: Set<any>;
-  restartFrom: (index: number) => void;
-} | null = null;
+
 let launcherMode: LauncherMode = 'default';
-let lastWhisperToggleAt = 0;
-let lastWhisperShownAt = 0;
+
 const INTERNAL_CLIPBOARD_PROBE_REGEX = /^__supercmd_[a-z0-9_]+_probe__\d+_[a-z0-9]+$/i;
 const WINDOW_MANAGEMENT_PRESET_COMMAND_IDS = new Set<string>([
   'system-window-management-left',
@@ -4532,7 +3052,7 @@ function scrubInternalClipboardProbe(reason: string): void {
   }
 }
 
-type OnboardingPermissionTarget = 'accessibility' | 'input-monitoring' | 'microphone' | 'speech-recognition' | 'home-folder';
+type OnboardingPermissionTarget = 'accessibility' | 'input-monitoring' | 'home-folder';
 type OnboardingPermissionResult = {
   granted: boolean;
   requested: boolean;
@@ -4542,49 +3062,10 @@ type OnboardingPermissionResult = {
   error?: string;
 };
 
-type MicrophoneAccessStatus = 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
-type MicrophonePermissionResult = {
-  granted: boolean;
-  requested: boolean;
-  status: MicrophoneAccessStatus;
-  canPrompt: boolean;
-  error?: string;
-};
 type HomeFolderAccessProbeResult = {
   granted: boolean;
   deniedPaths: string[];
 };
-
-function describeMicrophoneStatus(status: MicrophoneAccessStatus): string {
-  if (status === 'denied') {
-    return 'Microphone access is denied. Enable SuperCmd in System Settings -> Privacy & Security -> Microphone.';
-  }
-  if (status === 'restricted') {
-    return 'Microphone access is restricted on this device.';
-  }
-  if (status === 'not-determined') {
-    return 'Microphone access is not determined yet. Press request again to trigger the prompt.';
-  }
-  return 'Failed to request microphone access.';
-}
-
-function readMicrophoneAccessStatus(): MicrophoneAccessStatus {
-  if (process.platform !== 'darwin') return 'granted';
-  try {
-    const raw = String(systemPreferences.getMediaAccessStatus('microphone') || '').toLowerCase();
-    if (
-      raw === 'granted' ||
-      raw === 'denied' ||
-      raw === 'restricted' ||
-      raw === 'not-determined'
-    ) {
-      return raw;
-    }
-    return 'unknown';
-  } catch {
-    return 'unknown';
-  }
-}
 
 function formatHomeScopedPath(candidatePath: string, homeDir: string): string {
   if (!candidatePath) return '';
@@ -4658,155 +3139,6 @@ async function promptForHomeFolderAccess(): Promise<{ requested: boolean; select
       error: String(error?.message || error || 'Failed to request Home folder access.'),
     };
   }
-}
-
-async function requestMicrophoneAccessViaNative(prompt: boolean): Promise<MicrophonePermissionResult | null> {
-  if (process.platform !== 'darwin') return null;
-  const fs = require('fs');
-  const binaryPath = getNativeBinaryPath('microphone-access');
-  if (!fs.existsSync(binaryPath)) return null;
-
-  return await new Promise<MicrophonePermissionResult | null>((resolve) => {
-    const { spawn } = require('child_process');
-    const args = prompt ? ['--prompt'] : [];
-    const proc = spawn(binaryPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-
-    proc.stdout.on('data', (chunk: Buffer | string) => {
-      stdout += String(chunk || '');
-    });
-    proc.stderr.on('data', (chunk: Buffer | string) => {
-      stderr += String(chunk || '');
-    });
-
-    proc.on('error', () => {
-      resolve(null);
-    });
-
-    proc.on('close', () => {
-      const lines = stdout
-        .split('\n')
-        .map((line: string) => line.trim())
-        .filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i -= 1) {
-        try {
-          const payload = JSON.parse(lines[i]);
-          const status = normalizePermissionStatus(payload?.status);
-          const granted = Boolean(payload?.granted) || status === 'granted';
-          const requested = Boolean(payload?.requested);
-          const canPrompt = typeof payload?.canPrompt === 'boolean'
-            ? Boolean(payload.canPrompt)
-            : status === 'not-determined' || status === 'unknown';
-          const result: MicrophonePermissionResult = {
-            granted,
-            requested,
-            status,
-            canPrompt,
-            error: granted
-              ? undefined
-              : String(payload?.error || '').trim() || (stderr.trim() || undefined),
-          };
-          resolve(result);
-          return;
-        } catch {}
-      }
-      resolve(null);
-    });
-  });
-}
-
-async function ensureMicrophoneAccess(prompt = true): Promise<MicrophonePermissionResult> {
-  if (process.platform !== 'darwin') {
-    return {
-      granted: true,
-      requested: false,
-      status: 'granted',
-      canPrompt: false,
-    };
-  }
-
-  const before = readMicrophoneAccessStatus();
-  if (before === 'granted') {
-    return {
-      granted: true,
-      requested: false,
-      status: before,
-      canPrompt: false,
-    };
-  }
-
-  if (!prompt) {
-    const nativeResult = await requestMicrophoneAccessViaNative(false);
-    if (nativeResult) return nativeResult;
-    const canPrompt = before === 'not-determined' || before === 'unknown';
-    return {
-      granted: false,
-      requested: false,
-      status: before,
-      canPrompt,
-    };
-  }
-
-  // Request from the Electron app process first so macOS registers SuperCmd
-  // itself in Privacy & Security -> Microphone.
-  let requested = false;
-  let electronError = '';
-  try {
-    try {
-      app.focus({ steal: true });
-    } catch {}
-    try {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        if (mainWindow.isVisible()) {
-          mainWindow.focus();
-        }
-      }
-    } catch {}
-    const granted = await systemPreferences.askForMediaAccess('microphone');
-    requested = true;
-    const after = readMicrophoneAccessStatus();
-    if (Boolean(granted) || after === 'granted') {
-      return {
-        granted: true,
-        requested,
-        status: 'granted',
-        canPrompt: false,
-      };
-    }
-    if (after === 'denied' || after === 'restricted' || after === 'not-determined') {
-      return {
-        granted: false,
-        requested,
-        status: after,
-        canPrompt: after === 'not-determined',
-        error: describeMicrophoneStatus(after),
-      };
-    }
-  } catch (error: any) {
-    electronError = String(error?.message || error || '').trim();
-  }
-
-  // Fallback to native helper for additional status/error detail only.
-  // Keep prompt disabled here so the helper process never owns the TCC request.
-  const nativeResult = await requestMicrophoneAccessViaNative(false);
-  const after = readMicrophoneAccessStatus();
-  const status = nativeResult?.status && nativeResult.status !== 'unknown'
-    ? nativeResult.status
-    : after;
-  const granted = Boolean(nativeResult?.granted) || after === 'granted' || status === 'granted';
-  const canPrompt = status === 'not-determined' || status === 'unknown';
-  return {
-    granted,
-    requested: requested || Boolean(nativeResult?.requested),
-    status,
-    canPrompt,
-    error: granted
-      ? undefined
-      : nativeResult?.error || electronError || describeMicrophoneStatus(status),
-  };
 }
 
 function ensureInputMonitoringRequestBinary(): string | null {
@@ -4902,9 +3234,7 @@ async function requestOnboardingPermissionAccess(target: OnboardingPermissionTar
         canPrompt: false,
       };
     }
-    if (target === 'microphone' || target === 'speech-recognition') {
-      return { granted: true, requested: false, mode: 'already-granted', status: 'granted', canPrompt: false };
-    }
+
     return { granted: false, requested: false, mode: 'manual' };
   }
 
@@ -4975,50 +3305,6 @@ async function requestOnboardingPermissionAccess(target: OnboardingPermissionTar
     }
   }
 
-  if (target === 'speech-recognition') {
-    const result = await ensureSpeechRecognitionAccess(true);
-    const speechStatus = normalizePermissionStatus(result.speechStatus);
-    const canPrompt = speechStatus === 'not-determined' || speechStatus === 'unknown';
-    if (result.granted) {
-      return {
-        granted: true,
-        requested: result.requested,
-        mode: result.requested ? 'prompted' : 'already-granted',
-        status: speechStatus,
-        canPrompt,
-      };
-    }
-    return {
-      granted: false,
-      requested: result.requested,
-      mode: result.requested ? 'prompted' : 'manual',
-      status: speechStatus,
-      canPrompt,
-      error: result.error,
-    };
-  }
-
-  if (target === 'microphone') {
-    const result = await ensureMicrophoneAccess(true);
-    if (result.granted) {
-      return {
-        granted: true,
-        requested: result.requested,
-        mode: result.requested ? 'prompted' : 'already-granted',
-        status: result.status,
-        canPrompt: result.canPrompt,
-      };
-    }
-    return {
-      granted: false,
-      requested: result.requested,
-      mode: result.requested ? 'prompted' : 'manual',
-      status: result.status,
-      canPrompt: result.canPrompt,
-      error: result.error,
-    };
-  }
-
   // Input Monitoring: first check whether access is already granted.
   // If not, launch the helper detached so macOS can add SuperCmd to the
   // Input Monitoring list and the user can manually enable it.
@@ -5055,174 +3341,8 @@ let lastTypingCaretPoint: { x: number; y: number } | null = null;
 let lastCursorPromptSelection = '';
 let lastLauncherSelectionSnapshot = '';
 let lastLauncherSelectionSnapshotAt = 0;
-let whisperEscapeRegistered = false;
-let whisperOverlayVisible = false;
-let speakOverlayVisible = false;
-let whisperChildWindow: InstanceType<typeof BrowserWindow> | null = null;
-let whisperOverlayOpeningGuardUntil = 0;
-let whisperSuperCmdTextTargetWindow: InstanceType<typeof BrowserWindow> | null = null;
+
 const LAUNCHER_SELECTION_SNAPSHOT_TTL_MS = 15_000;
-
-function markWhisperOverlayOpening(): void {
-  whisperOverlayOpeningGuardUntil = Date.now() + 1500;
-}
-
-function isWhisperOverlayActiveOrOpening(): boolean {
-  return whisperOverlayVisible || Date.now() < whisperOverlayOpeningGuardUntil;
-}
-
-function isWhisperSuperCmdTextTargetWindow(win: InstanceType<typeof BrowserWindow> | null | undefined): boolean {
-  if (!win || win.isDestroyed()) return false;
-  return win === mainWindow || win === notesWindow || win === canvasWindow;
-}
-
-function buildWhisperTextTargetCaptureScript(): string {
-  return `
-    (() => {
-      const editableSelector = '[contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]';
-      const getEditableFromSelection = () => {
-        const selection = window.getSelection && window.getSelection();
-        const node = selection && selection.anchorNode;
-        const element = node instanceof HTMLElement ? node : (node && node.parentElement);
-        const editable = element && element.closest && element.closest(editableSelector);
-        return editable instanceof HTMLElement ? editable : null;
-      };
-      const dispatchInput = (element, text) => {
-        try {
-          element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
-        } catch (_) {
-          element.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      };
-      const setNativeValue = (element, value) => {
-        const proto = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
-        if (descriptor && descriptor.set) descriptor.set.call(element, value);
-        else element.value = value;
-      };
-      const capture = () => {
-        const active = document.activeElement;
-        if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
-          if (active.disabled || active.readOnly) return null;
-          const inputType = active instanceof HTMLInputElement ? String(active.type || 'text').toLowerCase() : 'textarea';
-          if (active instanceof HTMLInputElement && !['', 'text', 'search', 'url', 'tel', 'email', 'password', 'number'].includes(inputType)) return null;
-          return {
-            kind: 'input',
-            element: active,
-            selectionStart: active.selectionStart == null ? active.value.length : active.selectionStart,
-            selectionEnd: active.selectionEnd == null ? active.value.length : active.selectionEnd,
-          };
-        }
-        const editable = active instanceof HTMLElement && active.isContentEditable ? active : getEditableFromSelection();
-        if (!editable) return null;
-        const selection = window.getSelection && window.getSelection();
-        let range = null;
-        if (selection && selection.rangeCount > 0) {
-          const candidate = selection.getRangeAt(0);
-          if (editable.contains(candidate.commonAncestorContainer)) range = candidate.cloneRange();
-        }
-        return { kind: 'contenteditable', element: editable, range };
-      };
-      window.__supercmdWhisperTextTarget = capture();
-      window.__supercmdInsertWhisperText = (rawText) => {
-        const text = String(rawText || '');
-        const target = window.__supercmdWhisperTextTarget;
-        if (!text || !target || !target.element || !target.element.isConnected) return false;
-        try { target.element.focus({ preventScroll: true }); } catch (_) { try { target.element.focus(); } catch (_) {} }
-        if (target.kind === 'input') {
-          const value = target.element.value || '';
-          const start = Math.max(0, Math.min(value.length, target.selectionStart || 0));
-          const end = Math.max(start, Math.min(value.length, target.selectionEnd || start));
-          setNativeValue(target.element, value.slice(0, start) + text + value.slice(end));
-          const cursor = start + text.length;
-          try { target.element.setSelectionRange(cursor, cursor); } catch (_) {}
-          target.selectionStart = cursor;
-          target.selectionEnd = cursor;
-          dispatchInput(target.element, text);
-          return true;
-        }
-        const selection = window.getSelection && window.getSelection();
-        if (!selection) return false;
-        let range = target.range;
-        if (!range || !target.element.contains(range.commonAncestorContainer)) {
-          range = document.createRange();
-          range.selectNodeContents(target.element);
-          range.collapse(false);
-        }
-        selection.removeAllRanges();
-        selection.addRange(range);
-        let inserted = false;
-        try { inserted = document.execCommand('insertText', false, text); } catch (_) { inserted = false; }
-        if (!inserted) {
-          range.deleteContents();
-          const textNode = document.createTextNode(text);
-          range.insertNode(textNode);
-          range.setStartAfter(textNode);
-          range.collapse(true);
-          selection.removeAllRanges();
-          selection.addRange(range);
-        }
-        if (selection.rangeCount > 0) target.range = selection.getRangeAt(0).cloneRange();
-        dispatchInput(target.element, text);
-        return true;
-      };
-      return Boolean(window.__supercmdWhisperTextTarget);
-    })();
-  `;
-}
-
-function captureWhisperSuperCmdTextTarget(): void {
-  const focusedWindow = BrowserWindow.getFocusedWindow() as InstanceType<typeof BrowserWindow> | null;
-  if (!isWhisperSuperCmdTextTargetWindow(focusedWindow)) {
-    whisperSuperCmdTextTargetWindow = null;
-    return;
-  }
-  void focusedWindow.webContents.executeJavaScript(buildWhisperTextTargetCaptureScript(), true)
-    .then((captured: unknown) => {
-      whisperSuperCmdTextTargetWindow = captured ? focusedWindow : null;
-    })
-    .catch(() => {
-      if (whisperSuperCmdTextTargetWindow === focusedWindow) {
-        whisperSuperCmdTextTargetWindow = null;
-      }
-    });
-}
-
-async function insertTextIntoWhisperSuperCmdTarget(text: string): Promise<boolean> {
-  const targetWindow = whisperSuperCmdTextTargetWindow;
-  if (!isWhisperSuperCmdTextTargetWindow(targetWindow)) return false;
-  const textLiteral = JSON.stringify(String(text || ''));
-  try {
-    return Boolean(await targetWindow.webContents.executeJavaScript(
-      `Boolean(window.__supercmdInsertWhisperText && window.__supercmdInsertWhisperText(${textLiteral}))`,
-      true
-    ));
-  } catch {
-    return false;
-  }
-}
-
-function registerWhisperEscapeShortcut(): void {
-  if (whisperEscapeRegistered) return;
-  try {
-    const success = globalShortcut.register('Escape', () => {
-      if (isVisible && launcherMode === 'whisper') {
-        mainWindow?.webContents.send('whisper-stop-and-close');
-      }
-    });
-    whisperEscapeRegistered = success;
-  } catch {
-    whisperEscapeRegistered = false;
-  }
-}
-
-function unregisterWhisperEscapeShortcut(): void {
-  if (!whisperEscapeRegistered) return;
-  try {
-    globalShortcut.unregister('Escape');
-  } catch {}
-  whisperEscapeRegistered = false;
-}
 
 function emitWindowHidden(): void {
   try {
@@ -5230,928 +3350,7 @@ function emitWindowHidden(): void {
   } catch {}
 }
 
-function setSpeakStatus(status: {
-  state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error';
-  text: string;
-  index: number;
-  total: number;
-  message?: string;
-  wordIndex?: number;
-}): void {
-  speakStatusSnapshot = status;
-  try {
-    mainWindow?.webContents.send('speak-status', status);
-  } catch {}
-}
-
-function splitTextIntoSpeakChunks(input: string): string[] {
-  return buildSpeakChunkPlan(input).chunks;
-}
-
-function buildSpeakChunkPlan(input: string): {
-  chunks: string[];
-  chunkParagraphIndexes: number[];
-  paragraphStartIndexes: number[];
-} {
-  const raw = String(input || '').replace(/\r\n/g, '\n').trim();
-  if (!raw) {
-    return { chunks: [], chunkParagraphIndexes: [], paragraphStartIndexes: [] };
-  }
-
-  const normalizedParagraphs = raw
-    .split(/\n\s*\n+/g)
-    .map((paragraph) => paragraph.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-
-  if (normalizedParagraphs.length === 0) {
-    return { chunks: [], chunkParagraphIndexes: [], paragraphStartIndexes: [] };
-  }
-
-  const maxChunkWords = 50;
-  const sentenceRegex = /[^.!?]+[.!?]+(?:["')\]]+)?|[^.!?]+$/g;
-  const countWords = (text: string): number => {
-    const t = text.trim();
-    if (!t) return 0;
-    return t.split(/\s+/).filter(Boolean).length;
-  };
-
-  const chunks: string[] = [];
-  const chunkParagraphIndexes: number[] = [];
-  const paragraphStartIndexes: number[] = [];
-
-  normalizedParagraphs.forEach((paragraph, paragraphIndex) => {
-    const baseSentences = (paragraph.match(sentenceRegex) || [])
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => (/[.!?]["')\]]*$/.test(s) ? s : `${s}.`));
-    if (baseSentences.length === 0) return;
-
-    paragraphStartIndexes.push(chunks.length);
-    for (let i = 0; i < baseSentences.length; i += 1) {
-      const first = baseSentences[i];
-      const second = baseSentences[i + 1];
-      if (second) {
-        const pair = `${first} ${second}`;
-        if (countWords(pair) <= maxChunkWords) {
-          chunks.push(pair);
-          chunkParagraphIndexes.push(paragraphIndex);
-          i += 1;
-          continue;
-        }
-      }
-      chunks.push(first);
-      chunkParagraphIndexes.push(paragraphIndex);
-    }
-  });
-
-  return {
-    chunks,
-    chunkParagraphIndexes,
-    paragraphStartIndexes,
-  };
-}
-
-function parseCueTimeMs(value: any): number {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return Math.max(0, Math.round(value));
-  }
-  const raw = String(value ?? '').trim();
-  if (!raw) return 0;
-  if (/^\d+(\.\d+)?$/.test(raw)) {
-    return Math.max(0, Math.round(Number(raw)));
-  }
-  // Accept formats like "00:00:01.230" or "00:01.230"
-  const parts = raw.split(':').map((p) => p.trim());
-  if (parts.length >= 2) {
-    const secPart = parts.pop() || '0';
-    const minPart = parts.pop() || '0';
-    const hrPart = parts.pop() || '0';
-    const sec = Number(secPart);
-    const min = Number(minPart);
-    const hr = Number(hrPart);
-    if (Number.isFinite(sec) && Number.isFinite(min) && Number.isFinite(hr)) {
-      return Math.max(0, Math.round(((hr * 3600) + (min * 60) + sec) * 1000));
-    }
-  }
-  return 0;
-}
-
-function probeAudioDurationMs(audioPath: string): number | null {
-  const target = String(audioPath || '').trim();
-  if (!target) return null;
-  if (process.platform !== 'darwin') return null;
-  try {
-    const { spawnSync } = require('child_process');
-    const result = spawnSync('/usr/bin/afinfo', [target], {
-      encoding: 'utf-8',
-      timeout: 4000,
-    });
-    const output = `${String(result?.stdout || '')}\n${String(result?.stderr || '')}`;
-    const secMatch = /estimated duration:\s*([0-9]+(?:\.[0-9]+)?)\s*sec/i.exec(output);
-    const seconds = secMatch ? Number(secMatch[1]) : NaN;
-    if (Number.isFinite(seconds) && seconds > 0) {
-      return Math.round(seconds * 1000);
-    }
-  } catch {}
-  return null;
-}
-
-function normalizePermissionStatus(raw: any): MicrophoneAccessStatus {
-  const value = String(raw || '').trim().toLowerCase().replace(/_/g, '-');
-  if (value === 'authorized') return 'granted';
-  if (value === 'notdetermined') return 'not-determined';
-  if (
-    value === 'granted' ||
-    value === 'denied' ||
-    value === 'restricted' ||
-    value === 'not-determined'
-  ) {
-    return value;
-  }
-  return 'unknown';
-}
-
-function resolveEdgeTtsConstructor(): any | null {
-  if (edgeTtsConstructorResolved) return edgeTtsConstructor;
-  edgeTtsConstructorResolved = true;
-  try {
-    const mod = require('node-edge-tts');
-    const ctor = mod?.EdgeTTS || mod?.default?.EdgeTTS || mod?.default || mod;
-    if (typeof ctor === 'function') {
-      edgeTtsConstructor = ctor;
-      edgeTtsConstructorError = '';
-      return edgeTtsConstructor;
-    }
-    edgeTtsConstructor = null;
-    edgeTtsConstructorError = 'node-edge-tts module did not expose EdgeTTS.';
-    return null;
-  } catch (error: any) {
-    edgeTtsConstructor = null;
-    edgeTtsConstructorError = String(error?.message || error || 'Failed to load node-edge-tts.');
-    return null;
-  }
-}
-
-function resolveLocalSpeakBackend(): LocalSpeakBackend | null {
-  if (resolveEdgeTtsConstructor()) return 'edge-tts';
-  if (process.platform === 'darwin') return 'system-say';
-  return null;
-}
-
-async function synthesizeWithEdgeTts(opts: {
-  text: string;
-  audioPath: string;
-  voice: string;
-  lang: string;
-  rate: string;
-  saveSubtitles: boolean;
-  timeoutMs: number;
-}): Promise<void> {
-  const EdgeTTS = resolveEdgeTtsConstructor();
-  if (!EdgeTTS) {
-    throw new Error(edgeTtsConstructorError || 'node-edge-tts is unavailable.');
-  }
-  const tts = new EdgeTTS({
-    voice: opts.voice,
-    lang: opts.lang,
-    rate: opts.rate,
-    saveSubtitles: Boolean(opts.saveSubtitles),
-    timeout: Math.max(5000, opts.timeoutMs || 45000),
-  });
-  await tts.ttsPromise(opts.text, opts.audioPath);
-}
-
-function parseSayRateWordsPerMinute(rate: string): string {
-  const raw = String(rate || '').trim();
-  const pctMatch = /^([+-]?\d+)%$/.exec(raw);
-  const pct = pctMatch ? Number(pctMatch[1]) : 0;
-  const wpm = Math.max(90, Math.min(420, Math.round(175 * (1 + (Number.isFinite(pct) ? pct : 0) / 100))));
-  return String(wpm);
-}
-
-function resolveSystemSayVoice(language: string): string | null {
-  const normalized = String(language || '').toLowerCase();
-  if (normalized.startsWith('en-gb')) return 'Daniel';
-  if (normalized.startsWith('en-au')) return 'Karen';
-  if (normalized.startsWith('en-us') || normalized.startsWith('en')) return 'Samantha';
-  if (normalized.startsWith('es')) return 'Monica';
-  if (normalized.startsWith('fr')) return 'Thomas';
-  if (normalized.startsWith('de')) return 'Anna';
-  if (normalized.startsWith('it')) return 'Alice';
-  if (normalized.startsWith('pt')) return 'Luciana';
-  if (normalized.startsWith('ja')) return 'Kyoko';
-  if (normalized.startsWith('hi')) return 'Veena';
-  return null;
-}
-
-function runSystemSay(args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const { spawn } = require('child_process');
-    const proc = spawn('/usr/bin/say', args, {
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-    let stderr = '';
-    proc.stderr.on('data', (chunk: Buffer | string) => {
-      stderr += String(chunk || '');
-    });
-    proc.on('error', (error: Error) => {
-      reject(error);
-    });
-    proc.on('close', (code: number | null) => {
-      if (code && code !== 0) {
-        reject(new Error(stderr.trim() || `say exited with ${code}`));
-        return;
-      }
-      resolve();
-    });
-  });
-}
-
-async function synthesizeWithSystemSay(opts: {
-  text: string;
-  audioPath: string;
-  lang: string;
-  rate: string;
-}): Promise<void> {
-  if (process.platform !== 'darwin') {
-    throw new Error('System speech fallback is only available on macOS.');
-  }
-  const rate = parseSayRateWordsPerMinute(opts.rate);
-  const voice = resolveSystemSayVoice(opts.lang);
-  const baseArgs = ['-o', opts.audioPath, '-r', rate];
-  if (voice) {
-    try {
-      await runSystemSay([...baseArgs, '-v', voice, opts.text]);
-      return;
-    } catch {}
-  }
-  await runSystemSay([...baseArgs, opts.text]);
-}
-
-type SpeechRecognitionPermissionResult = {
-  granted: boolean;
-  requested: boolean;
-  speechStatus: MicrophoneAccessStatus;
-  microphoneStatus: MicrophoneAccessStatus;
-  error?: string;
-};
-
-async function ensureSpeechRecognitionAccess(prompt = true): Promise<SpeechRecognitionPermissionResult> {
-  if (process.platform !== 'darwin') {
-    return {
-      granted: true,
-      requested: false,
-      speechStatus: 'granted',
-      microphoneStatus: 'granted',
-    };
-  }
-
-  if (!prompt) {
-    return {
-      granted: false,
-      requested: false,
-      speechStatus: 'unknown',
-      microphoneStatus: readMicrophoneAccessStatus(),
-    };
-  }
-
-  const fs = require('fs');
-  const binaryPath = getNativeBinaryPath('speech-recognizer');
-  if (!fs.existsSync(binaryPath)) {
-    return {
-      granted: false,
-      requested: false,
-      speechStatus: 'unknown',
-      microphoneStatus: readMicrophoneAccessStatus(),
-      error: 'Speech recognizer helper is missing. Reinstall SuperCmd and retry.',
-    };
-  }
-
-  const settings = loadSettings();
-  const language = String(settings.ai?.speechLanguage || 'en-US').trim() || 'en-US';
-
-  return await new Promise<SpeechRecognitionPermissionResult>((resolve) => {
-    const { spawn } = require('child_process');
-    const proc = spawn(binaryPath, [language, '--auth-only'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let settled = false;
-    let stdoutBuffer = '';
-    let stderrBuffer = '';
-    let helperError = '';
-    let speechStatus: MicrophoneAccessStatus = 'unknown';
-    let microphoneStatus: MicrophoneAccessStatus = readMicrophoneAccessStatus();
-    let timeout: NodeJS.Timeout | null = null;
-
-    const finalize = (result: SpeechRecognitionPermissionResult) => {
-      if (settled) return;
-      settled = true;
-      if (timeout) clearTimeout(timeout);
-      resolve(result);
-    };
-
-    const parseLine = (line: string) => {
-      const trimmed = String(line || '').trim();
-      if (!trimmed) return;
-      try {
-        const payload = JSON.parse(trimmed) as any;
-        if (payload?.speechStatus !== undefined) {
-          speechStatus = normalizePermissionStatus(payload.speechStatus);
-        }
-        if (payload?.microphoneStatus !== undefined) {
-          microphoneStatus = normalizePermissionStatus(payload.microphoneStatus);
-        }
-        if (payload?.authorized === true) {
-          speechStatus = 'granted';
-          if (microphoneStatus === 'unknown') {
-            microphoneStatus = 'granted';
-          }
-        }
-        if (payload?.error) {
-          helperError = String(payload.error || '').trim();
-        }
-      } catch {}
-    };
-
-    proc.stdout.on('data', (chunk: Buffer | string) => {
-      stdoutBuffer += String(chunk || '');
-      const lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop() || '';
-      for (const line of lines) {
-        parseLine(line);
-      }
-    });
-
-    proc.stderr.on('data', (chunk: Buffer | string) => {
-      stderrBuffer += String(chunk || '');
-    });
-
-    proc.on('error', (error: Error) => {
-      finalize({
-        granted: false,
-        requested: false,
-        speechStatus,
-        microphoneStatus,
-        error: error.message || 'Failed to request speech recognition access.',
-      });
-    });
-
-    proc.on('close', (code: number | null) => {
-      if (stdoutBuffer.trim()) {
-        parseLine(stdoutBuffer.trim());
-      }
-      const finalMicStatus = microphoneStatus === 'unknown'
-        ? readMicrophoneAccessStatus()
-        : microphoneStatus;
-      const granted = speechStatus === 'granted';
-      let error = helperError || '';
-      if (!granted && !error) {
-        const stderr = stderrBuffer.trim();
-        if (stderr) {
-          error = stderr;
-        } else if (code && code !== 0) {
-          error = `Speech recognition permission check exited with code ${code}.`;
-        } else {
-          error = 'Speech recognition permission is required for Whisper.';
-        }
-      }
-      finalize({
-        granted,
-        requested: true,
-        speechStatus,
-        microphoneStatus: finalMicStatus,
-        error: error || undefined,
-      });
-    });
-
-    timeout = setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch {}
-      finalize({
-        granted: speechStatus === 'granted',
-        requested: true,
-        speechStatus,
-        microphoneStatus: readMicrophoneAccessStatus(),
-        error: helperError || 'Speech permission prompt timed out. Please allow access and retry.',
-      });
-    }, 15000);
-  });
-}
-
-function resolveEdgeVoice(language?: string): string {
-  const lang = String(language || 'en-US').toLowerCase();
-  if (lang.startsWith('en-in')) return 'en-IN-NeerjaNeural';
-  if (lang.startsWith('en-gb')) return 'en-GB-SoniaNeural';
-  if (lang.startsWith('en-au')) return 'en-AU-NatashaNeural';
-  if (lang.startsWith('es')) return 'es-ES-ElviraNeural';
-  if (lang.startsWith('fr')) return 'fr-FR-DeniseNeural';
-  if (lang.startsWith('de')) return 'de-DE-KatjaNeural';
-  if (lang.startsWith('it')) return 'it-IT-ElsaNeural';
-  if (lang.startsWith('pt')) return 'pt-BR-FranciscaNeural';
-  return 'en-US-EricNeural';
-}
-
-function resolveElevenLabsSttModel(model: string): string {
-  const raw = String(model || '').trim().toLowerCase();
-  if (raw.includes('scribe_v2') || raw.includes('scribe-v2')) return 'scribe_v2';
-  if (raw.includes('scribe')) return 'scribe_v1';
-  const noPrefix = raw.replace(/^elevenlabs-/, '');
-  if (!noPrefix) return 'scribe_v1';
-  return noPrefix.replace(/-/g, '_');
-}
-
-function normalizeApiKey(raw: any): string {
-  const value = String(raw || '').trim();
-  if (!value) return '';
-  // Handle accidental surrounding quotes from copy/paste.
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1).trim();
-  }
-  return value;
-}
-
-function getElevenLabsApiKey(settings: AppSettings): string {
-  const fromSettings = normalizeApiKey(settings.ai?.elevenlabsApiKey);
-  if (fromSettings) return fromSettings;
-  return normalizeApiKey(process.env.ELEVENLABS_API_KEY);
-}
-
-function getMistralApiKey(settings: AppSettings): string {
-  const fromSettings = normalizeApiKey(settings.ai?.mistralApiKey);
-  if (fromSettings) return fromSettings;
-  return normalizeApiKey(process.env.MISTRAL_API_KEY);
-}
-
-const DEFAULT_ELEVENLABS_TTS_VOICE_ID = '21m00Tcm4TlvDq8ikWAM'; // Rachel
-
-function resolveElevenLabsTtsConfig(selectedModel: string): { modelId: string; voiceId: string } {
-  const raw = String(selectedModel || '').trim();
-  const explicitVoiceRaw = /@([A-Za-z0-9]{8,})$/.exec(raw)?.[1];
-  const explicitVoice = explicitVoiceRaw === 'EXAVITQu4vr4xnSDxMa'
-    ? 'EXAVITQu4vr4xnSDxMaL'
-    : explicitVoiceRaw;
-  const modelSource = explicitVoice ? raw.replace(/@[A-Za-z0-9]{8,}$/, '') : raw;
-  const normalized = modelSource.toLowerCase();
-  const modelRaw = normalized.replace(/^elevenlabs-/, '');
-  let modelId = modelRaw.replace(/-/g, '_');
-  if (modelId === 'multilingual_v2' || modelId === 'multilingual-v2') {
-    modelId = 'eleven_multilingual_v2';
-  }
-  if (modelId === 'flash_v2_5' || modelId === 'flash-v2-5') {
-    modelId = 'eleven_flash_v2_5';
-  }
-  if (modelId === 'turbo_v2_5' || modelId === 'turbo-v2-5') {
-    modelId = 'eleven_turbo_v2_5';
-  }
-  if (modelId === 'v3') {
-    modelId = 'eleven_v3';
-  }
-  if (!modelId) {
-    modelId = 'eleven_multilingual_v2';
-  }
-  // Allow an optional explicit voice id suffix: "elevenlabs-model@voiceId"
-  const voiceId = explicitVoice || DEFAULT_ELEVENLABS_TTS_VOICE_ID;
-  return { modelId, voiceId };
-}
-
-function transcribeAudioWithElevenLabs(opts: {
-  audioBuffer: Buffer;
-  apiKey: string;
-  model: string;
-  language?: string;
-  mimeType?: string;
-}): Promise<string> {
-  const boundary = `----SuperCmdBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
-  const parts: Buffer[] = [];
-  const normalized = String(opts.mimeType || '').toLowerCase();
-  const filename = normalized.includes('wav')
-    ? 'audio.wav'
-    : normalized.includes('mpeg') || normalized.includes('mp3')
-      ? 'audio.mp3'
-      : normalized.includes('mp4') || normalized.includes('m4a')
-        ? 'audio.m4a'
-        : normalized.includes('ogg') || normalized.includes('oga')
-          ? 'audio.ogg'
-          : normalized.includes('flac')
-            ? 'audio.flac'
-            : 'audio.webm';
-  const contentType = normalized || 'audio/webm';
-
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`
-  ));
-  parts.push(opts.audioBuffer);
-  parts.push(Buffer.from('\r\n'));
-
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="model_id"\r\n\r\n${opts.model}\r\n`
-  ));
-
-  if (opts.language) {
-    parts.push(Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="language_code"\r\n\r\n${opts.language}\r\n`
-    ));
-  }
-
-  parts.push(Buffer.from(`--${boundary}--\r\n`));
-  const body = Buffer.concat(parts);
-
-  return new Promise<string>((resolve, reject) => {
-    try {
-      const https = require('https');
-      const req = https.request(
-        {
-          hostname: 'api.elevenlabs.io',
-          path: '/v1/speech-to-text',
-          method: 'POST',
-          headers: {
-            'xi-api-key': opts.apiKey,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
-          },
-        },
-        (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const responseBody = Buffer.concat(chunks).toString('utf-8');
-            if (res.statusCode && res.statusCode >= 400) {
-              if (res.statusCode === 401 && responseBody.includes('detected_unusual_activity')) {
-                reject(new Error('ElevenLabs rejected this key due to account restrictions (detected_unusual_activity). Verify plan/account status in ElevenLabs dashboard.'));
-                return;
-              }
-              reject(new Error(`ElevenLabs STT HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
-              return;
-            }
-            try {
-              const parsed = JSON.parse(responseBody || '{}');
-              const text = String(parsed?.text || parsed?.transcript || '').trim();
-              if (!text) {
-                reject(new Error('ElevenLabs STT returned an empty transcript.'));
-                return;
-              }
-              resolve(text);
-            } catch {
-              const text = responseBody.trim();
-              if (!text) {
-                reject(new Error('ElevenLabs STT returned an empty response.'));
-                return;
-              }
-              resolve(text);
-            }
-          });
-        }
-      );
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function transcribeAudioWithMistralVoxtral(opts: {
-  audioBuffer: Buffer;
-  apiKey: string;
-  model: string;
-  language?: string;
-  mimeType?: string;
-}): Promise<string> {
-  const boundary = `----SuperCmdMistralBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
-  const normalized = String(opts.mimeType || '').toLowerCase();
-  const filename = normalized.includes('mp3') || normalized.includes('mpeg') ? 'audio.mp3' : 'audio.wav';
-  const contentType = filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav';
-  const parts: Buffer[] = [];
-
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`
-  ));
-  parts.push(opts.audioBuffer);
-  parts.push(Buffer.from('\r\n'));
-
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${opts.model || 'voxtral-mini-latest'}\r\n`
-  ));
-
-  if (opts.language) {
-    parts.push(Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\n${opts.language}\r\n`
-    ));
-  }
-
-  parts.push(Buffer.from(`--${boundary}--\r\n`));
-  const body = Buffer.concat(parts);
-
-  return new Promise<string>((resolve, reject) => {
-    try {
-      const https = require('https');
-      const req = https.request(
-        {
-          hostname: 'api.mistral.ai',
-          path: '/v1/audio/transcriptions',
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${opts.apiKey}`,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
-          },
-        },
-        (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            const responseBody = Buffer.concat(chunks).toString('utf-8');
-            if (res.statusCode && res.statusCode >= 400) {
-              reject(new Error(`Mistral Voxtral STT HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
-              return;
-            }
-            try {
-              const parsed = JSON.parse(responseBody || '{}');
-              const content = parsed?.choices?.[0]?.message?.content;
-              const text = Array.isArray(content)
-                ? content
-                    .map((part: any) => typeof part === 'string' ? part : String(part?.text || ''))
-                    .join('')
-                    .trim()
-                : String(content || parsed?.text || parsed?.transcript || '').trim();
-              if (!text) {
-                reject(new Error('Mistral Voxtral STT returned an empty transcript.'));
-                return;
-              }
-              resolve(text);
-            } catch {
-              const text = responseBody.trim();
-              if (!text) {
-                reject(new Error('Mistral Voxtral STT returned an empty response.'));
-                return;
-              }
-              resolve(text);
-            }
-          });
-        }
-      );
-      req.on('error', reject);
-      req.setTimeout(60000, () => {
-        req.destroy(new Error('Mistral Voxtral STT timed out.'));
-      });
-      req.write(body);
-      req.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function synthesizeElevenLabsToFile(opts: {
-  text: string;
-  apiKey: string;
-  modelId: string;
-  voiceId: string;
-  audioPath: string;
-  timeoutMs?: number;
-}): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    try {
-      const https = require('https');
-      const fs = require('fs');
-      const req = https.request(
-        {
-          hostname: 'api.elevenlabs.io',
-          path: `/v1/text-to-speech/${encodeURIComponent(opts.voiceId)}?output_format=mp3_44100_128`,
-          method: 'POST',
-          headers: {
-            'xi-api-key': opts.apiKey,
-            'Content-Type': 'application/json',
-            'Accept': 'audio/mpeg',
-          },
-        },
-        (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (chunk: Buffer) => chunks.push(chunk));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              const responseText = Buffer.concat(chunks).toString('utf-8');
-              if (res.statusCode === 401 && responseText.includes('detected_unusual_activity')) {
-                reject(new Error('ElevenLabs rejected this key due to account restrictions (detected_unusual_activity). Verify plan/account status in ElevenLabs dashboard.'));
-                return;
-              }
-              reject(new Error(`ElevenLabs TTS HTTP ${res.statusCode}: ${responseText.slice(0, 500)}`));
-              return;
-            }
-            const audio = Buffer.concat(chunks);
-            if (!audio.length) {
-              reject(new Error('ElevenLabs TTS returned empty audio.'));
-              return;
-            }
-            fs.writeFile(opts.audioPath, audio, (err: Error | null) => {
-              if (err) reject(err);
-              else resolve();
-            });
-          });
-        }
-      );
-
-      req.on('error', reject);
-      req.setTimeout(Math.max(5000, opts.timeoutMs || 45000), () => {
-        req.destroy(new Error('ElevenLabs TTS timed out.'));
-      });
-      req.write(JSON.stringify({
-        text: opts.text,
-        model_id: opts.modelId,
-      }));
-      req.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-function fetchElevenLabsVoices(apiKey: string): Promise<{ voices: Array<{ id: string; name: string; category: string; description?: string; labels?: Record<string, string>; previewUrl?: string }>; error?: string }> {
-  return new Promise((resolve) => {
-    try {
-      const https = require('https');
-      const req = https.request(
-        {
-          hostname: 'api.elevenlabs.io',
-          path: '/v1/voices',
-          method: 'GET',
-          headers: {
-            'xi-api-key': apiKey,
-            'Accept': 'application/json',
-          },
-        },
-        (res: any) => {
-          let body = '';
-          res.on('data', (chunk: Buffer | string) => { body += String(chunk || ''); });
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 400) {
-              if (res.statusCode === 401) {
-                resolve({ voices: [], error: 'Invalid API key. Please check your ElevenLabs API key.' });
-              } else {
-                resolve({ voices: [], error: `ElevenLabs API error: HTTP ${res.statusCode}` });
-              }
-              return;
-            }
-            try {
-              const parsed = JSON.parse(body);
-              const voices = Array.isArray(parsed.voices) ? parsed.voices : [];
-              const mapped = voices
-                .map((v: any) => ({
-                  id: String(v?.voice_id || ''),
-                  name: String(v?.name || 'Unknown'),
-                  category: String(v?.category || 'premade'),
-                  description: v?.description ? String(v.description) : undefined,
-                  labels: v?.labels && typeof v.labels === 'object' ? v.labels : undefined,
-                  previewUrl: v?.preview_url ? String(v.preview_url) : undefined,
-                }))
-                .filter((v: any) => v.id);
-              resolve({ voices: mapped });
-            } catch (e) {
-              resolve({ voices: [], error: 'Failed to parse ElevenLabs voice list.' });
-            }
-          });
-        }
-      );
-      req.on('error', () => {
-        resolve({ voices: [], error: 'Network error while fetching voices.' });
-      });
-      req.setTimeout(15000, () => {
-        req.destroy();
-        resolve({ voices: [], error: 'Request timed out.' });
-      });
-      req.end();
-    } catch {
-      resolve({ voices: [], error: 'Failed to fetch voices.' });
-    }
-  });
-}
-
-function formatEdgeLocaleLabel(locale: string, rawLabel?: string): string {
-  const map: Record<string, string> = {
-    'en-US': 'English (US)',
-    'en-GB': 'English (UK)',
-    'pt-BR': 'Portuguese (Brazil)',
-    'es-ES': 'Spanish (Spain)',
-    'es-MX': 'Spanish (Mexico)',
-    'fr-FR': 'French (France)',
-    'fr-CA': 'French (Canada)',
-    'zh-CN': 'Chinese (Mandarin)',
-  };
-  if (map[locale]) return map[locale];
-  if (rawLabel && typeof rawLabel === 'string') {
-    return rawLabel
-      .replace(/\bUnited States\b/i, 'US')
-      .replace(/\bUnited Kingdom\b/i, 'UK');
-  }
-  return locale;
-}
-
-function formatEdgeVoiceLabel(shortName: string): string {
-  const cleaned = String(shortName || '').replace(/Neural$/i, '');
-  const parts = cleaned.split('-');
-  if (parts.length >= 3) {
-    return parts.slice(2).join('-');
-  }
-  return cleaned;
-}
-
-function fetchEdgeTtsVoiceCatalog(timeoutMs = 12000): Promise<EdgeTtsVoiceCatalogEntry[]> {
-  return new Promise((resolve, reject) => {
-    try {
-      const https = require('https');
-      const drm = require('node-edge-tts/dist/drm.js');
-      const token = String(drm?.TRUSTED_CLIENT_TOKEN || '').trim();
-      const version = String(drm?.CHROMIUM_FULL_VERSION || '').trim();
-      const secMsGec = typeof drm?.generateSecMsGecToken === 'function'
-        ? String(drm.generateSecMsGecToken() || '')
-        : '';
-
-      if (!token || !version || !secMsGec) {
-        reject(new Error('Failed to initialize Edge TTS DRM values.'));
-        return;
-      }
-
-      const major = version.split('.')[0] || '120';
-      const url = `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${token}`;
-
-      const req = https.request(url, {
-        method: 'GET',
-        headers: {
-          'User-Agent': `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36 Edg/${major}.0.0.0`,
-          'Accept': 'application/json',
-          'Origin': 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold',
-          'Referer': 'https://edge.microsoft.com/',
-          'Sec-MS-GEC': secMsGec,
-          'Sec-MS-GEC-Version': `1-${version}`,
-          'Pragma': 'no-cache',
-          'Cache-Control': 'no-cache',
-        },
-      }, (res: any) => {
-        let body = '';
-        res.on('data', (chunk: Buffer | string) => { body += String(chunk || ''); });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`Voice catalog HTTP ${res.statusCode}`));
-            return;
-          }
-          try {
-            const parsed = JSON.parse(body);
-            if (!Array.isArray(parsed)) {
-              reject(new Error('Voice catalog response was not an array.'));
-              return;
-            }
-            const mapped = parsed
-              .map((entry: any): EdgeTtsVoiceCatalogEntry | null => {
-                const shortName = String(entry?.ShortName || entry?.Name || '').trim();
-                if (!shortName) return null;
-                const locale = String(entry?.Locale || shortName.split('-').slice(0, 2).join('-') || '').trim();
-                if (!locale) return null;
-                const rawGender = String(entry?.Gender || '').toLowerCase();
-                const gender: 'female' | 'male' = rawGender === 'male' ? 'male' : 'female';
-                const personalities = Array.isArray(entry?.VoiceTag?.VoicePersonalities)
-                  ? entry.VoiceTag.VoicePersonalities
-                  : [];
-                const style = personalities.length > 0 ? String(personalities[0]) : '';
-                return {
-                  id: shortName,
-                  label: formatEdgeVoiceLabel(shortName),
-                  languageCode: locale,
-                  languageLabel: formatEdgeLocaleLabel(locale, String(entry?.LocaleName || '')),
-                  gender,
-                  style: style || undefined,
-                };
-              })
-              .filter(Boolean) as EdgeTtsVoiceCatalogEntry[];
-
-            mapped.sort((a, b) => {
-              const langCmp = a.languageLabel.localeCompare(b.languageLabel);
-              if (langCmp !== 0) return langCmp;
-              const genderCmp = a.gender.localeCompare(b.gender);
-              if (genderCmp !== 0) return genderCmp;
-              return a.label.localeCompare(b.label);
-            });
-            resolve(mapped);
-          } catch (error) {
-            reject(error);
-          }
-        });
-      });
-
-      req.on('error', (error: Error) => reject(error));
-      req.setTimeout(timeoutMs, () => {
-        req.destroy(new Error('Voice catalog request timed out.'));
-      });
-      req.end();
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-async function getSelectedTextForSpeak(options?: { allowClipboardFallback?: boolean; clipboardWaitMs?: number }): Promise<string> {
+async function getSelectedTextForPrompt(options?: { allowClipboardFallback?: boolean; clipboardWaitMs?: number }): Promise<string> {
   const allowClipboardFallback = options?.allowClipboardFallback !== false;
   const clipboardWaitMs = Math.max(0, Number(options?.clipboardWaitMs ?? 380) || 380);
   const fromAccessibility = await (async () => {
@@ -6238,7 +3437,7 @@ async function captureSelectionSnapshotBeforeShow(options?: { allowClipboardFall
   }
   try {
     const selected = String(
-      await getSelectedTextForSpeak({ allowClipboardFallback, clipboardWaitMs: 90 }) || ''
+      await getSelectedTextForPrompt({ allowClipboardFallback, clipboardWaitMs: 90 }) || ''
     );
     // Only update the snapshot if we actually captured something; if AX returned
     // empty (common for apps that don't expose AXSelectedText), leave the existing
@@ -6248,142 +3447,6 @@ async function captureSelectionSnapshotBeforeShow(options?: { allowClipboardFall
   } catch {
     return getRecentSelectionSnapshot();
   }
-}
-
-function stopSpeakSession(options?: { resetStatus?: boolean; cleanupWindow?: boolean }): void {
-  const session = activeSpeakSession;
-  if (!session) {
-    if (options?.resetStatus) {
-      setSpeakStatus({ state: 'idle', text: '', index: 0, total: 0 });
-    }
-    if (options?.cleanupWindow) {
-      try {
-        mainWindow?.webContents.send('run-system-command', 'system-supercmd-speak-close');
-      } catch {}
-    }
-    return;
-  }
-
-  session.stopRequested = true;
-  if (session.afplayProc) {
-    try { session.afplayProc.kill('SIGTERM'); } catch {}
-    session.afplayProc = null;
-  }
-  for (const proc of session.ttsProcesses) {
-    try { proc.kill('SIGTERM'); } catch {}
-  }
-  session.ttsProcesses.clear();
-
-  // Delay temp dir cleanup slightly so any in-flight synthesizer workers that
-  // were just interrupted do not race on removed chunk paths.
-  const tmpDirToCleanup = session.tmpDir;
-  setTimeout(() => {
-    try {
-      const fs = require('fs');
-      fs.rmSync(tmpDirToCleanup, { recursive: true, force: true });
-    } catch {}
-  }, 2500);
-
-  if (activeSpeakSession?.id === session.id) {
-    activeSpeakSession = null;
-  }
-  if (options?.resetStatus !== false) {
-    setSpeakStatus({ state: 'idle', text: '', index: 0, total: 0 });
-  }
-  if (options?.cleanupWindow) {
-    try {
-      mainWindow?.webContents.send('run-system-command', 'system-supercmd-speak-close');
-    } catch {}
-  }
-}
-
-function setSpeakSessionPaused(paused: boolean): boolean {
-  const session = activeSpeakSession;
-  if (!session || session.stopRequested) return false;
-  const nextPaused = Boolean(paused);
-  if (session.paused === nextPaused) return true;
-
-  session.paused = nextPaused;
-  const current = { ...speakStatusSnapshot };
-
-  if (nextPaused) {
-    const currentWordIndex = Number(current.wordIndex);
-    session.resumeWordOffset =
-      Number.isFinite(currentWordIndex) && currentWordIndex >= 0
-        ? Math.round(currentWordIndex)
-        : 0;
-    if (session.afplayProc) {
-      try { session.afplayProc.kill('SIGTERM'); } catch {}
-      session.afplayProc = null;
-    }
-    setSpeakStatus({
-      ...current,
-      state: 'paused',
-      message: current.message || 'Paused',
-    });
-    return true;
-  }
-
-  // Resume by restarting the current chunk with saved word offset.
-  const resumeIndex = Math.max(0, Math.min(session.chunks.length - 1, Number(session.currentIndex || 0)));
-  session.restartFrom(resumeIndex);
-  return true;
-}
-
-function jumpSpeakParagraph(offset: -1 | 1): boolean {
-  const session = activeSpeakSession;
-  if (!session || session.stopRequested) return false;
-
-  const maxChunkIndex = Math.max(0, session.chunks.length - 1);
-  if (maxChunkIndex < 0) return false;
-  const currentChunkIndex = Math.max(0, Math.min(maxChunkIndex, Number(session.currentIndex || 0)));
-
-  let targetChunkIndex: number | null = null;
-
-  if (Array.isArray(session.paragraphStartIndexes) && session.paragraphStartIndexes.length > 1) {
-    const currentParagraph = Math.max(
-      0,
-      Math.min(
-        session.paragraphStartIndexes.length - 1,
-        Number(session.chunkParagraphIndexes[currentChunkIndex] ?? 0)
-      )
-    );
-    const targetParagraph = currentParagraph + offset;
-    if (targetParagraph >= 0 && targetParagraph < session.paragraphStartIndexes.length) {
-      const maybeTarget = Number(session.paragraphStartIndexes[targetParagraph]);
-      if (Number.isFinite(maybeTarget)) {
-        targetChunkIndex = Math.max(0, Math.min(maxChunkIndex, Math.round(maybeTarget)));
-      }
-    }
-  }
-
-  // Fallback: when paragraph boundaries are unavailable (or out of range),
-  // step by chunk so prev/next still works for long single-paragraph text.
-  if (targetChunkIndex === null) {
-    const fallbackTarget = currentChunkIndex + offset;
-    if (fallbackTarget < 0 || fallbackTarget > maxChunkIndex) {
-      return false;
-    }
-    targetChunkIndex = fallbackTarget;
-  }
-
-  session.resumeWordOffset = 0;
-  session.restartFrom(Math.max(0, Math.min(maxChunkIndex, Math.round(targetChunkIndex))));
-  return true;
-}
-
-function parseSpeakRateInput(input: any): string {
-  const raw = String(input ?? '').trim();
-  if (!raw) return '+0%';
-  if (/^[+-]?\d+%$/.test(raw)) {
-    return raw.startsWith('+') || raw.startsWith('-') ? raw : `+${raw}`;
-  }
-  const asNum = Number(raw);
-  if (Number.isFinite(asNum)) {
-    const pct = Math.max(-70, Math.min(150, Math.round((asNum - 1) * 100)));
-    return `${pct >= 0 ? '+' : ''}${pct}%`;
-  }
-  return '+0%';
 }
 
 function normalizeAccelerator(shortcut: string): string {
@@ -6600,27 +3663,6 @@ function parseHoldShortcutConfig(shortcut: string): {
     shift: mods.has('shift') || isStandaloneShift,
     fn: fnAsModifier || keyToken === 'fn' || keyToken === 'function',
   };
-}
-
-function stopWhisperHoldWatcher(): void {
-  if (!whisperHoldWatcherProcess) return;
-  try { whisperHoldWatcherProcess.kill('SIGTERM'); } catch {}
-  whisperHoldWatcherProcess = null;
-  whisperHoldWatcherStdoutBuffer = '';
-  whisperHoldWatcherSeq = 0;
-}
-
-function stopFnSpeakToggleWatcher(): void {
-  fnSpeakToggleWatcherEnabled = false;
-  fnSpeakToggleIsPressed = false;
-  if (fnSpeakToggleWatcherRestartTimer) {
-    clearTimeout(fnSpeakToggleWatcherRestartTimer);
-    fnSpeakToggleWatcherRestartTimer = null;
-  }
-  if (!fnSpeakToggleWatcherProcess) return;
-  try { fnSpeakToggleWatcherProcess.kill('SIGTERM'); } catch {}
-  fnSpeakToggleWatcherProcess = null;
-  fnSpeakToggleWatcherStdoutBuffer = '';
 }
 
 function stopFnCommandWatcher(commandId: string): void {
@@ -6933,7 +3975,7 @@ function startFnCommandWatcher(commandId: string, shortcut: string): void {
   if (fnCommandWatcherProcesses.has(commandId)) return;
   const config = parseHoldShortcutConfig(shortcut);
   if (!config || !config.fn) return;
-  const binaryPath = ensureWhisperHoldWatcherBinary();
+  const binaryPath = ensureHotkeyHoldMonitorBinary();
   if (!binaryPath) return;
 
   const { spawn } = require('child_process');
@@ -6999,158 +4041,13 @@ function startFnCommandWatcher(commandId: string, shortcut: string): void {
   });
 }
 
-function startFnSpeakToggleWatcher(): void {
-  if (fnSpeakToggleWatcherProcess || !fnSpeakToggleWatcherEnabled) return;
-  const config = parseHoldShortcutConfig(fnSpeakToggleCurrentShortcut || 'Fn');
-  if (!config) return;
-  const binaryPath = ensureWhisperHoldWatcherBinary();
-  if (!binaryPath) return;
-
-  const { spawn } = require('child_process');
-  fnSpeakToggleWatcherProcess = spawn(
-    binaryPath,
-    [
-      String(config.keyCode),
-      config.cmd ? '1' : '0',
-      config.ctrl ? '1' : '0',
-      config.alt ? '1' : '0',
-      config.shift ? '1' : '0',
-      config.fn ? '1' : '0',
-    ],
-    { stdio: ['ignore', 'pipe', 'pipe'] }
-  );
-  fnSpeakToggleWatcherStdoutBuffer = '';
-
-  fnSpeakToggleWatcherProcess.stdout.on('data', (chunk: Buffer | string) => {
-    fnSpeakToggleWatcherStdoutBuffer += chunk.toString();
-    const lines = fnSpeakToggleWatcherStdoutBuffer.split('\n');
-    fnSpeakToggleWatcherStdoutBuffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const payload = JSON.parse(trimmed);
-        if (payload?.pressed) {
-          const currentSettings = loadSettings();
-          if (isAIDisabledInSettings(currentSettings) || currentSettings.ai?.whisperEnabled === false) {
-            continue;
-          }
-          const now = Date.now();
-          if (now - fnSpeakToggleLastPressedAt < 180) continue;
-          fnSpeakToggleLastPressedAt = now;
-          fnSpeakToggleIsPressed = true;
-          void (async () => {
-            // Start native audio capture immediately to avoid getUserMedia latency
-            if (!audioCapturerRecording) {
-              void warmAudioCapturer().then(() => {
-                if (!fnSpeakToggleIsPressed) return;
-                void startNativeAudioCapture().then(() => {
-                  console.log('[Whisper][native-capture][fn] Recording started from Fn press');
-                }).catch(() => {});
-              }).catch(() => {});
-            }
-
-            if (whisperOverlayVisible) {
-              captureFrontmostAppContext();
-              if (whisperChildWindow && !whisperChildWindow.isDestroyed()) {
-                const bounds = whisperChildWindow.getBounds();
-                const pos = computeDetachedPopupPosition(DETACHED_WHISPER_WINDOW_NAME, bounds.width, bounds.height);
-                whisperChildWindow.setPosition(pos.x, pos.y);
-              }
-              mainWindow?.webContents.send('whisper-start-listening');
-              return;
-            }
-            await openLauncherAndRunSystemCommand('system-supercmd-whisper', {
-              showWindow: false,
-              mode: launcherMode === 'onboarding' ? 'onboarding' : 'default',
-              preserveFocusWhenHidden: launcherMode !== 'onboarding',
-            });
-            lastWhisperShownAt = Date.now();
-            const startDelays = [180, 340, 520, 800, 1200];
-            startDelays.forEach((delay) => {
-              setTimeout(() => {
-                if (!fnSpeakToggleIsPressed) return;
-                mainWindow?.webContents.send('whisper-start-listening');
-              }, delay);
-            });
-          })();
-        }
-        if (payload?.released) {
-          fnSpeakToggleIsPressed = false;
-          mainWindow?.webContents.send('whisper-stop-listening');
-        }
-      } catch {}
-    }
-  });
-
-  fnSpeakToggleWatcherProcess.stderr.on('data', (chunk: Buffer | string) => {
-    const text = chunk.toString().trim();
-    if (text) console.warn('[Whisper][fn-watcher]', text);
-  });
-
-  fnSpeakToggleWatcherProcess.on('error', () => {
-    fnSpeakToggleWatcherProcess = null;
-    fnSpeakToggleWatcherStdoutBuffer = '';
-    if (!fnSpeakToggleWatcherEnabled) return;
-    fnSpeakToggleWatcherRestartTimer = setTimeout(() => {
-      fnSpeakToggleWatcherRestartTimer = null;
-      startFnSpeakToggleWatcher();
-    }, 280);
-  });
-
-  fnSpeakToggleWatcherProcess.on('exit', () => {
-    fnSpeakToggleWatcherProcess = null;
-    fnSpeakToggleWatcherStdoutBuffer = '';
-    if (!fnSpeakToggleWatcherEnabled) return;
-    fnSpeakToggleWatcherRestartTimer = setTimeout(() => {
-      fnSpeakToggleWatcherRestartTimer = null;
-      startFnSpeakToggleWatcher();
-    }, 120);
-  });
-}
-
-function syncFnSpeakToggleWatcher(hotkeys: Record<string, string>): void {
-  // Do not start the CGEventTap-based watcher during onboarding.
-  // The tap requires Input Monitoring (and sometimes Accessibility) permission,
-  // which would trigger system dialogs before the user reaches the Grant Access step.
-  // Exception: fnWatcherOnboardingOverride is set when the user reaches the Dictation
-  // test step (step 4) so they can actually test the key during setup.
-  if (!loadSettings().hasSeenOnboarding && !fnWatcherOnboardingOverride) {
-    stopFnSpeakToggleWatcher();
-    return;
-  }
-  const currentSettings = loadSettings();
-  if (isAIDisabledInSettings(currentSettings) || currentSettings.ai?.whisperEnabled === false) {
-    stopFnSpeakToggleWatcher();
-    return;
-  }
-  const speakToggle = String(hotkeys?.['system-supercmd-whisper-speak-toggle'] || '').trim();
-  const shouldEnable = needsNativeHoldWatcher(speakToggle);
-  if (!shouldEnable) {
-    fnSpeakToggleCurrentShortcut = '';
-    stopFnSpeakToggleWatcher();
-    return;
-  }
-  // If the shortcut changed, stop the existing watcher so it restarts with the new key.
-  const shortcutChanged = speakToggle !== fnSpeakToggleCurrentShortcut;
-  if (shortcutChanged && fnSpeakToggleWatcherProcess) {
-    try { fnSpeakToggleWatcherProcess.kill('SIGTERM'); } catch {}
-    fnSpeakToggleWatcherProcess = null;
-    fnSpeakToggleWatcherStdoutBuffer = '';
-  }
-  fnSpeakToggleWatcherEnabled = true;
-  fnSpeakToggleCurrentShortcut = speakToggle;
-  startFnSpeakToggleWatcher();
-}
-
 function syncFnCommandWatchers(hotkeys: Record<string, string>): void {
   const desired = new Map<string, string>();
   for (const [commandId, shortcutRaw] of Object.entries(hotkeys || {})) {
     const shortcut = String(shortcutRaw || '').trim();
     if (!shortcut) continue;
     const normalized = normalizeAccelerator(shortcut);
-    const isFnSpeakToggle = commandId === 'system-supercmd-whisper-speak-toggle' && (isFnOnlyShortcut(normalized) || isStandaloneModifierShortcut(normalized));
-    if (isFnSpeakToggle) continue;
+
     if (!isFnShortcut(normalized)) continue;
     desired.set(commandId, normalized);
   }
@@ -7174,7 +4071,7 @@ function syncFnCommandWatchers(hotkeys: Record<string, string>): void {
   }
 }
 
-function ensureWhisperHoldWatcherBinary(): string | null {
+function ensureHotkeyHoldMonitorBinary(): string | null {
   const fs = require('fs');
   const binaryPath = getNativeBinaryPath('hotkey-hold-monitor');
   if (fs.existsSync(binaryPath)) return binaryPath;
@@ -7187,7 +4084,7 @@ function ensureWhisperHoldWatcherBinary(): string | null {
     ];
     const sourcePath = sourceCandidates.find((candidate) => fs.existsSync(candidate));
     if (!sourcePath) {
-      console.warn('[Whisper][hold] Source file not found for hotkey-hold-monitor.swift');
+      console.warn('[Hotkey monitor] Source file not found for hotkey-hold-monitor.swift');
       return null;
     }
     fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
@@ -7201,78 +4098,9 @@ function ensureWhisperHoldWatcherBinary(): string | null {
     ]);
     return binaryPath;
   } catch (error) {
-    console.warn('[Whisper][hold] Failed to compile hotkey hold monitor:', error);
+    console.warn('[Hotkey monitor] Failed to compile hotkey hold monitor:', error);
     return null;
   }
-}
-
-function startWhisperHoldWatcher(shortcut: string, holdSeq: number): void {
-  if (whisperHoldWatcherProcess) return;
-  const config = parseHoldShortcutConfig(shortcut);
-  if (!config) {
-    console.warn('[Whisper][hold] Unsupported shortcut for hold-to-talk:', shortcut);
-    return;
-  }
-  const binaryPath = ensureWhisperHoldWatcherBinary();
-  if (!binaryPath) {
-    console.warn('[Whisper][hold] Hold monitor binary unavailable');
-    return;
-  }
-
-  const { spawn } = require('child_process');
-  whisperHoldWatcherProcess = spawn(
-    binaryPath,
-    [
-      String(config.keyCode),
-      config.cmd ? '1' : '0',
-      config.ctrl ? '1' : '0',
-      config.alt ? '1' : '0',
-      config.shift ? '1' : '0',
-      config.fn ? '1' : '0',
-    ],
-    { stdio: ['ignore', 'pipe', 'pipe'] }
-  );
-  whisperHoldWatcherSeq = holdSeq;
-  whisperHoldWatcherStdoutBuffer = '';
-
-  whisperHoldWatcherProcess.stdout.on('data', (chunk: Buffer | string) => {
-    whisperHoldWatcherStdoutBuffer += chunk.toString();
-    const lines = whisperHoldWatcherStdoutBuffer.split('\n');
-    whisperHoldWatcherStdoutBuffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const payload = JSON.parse(trimmed);
-        if (payload?.released) {
-          whisperHoldReleasedSeq = Math.max(whisperHoldReleasedSeq, holdSeq);
-          mainWindow?.webContents.send('whisper-stop-listening');
-          stopWhisperHoldWatcher();
-          return;
-        }
-      } catch {}
-    }
-  });
-
-  whisperHoldWatcherProcess.stderr.on('data', (chunk: Buffer | string) => {
-    const text = chunk.toString().trim();
-    if (text) console.warn('[Whisper][hold]', text);
-  });
-
-  whisperHoldWatcherProcess.on('error', (error: any) => {
-    console.warn('[Whisper][hold] Monitor process error:', error);
-    whisperHoldWatcherProcess = null;
-    whisperHoldWatcherStdoutBuffer = '';
-    whisperHoldWatcherSeq = 0;
-  });
-
-  whisperHoldWatcherProcess.on('exit', () => {
-    whisperHoldWatcherProcess = null;
-    whisperHoldWatcherStdoutBuffer = '';
-    if (whisperHoldWatcherSeq === holdSeq) {
-      whisperHoldWatcherSeq = 0;
-    }
-  });
 }
 
 function handleOAuthCallbackUrl(rawUrl: string): void {
@@ -7952,7 +4780,7 @@ async function handleRendererRecoveryGiveUp(logMessage: string): Promise<void> {
     console.error('[WindowManager] Failed to show renderer recovery dialog:', err);
   }
   // Quit (not exit) so the before-quit/will-quit teardown runs and the spawned
-  // child processes (emoji-trigger monitor, whisper/parakeet servers, clipboard
+  // child processes (emoji-trigger monitor, clipboard
   // monitor, window-manager worker, …) are killed instead of orphaned. If the
   // user chose Relaunch, app.relaunch() above schedules a fresh instance to
   // start once this one has quit.
@@ -8073,7 +4901,7 @@ function createWindow(): void {
 
   // Allow renderer getUserMedia requests so Chromium can surface native prompts.
   mainWindow.webContents.session.setPermissionRequestHandler((_wc: any, permission: any, callback: any) => {
-    if (permission === 'media' || permission === 'microphone') {
+    if (permission === 'media') {
       callback(true);
       return;
     }
@@ -8110,22 +4938,14 @@ function createWindow(): void {
       !getElectronLiquidGlassApi();
 
     const popupBounds = parsePopupFeatures(details?.features || '');
-    const defaultWidth = detachedPopupName === DETACHED_WHISPER_WINDOW_NAME
-      ? 272
-      : detachedPopupName === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME
-        ? 920
-      : detachedPopupName === DETACHED_WINDOW_MANAGER_WINDOW_NAME
+    const defaultWidth = detachedPopupName === DETACHED_WINDOW_MANAGER_WINDOW_NAME
         ? 320
       : detachedPopupName === DETACHED_PROMPT_WINDOW_NAME
         ? CURSOR_PROMPT_WINDOW_WIDTH
       : detachedPopupName === DETACHED_MEMORY_STATUS_WINDOW_NAME
         ? 340
         : 520;
-    const defaultHeight = detachedPopupName === DETACHED_WHISPER_WINDOW_NAME
-      ? 52
-      : detachedPopupName === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME
-        ? 640
-      : detachedPopupName === DETACHED_WINDOW_MANAGER_WINDOW_NAME
+    const defaultHeight = detachedPopupName === DETACHED_WINDOW_MANAGER_WINDOW_NAME
         ? 276
       : detachedPopupName === DETACHED_PROMPT_WINDOW_NAME
         ? CURSOR_PROMPT_WINDOW_HEIGHT
@@ -8145,29 +4965,23 @@ function createWindow(): void {
         x: popupPos.x,
         y: popupPos.y,
         title:
-          detachedPopupName === DETACHED_WHISPER_WINDOW_NAME
-            ? 'SuperCmd Whisper'
-            : detachedPopupName === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME
-            ? 'SuperCmd Whisper Onboarding'
-            : detachedPopupName === DETACHED_PROMPT_WINDOW_NAME
+          detachedPopupName === DETACHED_PROMPT_WINDOW_NAME
               ? 'SuperCmd Prompt'
               : detachedPopupName === DETACHED_WINDOW_MANAGER_WINDOW_NAME
                 ? 'SuperCmd Window Manager'
               : detachedPopupName === DETACHED_MEMORY_STATUS_WINDOW_NAME
                 ? 'SuperCmd Status'
-              : 'SuperCmd Read',
+              : 'SuperCmd',
         frame: false,
         titleBarStyle: 'hidden',
         titleBarOverlay: false,
         transparent: true,
         backgroundColor: '#00000000',
-        vibrancy: detachedPopupName === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME
-          ? 'fullscreen-ui'
-          : useNativeVibrancyForWindowManager
+        vibrancy: useNativeVibrancyForWindowManager
             ? 'under-window'
             : undefined,
         visualEffectState:
-          detachedPopupName === DETACHED_WHISPER_ONBOARDING_WINDOW_NAME || useNativeVibrancyForWindowManager
+          useNativeVibrancyForWindowManager
             ? 'active'
             : undefined,
         hasShadow: false,
@@ -8176,14 +4990,12 @@ function createWindow(): void {
         maximizable: false,
         fullscreenable: false,
         focusable:
-          detachedPopupName !== DETACHED_WHISPER_WINDOW_NAME &&
           detachedPopupName !== DETACHED_MEMORY_STATUS_WINDOW_NAME,
         skipTaskbar: true,
         alwaysOnTop: true,
-        // Create the whisper popup hidden then showInactive() in did-create-window
         // so that macOS does not activate the SuperCmd app (which would briefly
         // raise the settings window if it was previously opened).
-        show: detachedPopupName !== DETACHED_WHISPER_WINDOW_NAME,
+        show: true,
         acceptFirstMouse: true,
         webPreferences: {
           nodeIntegration: false,
@@ -8215,23 +5027,6 @@ function createWindow(): void {
     try { childWindow.setSkipTaskbar(true); } catch {}
     try { childWindow.setAlwaysOnTop(true); } catch {}
     try { childWindow.setHasShadow(false); } catch {}
-
-    if (detachedPopupName === DETACHED_WHISPER_WINDOW_NAME) {
-      whisperChildWindow = childWindow;
-      try { childWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch {}
-      // Ignore mouse events by default so clicks pass through; widget will re-enable on hover
-      try { childWindow.setIgnoreMouseEvents(true, { forward: true }); } catch {}
-      // Show the window without activating the app so macOS does not raise
-      // existing windows (e.g. the settings window) to the foreground.
-      // showInactive() maps to NSWindow orderFrontRegardless: on macOS,
-      // which orders the window in front without making it key or
-      // activating the application.
-      try { childWindow.showInactive(); } catch {}
-      childWindow.on('closed', () => {
-        if (whisperChildWindow === childWindow) whisperChildWindow = null;
-      });
-      return;
-    }
 
     if (detachedPopupName === DETACHED_WINDOW_MANAGER_WINDOW_NAME && isGlassyUiStyleEnabled()) {
       applyLiquidGlassToWindowManagerPopup(childWindow);
@@ -8354,9 +5149,6 @@ function createWindow(): void {
       isVisible &&
       !suppressBlurHide &&
       oauthBlurHideSuppressionDepth === 0 &&
-      !isWhisperOverlayActiveOrOpening() &&
-      launcherMode !== 'whisper' &&
-      launcherMode !== 'speak' &&
       launcherMode !== 'onboarding'
     ) {
       hideWindow();
@@ -8658,12 +5450,7 @@ function getLauncherSize(mode: LauncherMode) {
   if (mode === 'prompt') {
     return { width: CURSOR_PROMPT_WINDOW_WIDTH, height: CURSOR_PROMPT_WINDOW_HEIGHT, topFactor: 0.2 };
   }
-  if (mode === 'whisper') {
-    return { width: WHISPER_WINDOW_WIDTH, height: WHISPER_WINDOW_HEIGHT, topFactor: 0.28 };
-  }
-  if (mode === 'speak') {
-    return { width: 530, height: 300, topFactor: 0.03 };
-  }
+
   if (mode === 'onboarding') {
     return { width: ONBOARDING_WINDOW_WIDTH, height: ONBOARDING_WINDOW_HEIGHT, topFactor: 0.12 };
   }
@@ -8886,20 +5673,14 @@ function applyLauncherBounds(mode: LauncherMode): void {
 
   const promptFallbackX = displayX + Math.floor((displayWidth - size.width) / 2);
   const promptFallbackY = displayY + Math.floor(displayHeight * 0.32);
-  const windowX = mode === 'speak'
-    ? displayX + displayWidth - size.width - 20
-    : mode === 'prompt'
+  const windowX = mode === 'prompt'
       ? clamp(
           (promptAnchorPoint?.x ?? promptFallbackX) - CURSOR_PROMPT_LEFT_OFFSET,
           displayX + 8,
           displayX + displayWidth - size.width - 8
         )
       : displayX + Math.floor((displayWidth - size.width) / 2);
-  const windowY = mode === 'whisper'
-    ? displayY + displayHeight - size.height - 18
-    : mode === 'speak'
-      ? displayY + 16
-      : mode === 'prompt'
+  const windowY = mode === 'prompt'
         ? (() => {
             const baseY = caretRect
               ? caretRect.y
@@ -8925,12 +5706,7 @@ function setLauncherMode(mode: LauncherMode): void {
   if (mainWindow) {
     try {
       if (process.platform === 'darwin') {
-        if (mode === 'whisper' || mode === 'speak') {
-          mainWindow.setVibrancy(null as any);
-          mainWindow.setHasShadow(false);
-          mainWindow.setFocusable(true);
-          mainWindow.setBackgroundColor('#00000000');
-        } else {
+        {
           mainWindow.setVibrancy('fullscreen-ui');
           mainWindow.setHasShadow(true);
           mainWindow.setFocusable(true);
@@ -8974,10 +5750,8 @@ function setLauncherMode(mode: LauncherMode): void {
     applyLauncherBounds(mode);
   }
   if (isVisible) {
-    if (mode === 'whisper') {
-      registerWhisperEscapeShortcut();
-    } else {
-      unregisterWhisperEscapeShortcut();
+    {
+
     }
   }
 }
@@ -9263,15 +6037,10 @@ async function showWindow(options?: { systemCommandId?: string }): Promise<void>
     });
   }
 
-  if (launcherMode === 'whisper') {
-    registerWhisperEscapeShortcut();
-  } else {
-    unregisterWhisperEscapeShortcut();
+  {
+
   }
 
-  if (launcherMode === 'whisper') {
-    lastWhisperShownAt = Date.now();
-  }
 }
 
 function hideWindow(): void {
@@ -9287,7 +6056,7 @@ function hideWindow(): void {
   launcherEntryFrontmostApp = null;
   launcherEntryWindowManagementTargetWindowId = null;
   launcherEntryWindowManagementTargetWorkArea = null;
-  unregisterWhisperEscapeShortcut();
+
   try {
     mainWindow.setFocusable(true);
   } catch {}
@@ -9326,13 +6095,7 @@ function openPreferredDevTools(): boolean {
 }
 
 async function activateLastFrontmostApp(): Promise<boolean> {
-  if (isWhisperSuperCmdTextTargetWindow(whisperSuperCmdTextTargetWindow)) {
-    try {
-      whisperSuperCmdTextTargetWindow.show();
-      whisperSuperCmdTextTargetWindow.focus();
-      return true;
-    } catch {}
-  }
+
   if (!lastFrontmostApp) return false;
   const { execFile } = require('child_process');
   const { promisify } = require('util');
@@ -10343,11 +7106,6 @@ function toggleWindow(): void {
     return;
   }
 
-  if (isVisible && launcherMode === 'whisper') {
-    void openLauncherFromUserEntry();
-    return;
-  }
-
   if (isVisible && launcherMode === 'onboarding') {
     try {
       mainWindow?.webContents.send('onboarding-hotkey-pressed');
@@ -10417,10 +7175,7 @@ async function openLauncherAndRunSystemCommand(
   if (preserveFocusWhenHidden) {
     captureFrontmostAppContext();
   }
-  if (commandId === 'system-supercmd-whisper') {
-    captureWhisperSuperCmdTextTarget();
-    markWhisperOverlayOpening();
-  }
+
   setLauncherMode(options?.mode || 'default');
 
   const sendCommand = async () => {
@@ -10487,10 +7242,7 @@ async function dispatchRendererCustomEvent(eventName: string, detail: any): Prom
 
 const AI_DISABLED_SYSTEM_COMMANDS = new Set<string>([
   'system-cursor-prompt',
-  'system-supercmd-whisper',
-  'system-supercmd-whisper-toggle',
-  'system-supercmd-whisper-speak-toggle',
-  'system-supercmd-speak',
+
 ]);
 
 function isAIDisabledInSettings(settings?: AppSettings): boolean {
@@ -10506,10 +7258,7 @@ function isAISectionDisabledForCommand(commandId: string, settings?: AppSettings
   const resolved = settings || loadSettings();
   const id = String(commandId || '').trim();
   if (!id) return false;
-  if (id === 'system-supercmd-speak') return resolved.ai?.readEnabled === false;
-  if (id === 'system-supercmd-whisper' || id === 'system-supercmd-whisper-toggle' || id === 'system-supercmd-whisper-speak-toggle') {
-    return resolved.ai?.whisperEnabled === false;
-  }
+
   if (id === 'system-cursor-prompt') return resolved.ai?.llmEnabled === false;
   return false;
 }
@@ -10682,6 +7431,7 @@ async function confirmQuitAllApps(source: 'launcher' | 'hotkey' | 'widget'): Pro
 }
 
 async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' | 'widget' = 'launcher'): Promise<boolean> {
+  if (isRetiredSystemCommand(commandId)) return false;
   if (isAIDependentSystemCommand(commandId) && isAIDisabledInSettings()) {
     return false;
   }
@@ -10696,109 +7446,8 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     lastWindowManagementPresetHotkeyAt = now;
   }
 
-  const isWhisperOpenCommand =
-    commandId === 'system-supercmd-whisper' ||
-    commandId === 'system-supercmd-whisper-toggle';
-  const isWhisperSpeakToggleCommand = commandId === 'system-supercmd-whisper-speak-toggle';
-  const isWhisperCommand = isWhisperOpenCommand || isWhisperSpeakToggleCommand;
-  const isSpeakCommand = commandId === 'system-supercmd-speak';
   const isCursorPromptCommand = commandId === 'system-cursor-prompt';
 
-  if (isWhisperOpenCommand && source === 'hotkey') {
-    const now = Date.now();
-    if (now - lastWhisperToggleAt < 450) {
-      return true;
-    }
-    lastWhisperToggleAt = now;
-  }
-
-  if (isWhisperSpeakToggleCommand) {
-    const speakToggleHotkey = String(loadSettings().commandHotkeys?.['system-supercmd-whisper-speak-toggle'] ?? '').trim();
-    const holdSeq = ++whisperHoldRequestSeq;
-
-    // Start native audio capture immediately — this takes ~10-30ms
-    // vs 200-500ms for the renderer getUserMedia path.
-    // The renderer overlay is opened in parallel; it will detect
-    // that native capture is already running and hook into it.
-    if (!audioCapturerRecording) {
-      void warmAudioCapturer().then(() => {
-        if (holdSeq !== whisperHoldRequestSeq) return;
-        if (whisperHoldReleasedSeq >= holdSeq) return;
-        void startNativeAudioCapture().then(() => {
-          console.log('[Whisper][native-capture] Recording started from hotkey');
-        }).catch((err: any) => {
-          console.warn('[Whisper][native-capture] Failed to start:', err?.message);
-        });
-      }).catch((err: any) => {
-        console.warn('[Whisper][native-capture] Warmup failed:', err?.message);
-      });
-    }
-
-    if (whisperOverlayVisible) {
-      captureFrontmostAppContext();
-      // Reposition whisper window to the current cursor's screen
-      if (whisperChildWindow && !whisperChildWindow.isDestroyed()) {
-        const bounds = whisperChildWindow.getBounds();
-        const pos = computeDetachedPopupPosition(DETACHED_WHISPER_WINDOW_NAME, bounds.width, bounds.height);
-        whisperChildWindow.setPosition(pos.x, pos.y);
-      }
-      if (speakToggleHotkey) {
-        startWhisperHoldWatcher(speakToggleHotkey, holdSeq);
-      }
-      mainWindow?.webContents.send('whisper-start-listening');
-      return true;
-    }
-    if (speakToggleHotkey) {
-      startWhisperHoldWatcher(speakToggleHotkey, holdSeq);
-    }
-    await openLauncherAndRunSystemCommand('system-supercmd-whisper', {
-      showWindow: false,
-      mode: launcherMode === 'onboarding' ? 'onboarding' : 'default',
-      preserveFocusWhenHidden: launcherMode !== 'onboarding',
-    });
-    lastWhisperShownAt = Date.now();
-    // Opening detached whisper can race with renderer listener binding;
-    // send explicit "start listening" with short retries.
-    const startDelays = [180, 340, 520, 800, 1200];
-    startDelays.forEach((delay) => {
-      setTimeout(() => {
-        if (holdSeq !== whisperHoldRequestSeq) return;
-        if (whisperHoldReleasedSeq >= holdSeq) return;
-        mainWindow?.webContents.send('whisper-start-listening');
-      }, delay);
-    });
-    return true;
-  }
-
-  if (isSpeakCommand) {
-    if (activeSpeakSession || speakOverlayVisible) {
-      stopSpeakSession({ resetStatus: true, cleanupWindow: true });
-      return true;
-    }
-    const started = await startSpeakFromSelection();
-    if (!started) return false;
-    await openLauncherAndRunSystemCommand('system-supercmd-speak', {
-      showWindow: false,
-      mode: launcherMode === 'onboarding' ? 'onboarding' : 'default',
-      preserveFocusWhenHidden: launcherMode !== 'onboarding',
-    });
-    return started;
-  }
-
-  if (
-    isWhisperOpenCommand &&
-    source === 'hotkey' &&
-    whisperOverlayVisible
-  ) {
-    const now = Date.now();
-    if (now - lastWhisperShownAt < 650) {
-      return true;
-    }
-    mainWindow?.webContents.send('whisper-stop-and-close');
-    whisperHoldRequestSeq += 1;
-    stopWhisperHoldWatcher();
-    return true;
-  }
   if (isCursorPromptCommand) {
     captureFrontmostAppContext();
 
@@ -10811,7 +7460,7 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     const isLauncherPath = source === 'launcher';
     const selectionPromise = isLauncherPath
       ? Promise.resolve('')
-      : getSelectedTextForSpeak({ allowClipboardFallback: false });
+      : getSelectedTextForPrompt({ allowClipboardFallback: false });
 
     // Caret/input captures must happen synchronously before focus shifts.
     const earlyCaretRect = isLauncherPath ? null : getTypingCaretRect();
@@ -10980,27 +7629,14 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
       mode: 'default',
     });
   }
-  if (commandId === 'system-whisper-onboarding') {
-    return await openLauncherAndRunSystemCommand('system-open-onboarding', {
-      showWindow: true,
-      mode: 'onboarding',
-    });
-  }
+
   if (commandId === 'system-open-onboarding') {
     return await openLauncherAndRunSystemCommand(commandId, {
       showWindow: true,
       mode: 'onboarding',
     });
   }
-  if (isWhisperOpenCommand) {
-    lastWhisperShownAt = Date.now();
-    whisperHoldRequestSeq += 1;
-    stopWhisperHoldWatcher();
-    return await openLauncherAndRunSystemCommand('system-supercmd-whisper', {
-      showWindow: source === 'launcher',
-      mode: launcherMode === 'onboarding' ? 'onboarding' : 'default',
-    });
-  }
+
   if (isWindowManagementLayoutCommand(commandId)) {
     const shouldPreserveFocusWhenHidden = source === 'launcher' || isVisible;
     const shouldCaptureTargetHint = source === 'hotkey' || !isVisible;
@@ -11292,667 +7928,6 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
   const success = await executeCommand(commandId);
   return success;
 }
-
-async function startSpeakFromSelection(): Promise<boolean> {
-  stopSpeakSession({ resetStatus: true });
-  setSpeakStatus({ state: 'loading', text: '', index: 0, total: 0, message: 'Getting selected text...' });
-
-  const selectedText = await getSelectedTextForSpeak();
-  const chunkPlan = buildSpeakChunkPlan(selectedText);
-  const chunks = chunkPlan.chunks;
-  if (chunks.length === 0) {
-    setSpeakStatus({
-      state: 'error',
-      text: '',
-      index: 0,
-      total: 0,
-      message: 'No selected text found.',
-    });
-    return false;
-  }
-
-  const settings = loadSettings();
-  const selectedTtsModel = String(settings.ai?.textToSpeechModel || 'edge-tts');
-  const usingElevenLabsTts = selectedTtsModel.startsWith('elevenlabs-');
-  const elevenLabsApiKey = getElevenLabsApiKey(settings);
-  if (usingElevenLabsTts && !elevenLabsApiKey) {
-    setSpeakStatus({
-      state: 'error',
-      text: '',
-      index: 0,
-      total: chunks.length,
-      message: 'ElevenLabs API key not configured. Set it in Settings -> AI (or ELEVENLABS_API_KEY env var).',
-    });
-    return false;
-  }
-  const elevenLabsTts = usingElevenLabsTts ? resolveElevenLabsTtsConfig(selectedTtsModel) : null;
-  const configuredEdgeVoice = String(settings.ai?.edgeTtsVoice || '').trim();
-  if (!usingElevenLabsTts && configuredEdgeVoice) {
-    speakRuntimeOptions.voice = configuredEdgeVoice;
-  }
-
-  const localSpeakBackend = usingElevenLabsTts ? null : resolveLocalSpeakBackend();
-  if (!usingElevenLabsTts) {
-    if (!localSpeakBackend) {
-      setSpeakStatus({
-        state: 'error',
-        text: '',
-        index: 0,
-        total: chunks.length,
-        message: 'No local speech runtime is available. Reinstall SuperCmd and retry.',
-      });
-      return false;
-    }
-  }
-
-  const fs = require('fs');
-  const os = require('os');
-  const pathMod = require('path');
-  const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'supercmd-speak-'));
-  const sessionId = ++speakSessionCounter;
-  const session = {
-    id: sessionId,
-    stopRequested: false,
-    paused: false,
-    playbackGeneration: 0,
-    currentIndex: 0,
-    chunks,
-    paragraphStartIndexes: chunkPlan.paragraphStartIndexes,
-    chunkParagraphIndexes: chunkPlan.chunkParagraphIndexes,
-    resumeWordOffset: null,
-    tmpDir,
-    chunkPromises: new Map<string, Promise<SpeakChunkPrepared>>(),
-    afplayProc: null as any,
-    ttsProcesses: new Set<any>(),
-    restartFrom: (_index: number) => {},
-  };
-  activeSpeakSession = session;
-
-  const configuredVoice = String(speakRuntimeOptions.voice || '');
-  const voiceLangMatch = /^([a-z]{2}-[A-Z]{2})-/.exec(configuredVoice);
-  const fallbackLanguage = String(settings.ai?.speechLanguage || 'en-US');
-  const lang = voiceLangMatch?.[1] || (fallbackLanguage.includes('-') ? fallbackLanguage : `${fallbackLanguage}-US`);
-  if (!usingElevenLabsTts && !speakRuntimeOptions.voice) {
-    speakRuntimeOptions.voice = resolveEdgeVoice(settings.ai?.speechLanguage || 'en-US');
-  }
-
-  const ensureChunkPrepared = (
-    index: number,
-    generation: number,
-    wordOffset: number = 0
-  ): Promise<SpeakChunkPrepared> => {
-    if (index < 0 || index >= chunks.length) {
-      return Promise.reject(new Error('Chunk index out of range'));
-    }
-    const originalText = session.chunks[index];
-    const originalWords = originalText.split(/\s+/g).filter(Boolean);
-    const normalizedWordOffset = Math.max(
-      0,
-      Math.min(
-        Math.round(Number(wordOffset || 0)),
-        Math.max(0, originalWords.length - 1)
-      )
-    );
-    const spokenText =
-      normalizedWordOffset > 0
-        ? originalWords.slice(normalizedWordOffset).join(' ')
-        : originalText;
-    const spokenWordCount = spokenText.split(/\s+/g).filter(Boolean).length;
-    const cacheKey = `${generation}:${index}:${normalizedWordOffset}`;
-    const existing = session.chunkPromises.get(cacheKey);
-    if (existing) return existing;
-
-    const promise = new Promise<SpeakChunkPrepared>((resolve, reject) => {
-      if (session.stopRequested) {
-        reject(new Error('Speak session stopped'));
-        return;
-      }
-      const outputExtension = !usingElevenLabsTts && localSpeakBackend === 'system-say' ? 'aiff' : 'mp3';
-      // Use generation-scoped chunk paths so quick restarts (voice/rate changes)
-      // never overlap on the same file path.
-      const audioPath = pathMod.join(tmpDir, `chunk-${generation}-${index}.${outputExtension}`);
-      const synthesizeChunkWithRetry = async (): Promise<void> => {
-        const maxAttempts = 3;
-        let lastErr: Error | null = null;
-
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          if (session.stopRequested) {
-            throw new Error('Speak session stopped');
-          }
-
-          const attemptError = await new Promise<Error | null>((attemptResolve) => {
-            if (usingElevenLabsTts) {
-              if (!elevenLabsTts || !elevenLabsApiKey) {
-                attemptResolve(new Error('ElevenLabs TTS configuration is missing.'));
-                return;
-              }
-              // Use runtime voice if set, otherwise fall back to config
-              const runtimeVoiceId = String(speakRuntimeOptions.voice || '').trim();
-              const voiceId = runtimeVoiceId || elevenLabsTts.voiceId;
-              synthesizeElevenLabsToFile({
-                text: spokenText,
-                audioPath,
-                apiKey: elevenLabsApiKey,
-                modelId: elevenLabsTts.modelId,
-                voiceId,
-                timeoutMs: 45000,
-              }).then(() => attemptResolve(null)).catch((err: any) => {
-                const message = String(err?.message || err || 'ElevenLabs TTS failed');
-                attemptResolve(new Error(message));
-              });
-              return;
-            }
-
-            if (!localSpeakBackend) {
-              attemptResolve(new Error('No local speech backend is available.'));
-              return;
-            }
-            const synthPromise = localSpeakBackend === 'edge-tts'
-              ? synthesizeWithEdgeTts({
-                  text: spokenText,
-                  audioPath,
-                  voice: speakRuntimeOptions.voice,
-                  lang,
-                  rate: speakRuntimeOptions.rate,
-                  saveSubtitles: true,
-                  timeoutMs: 45000,
-                })
-              : synthesizeWithSystemSay({
-                  text: spokenText,
-                  audioPath,
-                  lang,
-                  rate: speakRuntimeOptions.rate,
-                });
-
-            synthPromise.then(() => {
-              if (session.stopRequested) {
-                attemptResolve(new Error('Speak session stopped'));
-                return;
-              }
-              attemptResolve(null);
-            }).catch((err: any) => {
-              const text = String(err?.message || err || 'Speech synthesis failed');
-              attemptResolve(new Error(text));
-            });
-          });
-
-          if (!attemptError) return;
-          lastErr = attemptError;
-
-          const isTimeout = /timed out|timeout/i.test(String(attemptError.message || ''));
-          const canRetry = attempt < maxAttempts;
-          if (!canRetry || !isTimeout) {
-            break;
-          }
-
-          const waitMs = 450 * attempt;
-          await new Promise((r) => setTimeout(r, waitMs));
-        }
-
-        throw lastErr || new Error('Speech synthesis failed');
-      };
-
-      synthesizeChunkWithRetry().then(() => {
-        let wordCues: Array<{ start: number; end: number; wordIndex: number }> = [];
-        if (localSpeakBackend === 'edge-tts') {
-          try {
-            const subtitleCandidates = [
-              audioPath.replace(/\.mp3$/i, '.json'),
-              `${audioPath}.json`,
-              audioPath.replace(/\.[a-z0-9]+$/i, '.json'),
-            ];
-            for (const subtitlePath of subtitleCandidates) {
-              if (!fs.existsSync(subtitlePath)) continue;
-              const raw = fs.readFileSync(subtitlePath, 'utf-8');
-              const parsed = JSON.parse(raw);
-              if (!Array.isArray(parsed)) continue;
-              let wordIndex = normalizedWordOffset;
-              for (const entry of parsed) {
-                const part = String(entry?.part || '').trim();
-                const start = parseCueTimeMs(entry?.start);
-                const endRaw = parseCueTimeMs(entry?.end);
-                const end = Math.max(start + 1, endRaw);
-                const words = part.split(/\s+/g).filter(Boolean);
-                if (words.length === 0) continue;
-                const span = Math.max(1, end - start);
-                const step = span / words.length;
-                for (let i = 0; i < words.length; i += 1) {
-                  wordCues.push({
-                    start: Math.max(0, Math.round(start + i * step)),
-                    end: Math.max(1, Math.round(start + (i + 1) * step)),
-                    wordIndex,
-                  });
-                  wordIndex += 1;
-                }
-              }
-              if (wordCues.length > 0) break;
-            }
-          } catch {}
-        }
-        const durationMsFromCues =
-          wordCues.length > 0
-            ? Math.max(...wordCues.map((cue) => cue.end))
-            : null;
-        const durationMs = durationMsFromCues || probeAudioDurationMs(audioPath) || undefined;
-        resolve({
-          index,
-          text: originalText,
-          audioPath,
-          wordCues,
-          durationMs,
-          wordOffset: normalizedWordOffset,
-          spokenWordCount,
-        });
-      }).catch((err: any) => {
-        const message = String(err?.message || err || 'Speech synthesis failed');
-        if (/timed out|timeout/i.test(message)) {
-          reject(new Error('Speech request timed out. Please try again.'));
-          return;
-        }
-        reject(err instanceof Error ? err : new Error(message));
-      });
-    });
-
-    session.chunkPromises.set(cacheKey, promise);
-    return promise;
-  };
-
-  const playAudioFile = (prepared: SpeakChunkPrepared): Promise<void> =>
-    new Promise((resolve, reject) => {
-      if (session.stopRequested) {
-        resolve();
-        return;
-      }
-      const { spawn } = require('child_process');
-      const proc = spawn('/usr/bin/afplay', [prepared.audioPath], { stdio: ['ignore', 'ignore', 'pipe'] });
-      session.afplayProc = proc;
-      let stderr = '';
-      let elapsedMs = 0;
-      let lastTickAt = Date.now();
-      let lastWordIndex = -1;
-      let pauseStartedAt: number | null = null;
-      const wordsInText = prepared.text.split(/\s+/g).filter(Boolean).length;
-      const wordOffset = Math.max(
-        0,
-        Math.min(
-          Math.max(0, wordsInText - 1),
-          Math.round(Number(prepared.wordOffset || 0))
-        )
-      );
-      const spokenWordCount = Math.max(
-        0,
-        Math.min(
-          wordsInText,
-          Math.round(
-            Number.isFinite(Number(prepared.spokenWordCount))
-              ? Number(prepared.spokenWordCount)
-              : Math.max(0, wordsInText - wordOffset)
-          )
-        )
-      );
-      const fallbackWpm = Number(parseSayRateWordsPerMinute(speakRuntimeOptions.rate || '+0%')) || 175;
-      const fallbackMsPerWord = spokenWordCount > 0
-        ? Math.max(
-            120,
-            Math.min(
-              1200,
-              Math.round(
-                (
-                  (typeof prepared.durationMs === 'number' && Number.isFinite(prepared.durationMs) && prepared.durationMs > 0)
-                    ? prepared.durationMs / spokenWordCount
-                    : (60000 / Math.max(90, fallbackWpm))
-                )
-              )
-            )
-          )
-        : 0;
-
-      if (session.paused) {
-        pauseStartedAt = Date.now();
-        try { proc.kill('SIGSTOP'); } catch {}
-      }
-
-      const cueTimer = setInterval(() => {
-        if (session.stopRequested || activeSpeakSession?.id !== sessionId) return;
-        const now = Date.now();
-        const delta = Math.max(0, now - lastTickAt);
-        lastTickAt = now;
-
-        if (session.paused) {
-          if (pauseStartedAt === null) {
-            pauseStartedAt = now;
-          }
-          return;
-        }
-        if (pauseStartedAt !== null) {
-          // Clear pause marker once resumed; elapsedMs intentionally does not include paused time.
-          pauseStartedAt = null;
-        }
-
-        elapsedMs += delta;
-        const elapsed = elapsedMs;
-        let nextWordIndex = -1;
-        if (prepared.wordCues.length > 0) {
-          for (const cue of prepared.wordCues) {
-            if (elapsed >= cue.start && elapsed <= cue.end) {
-              nextWordIndex = cue.wordIndex;
-              break;
-            }
-            if (elapsed > cue.end) {
-              nextWordIndex = cue.wordIndex;
-            }
-          }
-        } else if (spokenWordCount > 0) {
-          nextWordIndex = wordOffset + Math.min(spokenWordCount - 1, Math.floor(elapsed / fallbackMsPerWord));
-        }
-        if (nextWordIndex !== lastWordIndex && nextWordIndex >= 0) {
-          lastWordIndex = nextWordIndex;
-          setSpeakStatus({
-            state: 'speaking',
-            text: prepared.text,
-            index: prepared.index + 1,
-            total: session.chunks.length,
-            message: '',
-            wordIndex: nextWordIndex,
-          });
-        }
-      }, 70);
-      proc.stderr.on('data', (chunk: Buffer | string) => {
-        stderr += String(chunk || '');
-      });
-      proc.on('error', (err: Error) => {
-        clearInterval(cueTimer);
-        if (session.afplayProc === proc) session.afplayProc = null;
-        reject(err);
-      });
-      proc.on('close', (code: number | null) => {
-        clearInterval(cueTimer);
-        if (session.afplayProc === proc) session.afplayProc = null;
-        if (session.stopRequested) {
-          resolve();
-          return;
-        }
-        if (session.paused) {
-          resolve();
-          return;
-        }
-        if (code && code !== 0) {
-          reject(new Error(stderr.trim() || `afplay exited with ${code}`));
-          return;
-        }
-        resolve();
-      });
-    });
-
-  setSpeakStatus({ state: 'loading', text: '', index: 0, total: session.chunks.length, message: 'Preparing speech...' });
-
-  const runPlayback = (startIndex: number) => {
-    const generation = ++session.playbackGeneration;
-    const safeStart = Math.max(0, Math.min(startIndex, session.chunks.length - 1));
-    const initialResumeWordOffset = Math.max(0, Math.round(Number(session.resumeWordOffset || 0)));
-    const priorStatus = { ...speakStatusSnapshot };
-    const shouldPreserveVisibleParagraph =
-      initialResumeWordOffset > 0 &&
-      String(priorStatus.text || '').trim().length > 0 &&
-      Number(priorStatus.index || 0) === safeStart + 1;
-    session.resumeWordOffset = null;
-    session.currentIndex = safeStart;
-    session.chunkPromises.clear();
-    if (session.afplayProc) {
-      try { session.afplayProc.kill('SIGTERM'); } catch {}
-      session.afplayProc = null;
-    }
-    for (const proc of session.ttsProcesses) {
-      try { proc.kill('SIGTERM'); } catch {}
-    }
-    session.ttsProcesses.clear();
-    if (shouldPreserveVisibleParagraph) {
-      setSpeakStatus({
-        state: session.paused ? 'paused' : 'speaking',
-        text: priorStatus.text,
-        index: safeStart + 1,
-        total: session.chunks.length,
-        message: session.paused ? 'Paused' : '',
-        wordIndex: initialResumeWordOffset,
-      });
-    } else {
-      setSpeakStatus({
-        state: session.paused ? 'paused' : 'loading',
-        text: '',
-        index: safeStart + 1,
-        total: session.chunks.length,
-        message: session.paused ? 'Paused' : 'Preparing speech...',
-        wordIndex: initialResumeWordOffset > 0 ? initialResumeWordOffset : undefined,
-      });
-    }
-
-    // Prime first and second chunks for lower startup latency.
-    void ensureChunkPrepared(safeStart, generation, initialResumeWordOffset).catch(() => {});
-    if (safeStart + 1 < session.chunks.length) {
-      void ensureChunkPrepared(safeStart + 1, generation).catch(() => {});
-    }
-
-    (async () => {
-    try {
-      for (let index = safeStart; index < session.chunks.length; index += 1) {
-        if (
-          generation !== session.playbackGeneration ||
-          session.stopRequested ||
-          activeSpeakSession?.id !== sessionId
-        ) return;
-        if (session.paused) return;
-        session.currentIndex = index;
-        const resumeOffsetForChunk = index === safeStart ? initialResumeWordOffset : 0;
-        const prepared = await ensureChunkPrepared(index, generation, resumeOffsetForChunk);
-        if (
-          generation !== session.playbackGeneration ||
-          session.stopRequested ||
-          activeSpeakSession?.id !== sessionId
-        ) return;
-        if (session.paused) return;
-
-        const nextIndex = index + 1;
-        if (nextIndex < session.chunks.length) {
-          // Prefetch the next chunk while current chunk is being played.
-          void ensureChunkPrepared(nextIndex, generation).catch(() => {});
-        }
-
-        setSpeakStatus({
-          state: session.paused ? 'paused' : 'speaking',
-          text: prepared.text,
-          index: index + 1,
-          total: session.chunks.length,
-          message: session.paused ? 'Paused' : '',
-          wordIndex: session.paused ? undefined : Math.max(0, Math.round(Number(prepared.wordOffset || 0))),
-        });
-        await playAudioFile(prepared);
-        if (session.paused) return;
-      }
-
-      if (
-        generation !== session.playbackGeneration ||
-        session.stopRequested ||
-        activeSpeakSession?.id !== sessionId
-      ) return;
-      setSpeakStatus({
-        state: 'done',
-        text: '',
-        index: session.chunks.length,
-        total: session.chunks.length,
-        message: 'Done',
-      });
-      setTimeout(() => {
-        if (
-          generation === session.playbackGeneration &&
-          !session.stopRequested &&
-          activeSpeakSession?.id === sessionId
-        ) {
-          stopSpeakSession({ resetStatus: true, cleanupWindow: true });
-        }
-      }, 520);
-    } catch (error: any) {
-      if (
-        generation !== session.playbackGeneration ||
-        session.stopRequested ||
-        activeSpeakSession?.id !== sessionId
-      ) return;
-      setSpeakStatus({
-        state: 'error',
-        text: '',
-        index: 0,
-        total: session.chunks.length,
-        message: error?.message || 'Speech playback failed.',
-      });
-    }
-    })();
-  };
-
-  session.restartFrom = (index: number) => {
-    if (session.stopRequested || activeSpeakSession?.id !== sessionId) return;
-    runPlayback(index);
-  };
-
-  runPlayback(0);
-
-  return true;
-}
-
-function normalizeTranscriptText(input: string): string {
-  return String(input || '')
-    .replace(/\s+/g, ' ')
-    .replace(/^[`"'“”]+|[`"'“”]+$/g, '')
-    .trim();
-}
-
-function extractRefinedTranscriptOnly(raw: string): string {
-  let cleaned = String(raw || '').trim();
-  if (!cleaned) return '';
-
-  // Remove markdown fences if the model wraps the answer.
-  cleaned = cleaned.replace(/^```[a-zA-Z]*\s*/g, '').replace(/```$/g, '').trim();
-
-  // Strip common prefixes the model may add despite instructions.
-  cleaned = cleaned.replace(/^(?:final(?:\s+answer)?|output|corrected(?:\s+sentence)?|rewritten)\s*:\s*/i, '').trim();
-  cleaned = cleaned.replace(/^[-*]\s+/g, '').trim();
-
-  // Keep only the first non-empty line if the model returns extras.
-  const firstLine = cleaned
-    .split('\n')
-    .map((line) => line.trim())
-    .find(Boolean);
-  cleaned = firstLine || cleaned;
-
-  // If wrapped in quotes, unwrap once.
-  cleaned = cleaned.replace(/^["'`]+|["'`]+$/g, '').trim();
-
-  return normalizeTranscriptText(cleaned);
-}
-
-function applyWhisperHeuristicCorrection(input: string): string {
-  const normalized = normalizeTranscriptText(input);
-  if (!normalized) return '';
-
-  const correctionPattern = /\b(?:no|i mean|actually|sorry|correction|rather|make that)\b\s+(.+)$/i;
-  const match = correctionPattern.exec(normalized);
-  if (!match || typeof match.index !== 'number') return normalized;
-
-  const correction = normalizeTranscriptText(match[1]);
-  if (!correction) return normalized;
-
-  const before = normalizeTranscriptText(
-    normalized
-      .slice(0, match.index)
-      .replace(/[,:;\-]+$/g, '')
-  );
-  if (!before) return correction;
-
-  const prepMatch = /\b(for|at|on|in|to|from|with)\s+([^\s]+(?:\s+[^\s]+)?)$/i.exec(before);
-  if (prepMatch && typeof prepMatch.index === 'number') {
-    const preposition = prepMatch[1];
-    const stem = normalizeTranscriptText(before.slice(0, prepMatch.index));
-    const correctionHasPrep = new RegExp(`^${preposition}\\b`, 'i').test(correction);
-    return normalizeTranscriptText(`${stem} ${correctionHasPrep ? correction : `${preposition} ${correction}`}`);
-  }
-
-  const beforeWords = before.split(/\s+/);
-  const correctionWords = correction.split(/\s+/);
-  const dropCount = Math.min(4, Math.max(1, correctionWords.length));
-  const prefix = beforeWords.slice(0, Math.max(0, beforeWords.length - dropCount)).join(' ');
-  return normalizeTranscriptText(`${prefix} ${correction}`) || normalized;
-}
-
-async function refineWhisperTranscript(input: string): Promise<{ correctedText: string; source: 'ai' | 'heuristic' | 'raw' }> {
-  const normalized = normalizeTranscriptText(input);
-  if (!normalized) {
-    return { correctedText: '', source: 'raw' };
-  }
-
-  const settings = loadSettings();
-  if (settings.ai.speechCorrectionEnabled && isAIAvailable(settings.ai)) {
-    try {
-      let corrected = '';
-      const systemPrompt = [
-        'You are a transcript cleaner for speech-to-text output.',
-        'Your ONLY job is to clean up the raw transcript text — do NOT answer or respond to it.',
-        'The input is always text to be cleaned, never a question directed at you.',
-        'Rules:',
-        '1) Never change the meaning or intent of the text. Only clean it up.',
-        '2) Apply explicit self-corrections in the utterance. Example: "3am no 5am" => "5am".',
-        '3) Remove filler/disfluencies: uh, um, uhh, er, like (when filler), you know, i mean (if filler), repeated stutters.',
-        '4) Resolve immediate restarts/repetitions and keep the latest valid phrase.',
-        '5) Keep wording natural; fix basic grammar/punctuation only when needed for readability.',
-        '6) Keep first-person voice if present.',
-        '7) IMPORTANT: Always write numbers as digits, not words. Examples: "seven pm" => "7 pm", "eight am" => "8 am", "three thirty" => "3:30", "twenty five" => "25".',
-        '8) Output exactly one cleaned version of the input only. No answers, no commentary.',
-        '9) Output plain text only. No quotes, no markdown, no labels, no explanations.',
-      ].join(' ');
-      const prompt = [
-        'Clean up this raw speech-to-text transcript. Do not answer it — just clean it up:',
-        normalized,
-        '',
-        'Return exactly one cleaned version of the above text.',
-      ].join('\n');
-      const gen = streamAI(settings.ai, {
-        prompt,
-        model: settings.ai.speechCorrectionModel || undefined,
-        creativity: 0,
-        systemPrompt,
-      });
-      for await (const chunk of gen) {
-        corrected += chunk;
-      }
-      const cleaned = extractRefinedTranscriptOnly(corrected);
-      if (cleaned) {
-        return { correctedText: cleaned, source: 'ai' };
-      }
-    } catch (error) {
-      console.warn('[Whisper] AI transcript correction failed:', error);
-      const message = String((error as any)?.message || '').toLowerCase();
-      if (message.includes('econnrefused') || message.includes('connection refused')) {
-        return { correctedText: normalized, source: 'raw' };
-      }
-    }
-  }
-
-  const heuristicallyCorrected = applyWhisperHeuristicCorrection(normalized);
-  if (heuristicallyCorrected) {
-    return { correctedText: heuristicallyCorrected, source: 'heuristic' };
-  }
-
-  return { correctedText: normalized, source: 'raw' };
-}
-
-// ─── Settings Window ────────────────────────────────────────────────
-
-type SettingsTabId = 'general' | 'ai' | 'extensions' | 'advanced';
-type SettingsPanelTarget = {
-  extensionName?: string;
-  commandName?: string;
-};
-type SettingsNavigationPayload = {
-  tab: SettingsTabId;
-  target?: SettingsPanelTarget;
-};
 
 function normalizeSettingsTabId(input: any): SettingsTabId | undefined {
   if (input === 'general' || input === 'ai' || input === 'extensions' || input === 'advanced') return input;
@@ -13485,12 +9460,7 @@ function registerCommandHotkeys(hotkeys: Record<string, string>): void {
     if (!shortcut) continue;
 
     const normalizedShortcut = normalizeAccelerator(shortcut);
-    if (commandId === 'system-supercmd-whisper-speak-toggle' && isFnOnlyShortcut(normalizedShortcut)) {
-      continue;
-    }
-    if (commandId === 'system-supercmd-whisper-speak-toggle' && isStandaloneModifierShortcut(normalizedShortcut)) {
-      continue;
-    }
+
     if (isFnShortcut(normalizedShortcut)) {
       continue;
     }
@@ -13507,7 +9477,6 @@ function registerCommandHotkeys(hotkeys: Record<string, string>): void {
     } catch {}
   }
 
-  syncFnSpeakToggleWatcher(hotkeys);
   syncFnCommandWatchers(hotkeys);
   syncHyperKeyMonitor();
 }
@@ -13915,40 +9884,8 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle('set-launcher-mode', (_event: any, mode: LauncherMode) => {
-    if (mode !== 'default' && mode !== 'onboarding' && mode !== 'whisper' && mode !== 'speak' && mode !== 'prompt') return;
+    if (mode !== 'default' && mode !== 'onboarding' && mode !== 'prompt') return;
     setLauncherMode(mode);
-  });
-
-  ipcMain.on('set-detached-overlay-state', (_event: any, payload?: { overlay?: 'whisper' | 'speak'; visible?: boolean }) => {
-    const overlay = payload?.overlay;
-    const visible = Boolean(payload?.visible);
-    if (overlay === 'whisper') {
-      whisperOverlayVisible = visible;
-      if (visible) {
-        lastWhisperShownAt = Date.now();
-      } else {
-        whisperHoldRequestSeq += 1;
-        whisperSuperCmdTextTargetWindow = null;
-        stopWhisperHoldWatcher();
-        // Stop native audio capturer when the whisper overlay closes
-        // to release the microphone
-        if (audioCapturerProcess && !audioCapturerProcess.killed) {
-          audioCapturerProcess.stdin?.write(JSON.stringify({ command: 'stopEngine' }) + '\n');
-        }
-        audioCapturerRecording = false;
-      }
-      return;
-    }
-    if (overlay === 'speak') {
-      speakOverlayVisible = visible;
-    }
-  });
-
-  ipcMain.on('whisper-ignore-mouse-events', (_event: any, payload?: { ignore?: boolean }) => {
-    const ignore = Boolean(payload?.ignore);
-    if (whisperChildWindow && !whisperChildWindow.isDestroyed()) {
-      whisperChildWindow.setIgnoreMouseEvents(ignore, { forward: true });
-    }
   });
 
   ipcMain.handle('get-last-frontmost-app', () => {
@@ -13957,171 +9894,6 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('restore-last-frontmost-app', async () => {
     return await activateLastFrontmostApp();
-  });
-
-  ipcMain.handle('speak-stop', () => {
-    stopSpeakSession({ resetStatus: true, cleanupWindow: true });
-    return true;
-  });
-
-  ipcMain.handle('speak-toggle-pause', () => {
-    if (!activeSpeakSession) {
-      return { ok: false, status: speakStatusSnapshot };
-    }
-    const shouldPause = speakStatusSnapshot.state !== 'paused';
-    const ok = setSpeakSessionPaused(shouldPause);
-    return { ok, status: speakStatusSnapshot };
-  });
-
-  ipcMain.handle('speak-previous-paragraph', () => {
-    return jumpSpeakParagraph(-1);
-  });
-
-  ipcMain.handle('speak-next-paragraph', () => {
-    return jumpSpeakParagraph(1);
-  });
-
-  ipcMain.handle('speak-get-status', () => {
-    return speakStatusSnapshot;
-  });
-
-  ipcMain.handle('speak-get-options', () => {
-    return { ...speakRuntimeOptions };
-  });
-
-  ipcMain.handle(
-    'speak-update-options',
-    (_event: any, patch: { voice?: string; rate?: string; restartCurrent?: boolean }) => {
-      if (patch?.voice && typeof patch.voice === 'string') {
-        speakRuntimeOptions.voice = patch.voice.trim() || speakRuntimeOptions.voice;
-      }
-      if (patch?.rate !== undefined) {
-        speakRuntimeOptions.rate = parseSpeakRateInput(patch.rate);
-      }
-
-      if (patch?.restartCurrent && activeSpeakSession) {
-        const currentIdx = Math.max(0, activeSpeakSession.currentIndex || 0);
-        activeSpeakSession.restartFrom(currentIdx);
-      }
-
-      return { ...speakRuntimeOptions };
-    }
-  );
-
-  ipcMain.handle(
-    'speak-preview-voice',
-    async (_event: any, payload?: { voice: string; text?: string; rate?: string; provider?: 'edge-tts' | 'elevenlabs'; model?: string }) => {
-      const settings = loadSettings();
-      if (isAIDisabledInSettings(settings)) return false;
-      if (settings.ai?.readEnabled === false) return false;
-      const provider = payload?.provider || (String(settings.ai?.textToSpeechModel || '').startsWith('elevenlabs-') ? 'elevenlabs' : 'edge-tts');
-      const voice = String(payload?.voice || speakRuntimeOptions.voice || 'en-US-EricNeural').trim();
-      const rate = parseSpeakRateInput(payload?.rate ?? speakRuntimeOptions.rate);
-      const sampleTextRaw = String(payload?.text || 'Hi, this is my voice in SuperCmd.');
-      const sampleText = sampleTextRaw.trim().slice(0, 240) || 'Hi, this is my voice in SuperCmd.';
-
-      const fs = require('fs');
-      const os = require('os');
-      const pathMod = require('path');
-      const { spawn } = require('child_process');
-      const localSpeakBackend = provider === 'edge-tts' ? resolveLocalSpeakBackend() : null;
-
-      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'supercmd-voice-preview-'));
-      const previewExtension = provider === 'elevenlabs' || localSpeakBackend === 'edge-tts' ? 'mp3' : 'aiff';
-      const audioPath = pathMod.join(tmpDir, `preview.${previewExtension}`);
-
-      try {
-        if (provider === 'elevenlabs') {
-          const apiKey = getElevenLabsApiKey(settings);
-          if (!apiKey) return false;
-          const configuredModel = String(payload?.model || settings.ai?.textToSpeechModel || 'elevenlabs-multilingual-v2');
-          const ttsConfig = resolveElevenLabsTtsConfig(configuredModel);
-          const voiceId = voice || ttsConfig.voiceId;
-          await synthesizeElevenLabsToFile({
-            text: sampleText,
-            apiKey,
-            modelId: ttsConfig.modelId,
-            voiceId,
-            audioPath,
-            timeoutMs: 45000,
-          });
-        } else {
-          if (!localSpeakBackend) return false;
-          const langMatch = /^([a-z]{2}-[A-Z]{2})-/.exec(voice);
-          const lang = langMatch?.[1] || String(settings.ai?.speechLanguage || 'en-US');
-          if (localSpeakBackend === 'edge-tts') {
-            await synthesizeWithEdgeTts({
-              text: sampleText,
-              audioPath,
-              voice,
-              lang,
-              rate,
-              saveSubtitles: false,
-              timeoutMs: 45000,
-            });
-          } else {
-            await synthesizeWithSystemSay({
-              text: sampleText,
-              audioPath,
-              lang,
-              rate,
-            });
-          }
-        }
-
-        const playErr = await new Promise<Error | null>((resolve) => {
-          const proc = spawn('/usr/bin/afplay', [audioPath], { stdio: ['ignore', 'ignore', 'pipe'] });
-          let stderr = '';
-          proc.stderr.on('data', (chunk: Buffer | string) => { stderr += String(chunk || ''); });
-          proc.on('error', (err: Error) => resolve(err));
-          proc.on('close', (code: number | null) => {
-            if (code && code !== 0) {
-              resolve(new Error(stderr.trim() || `afplay exited with ${code}`));
-              return;
-            }
-            resolve(null);
-          });
-        });
-
-        if (playErr) throw playErr;
-        return true;
-      } finally {
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-      }
-    }
-  );
-
-  ipcMain.handle('edge-tts-list-voices', async () => {
-    const now = Date.now();
-    if (edgeVoiceCatalogCache && edgeVoiceCatalogCache.expiresAt > now) {
-      return edgeVoiceCatalogCache.voices;
-    }
-
-    try {
-      const voices = await fetchEdgeTtsVoiceCatalog(12000);
-      if (voices.length > 0) {
-        edgeVoiceCatalogCache = {
-          voices,
-          expiresAt: now + (1000 * 60 * 60 * 12),
-        };
-      }
-      return voices;
-    } catch (error) {
-      if (edgeVoiceCatalogCache?.voices?.length) {
-        return edgeVoiceCatalogCache.voices;
-      }
-      console.warn('[Speak] Failed to fetch Edge voice catalog:', error);
-      return [];
-    }
-  });
-
-  ipcMain.handle('elevenlabs-list-voices', async () => {
-    const settings = loadSettings();
-    const apiKey = getElevenLabsApiKey(settings);
-    if (!apiKey) {
-      return { voices: [], error: 'ElevenLabs API key not configured.' };
-    }
-    return fetchElevenLabsVoices(apiKey);
   });
 
   // ─── IPC: Settings ──────────────────────────────────────────────
@@ -14549,28 +10321,17 @@ app.whenReady().then(async () => {
       // When onboarding completes: hide dock, then start services that were
       // deferred to avoid triggering permission dialogs during onboarding.
       if (patch.hasSeenOnboarding === true) {
-        fnWatcherOnboardingOverride = false;
         enterOverlayMacActivationPolicy();
         startClipboardMonitor();
         setClipboardAppBlacklist(loadSettings().clipboardAppBlacklist);
-        syncFnSpeakToggleWatcher(loadSettings().commandHotkeys);
+
         syncFnCommandWatchers(loadSettings().commandHotkeys);
       }
       const aiEnabledPatch = patch.ai?.enabled;
       if (aiEnabledPatch === false) {
-        stopSpeakSession({ resetStatus: true, cleanupWindow: true });
-        mainWindow?.webContents.send('whisper-stop-listening');
-        mainWindow?.webContents.send('whisper-stop-and-close');
-        whisperHoldRequestSeq += 1;
-        stopWhisperHoldWatcher();
-        stopFnSpeakToggleWatcher();
-        if (nativeSpeechProcess) {
-          try { nativeSpeechProcess.kill('SIGTERM'); } catch {}
-          nativeSpeechProcess = null;
-          nativeSpeechStdoutBuffer = '';
-        }
+
       } else if (aiEnabledPatch === true) {
-        syncFnSpeakToggleWatcher(loadSettings().commandHotkeys);
+
         syncFnCommandWatchers(loadSettings().commandHotkeys);
       }
       if (patch.hyperKey !== undefined) {
@@ -14754,14 +10515,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('onboarding-request-permission', async (_event: any, target: OnboardingPermissionTarget) => {
     return await requestOnboardingPermissionAccess(target);
   });
-  ipcMain.handle('whisper-ensure-microphone-access', async (_event: any, options?: { prompt?: boolean }) => {
-    const prompt = options?.prompt !== false;
-    return await ensureMicrophoneAccess(prompt);
-  });
-  ipcMain.handle('whisper-ensure-speech-recognition-access', async (_event: any, options?: { prompt?: boolean }) => {
-    const prompt = options?.prompt !== false;
-    return await ensureSpeechRecognitionAccess(prompt);
-  });
 
   // ─── IPC: Check permission statuses without triggering dialogs ──────
   // Used by the onboarding screen to refresh green/amber badges when the user
@@ -14776,31 +10529,12 @@ app.whenReady().then(async () => {
       try {
         statuses['input-monitoring'] = await checkInputMonitoringAccess();
       } catch {}
-      try {
-        const micResult = await ensureMicrophoneAccess(false);
-        statuses['microphone'] = Boolean(micResult.granted);
-      } catch {}
-      try {
-        const srResult = await ensureSpeechRecognitionAccess(false);
-        statuses['speech-recognition'] = Boolean(srResult.granted);
-      } catch {}
+
     }
     return statuses;
   });
 
   // ─── IPC: Fn watcher override for onboarding dictation test (step 4) ─
-  ipcMain.handle('enable-fn-watcher-for-onboarding', () => {
-    fnWatcherOnboardingOverride = true;
-    syncFnSpeakToggleWatcher(loadSettings().commandHotkeys);
-    syncFnCommandWatchers(loadSettings().commandHotkeys);
-  });
-  ipcMain.handle('disable-fn-watcher-for-onboarding', () => {
-    fnWatcherOnboardingOverride = false;
-    if (!loadSettings().hasSeenOnboarding) {
-      stopFnSpeakToggleWatcher();
-      stopAllFnCommandWatchers();
-    }
-  });
 
   ipcMain.handle(
     'update-command-hotkey',
@@ -14827,16 +10561,12 @@ app.whenReady().then(async () => {
           }
         }
 
-        const isFnSpeakToggle =
-          commandId === 'system-supercmd-whisper-speak-toggle' &&
-          (isFnOnlyShortcut(normalizedHotkey) || isStandaloneModifierShortcut(normalizedHotkey));
         const isFnHotkey = isFnShortcut(normalizedHotkey);
         const isHyperHotkey = isHyperShortcut(normalizedHotkey);
 
         // Standalone modifier shortcuts (Option, Command, etc.) only work for
-        // the whisper speak-toggle (hold-to-talk) command, since they require
         // the native CGEventTap watcher. Reject them for other commands.
-        if (isStandaloneModifierShortcut(normalizedHotkey) && !isFnSpeakToggle) {
+        if (isStandaloneModifierShortcut(normalizedHotkey)) {
           // Attempt to restore old mapping if the new one failed.
           if (oldHotkey) {
             const normalizedOldHotkey = normalizeAccelerator(oldHotkey);
@@ -14855,13 +10585,9 @@ app.whenReady().then(async () => {
         // Register the new one
         try {
           let success = false;
-          if (isFnSpeakToggle) {
-            // Standalone modifier or Fn-only shortcuts are handled by the
-            // native CGEventTap speak-toggle watcher, not Electron globalShortcut.
-            success = true;
-          } else if (isFnHotkey) {
+          if (isFnHotkey) {
             const fnConfig = parseHoldShortcutConfig(normalizedHotkey);
-            const binaryPath = ensureWhisperHoldWatcherBinary();
+            const binaryPath = ensureHotkeyHoldMonitorBinary();
             success = Boolean(fnConfig && fnConfig.fn && binaryPath);
           } else if (isHyperHotkey) {
             // Hyper shortcuts are handled by the native hyper key monitor,
@@ -14889,7 +10615,7 @@ app.whenReady().then(async () => {
             return { success: false, error: 'unavailable' as const };
           }
           hotkeys[commandId] = hotkey;
-          if (!isFnSpeakToggle && !isFnHotkey && !isHyperHotkey) {
+          if (!isFnHotkey && !isHyperHotkey) {
             registeredHotkeys.set(normalizedHotkey, commandId);
           }
         } catch {
@@ -14900,7 +10626,7 @@ app.whenReady().then(async () => {
       }
 
       saveSettings({ commandHotkeys: hotkeys });
-      syncFnSpeakToggleWatcher(hotkeys);
+
       syncFnCommandWatchers(hotkeys);
       return { success: true as const };
     }
@@ -17011,7 +12737,7 @@ if let tiff = image?.tiffRepresentation {
   setInterval(() => void refreshBrowserProfiles('periodic', 60_000), 5 * 60 * 1000);
 
   ipcMain.handle('get-selected-text', async () => {
-    const fresh = String(await getSelectedTextForSpeak() || '');
+    const fresh = String(await getSelectedTextForPrompt() || '');
     if (fresh.trim().length > 0) {
       rememberSelectionSnapshot(fresh);
       return fresh;
@@ -17022,7 +12748,7 @@ if let tiff = image?.tiffRepresentation {
   });
 
   ipcMain.handle('get-selected-text-strict', async () => {
-    const fresh = String(await getSelectedTextForSpeak() || '');
+    const fresh = String(await getSelectedTextForPrompt() || '');
     if (fresh.trim().length > 0) {
       rememberSelectionSnapshot(fresh);
       return fresh;
@@ -17470,7 +13196,6 @@ if let tiff = image?.tiffRepresentation {
   ipcMain.handle('type-text-live', async (_event: any, text: string) => {
     const nextText = String(text || '');
     if (!nextText) return false;
-    console.log('[Whisper][type-live]', JSON.stringify(nextText));
     await activateLastFrontmostApp();
     await new Promise((resolve) => setTimeout(resolve, 70));
     let typed = await typeTextDirectly(nextText);
@@ -17480,30 +13205,7 @@ if let tiff = image?.tiffRepresentation {
     return typed;
   });
 
-  ipcMain.handle('whisper-type-text-live', async (_event: any, text: string) => {
-    const nextText = String(text || '');
-    if (!nextText) {
-      return { typed: false, fallbackClipboard: false };
-    }
-
-    if (await insertTextIntoWhisperSuperCmdTarget(nextText)) {
-      return { typed: true, fallbackClipboard: false };
-    }
-
-    await activateLastFrontmostApp();
-    await new Promise((resolve) => setTimeout(resolve, 70));
-    let typed = await pasteTextToActiveApp(nextText);
-    if (!typed) {
-      typed = await typeTextDirectly(nextText);
-    }
-    if (typed) {
-      return { typed: true, fallbackClipboard: false };
-    }
-    return { typed: false, fallbackClipboard: false };
-  });
-
   ipcMain.handle('replace-live-text', async (_event: any, previousText: string, nextText: string) => {
-    console.log('[Whisper][replace-live]', JSON.stringify(previousText), '=>', JSON.stringify(nextText));
     await activateLastFrontmostApp();
     await new Promise((resolve) => setTimeout(resolve, 70));
     let replaced = await replaceTextDirectly(previousText, nextText);
@@ -17535,17 +13237,6 @@ if let tiff = image?.tiffRepresentation {
     }
 
     return applied;
-  });
-
-  ipcMain.on('whisper-debug-log', (_event: any, payload: { tag?: string; message?: string; data?: any }) => {
-    const tag = String(payload?.tag || 'event');
-    const message = String(payload?.message || '');
-    const data = payload?.data;
-    if (typeof data === 'undefined') {
-      console.log(`[Whisper][${tag}] ${message}`);
-      return;
-    }
-    console.log(`[Whisper][${tag}] ${message}`, data);
   });
 
   // ─── IPC: AI ───────────────────────────────────────────────────
@@ -17664,443 +13355,11 @@ if let tiff = image?.tiffRepresentation {
     return isAIAvailable(s.ai);
   });
 
-  ipcMain.handle('whisper-refine-transcript', async (_event: any, transcript: string) => {
-    const s = loadSettings();
-    if (isAIDisabledInSettings(s) || s.ai?.llmEnabled === false || s.ai?.whisperEnabled === false) {
-      return { correctedText: String(transcript || ''), source: 'raw' as const };
-    }
-    return await refineWhisperTranscript(transcript);
-  });
-
-  ipcMain.handle('whispercpp-model-status', async () => {
-    return getWhisperCppModelStatus();
-  });
-
-  ipcMain.handle('whispercpp-download-model', async () => {
-    await ensureWhisperCppModelDownloaded();
-    return getWhisperCppModelStatus();
-  });
-
-  ipcMain.handle('parakeet-model-status', async () => {
-    return getParakeetModelStatus();
-  });
-
-  ipcMain.handle('parakeet-download-model', async () => {
-    await ensureParakeetModelDownloaded();
-    return getParakeetModelStatus();
-  });
-
-  ipcMain.handle('parakeet-warmup', async () => {
-    const status = getParakeetModelStatus();
-    if (status.state !== 'downloaded') {
-      return { ready: false, error: 'Models not downloaded' };
-    }
-    if (parakeetServerReady && parakeetServerProcess && !parakeetServerProcess.killed) {
-      return { ready: true };
-    }
-    try {
-      await ensureParakeetServer();
-      return { ready: true };
-    } catch (err: any) {
-      return { ready: false, error: err?.message || 'Warmup failed' };
-    }
-  });
-
-  ipcMain.handle('qwen3-model-status', async () => {
-    return getQwen3ModelStatus();
-  });
-
-  ipcMain.handle('qwen3-download-model', async () => {
-    await ensureQwen3ModelDownloaded();
-    return getQwen3ModelStatus();
-  });
-
-  ipcMain.handle('qwen3-warmup', async () => {
-    const status = getQwen3ModelStatus();
-    if (status.state !== 'downloaded') {
-      return { ready: false, error: 'Models not downloaded' };
-    }
-    if (qwen3ServerReady && qwen3ServerProcess && !qwen3ServerProcess.killed) {
-      return { ready: true };
-    }
-    try {
-      await ensureQwen3Server();
-      return { ready: true };
-    } catch (err: any) {
-      return { ready: false, error: err?.message || 'Warmup failed' };
-    }
-  });
-
-  ipcMain.handle('whispercpp-warmup', async () => {
-    const status = getWhisperCppModelStatus();
-    if (status.state !== 'downloaded') {
-      return { ready: false, error: 'Model not downloaded' };
-    }
-    if (whisperCppServerReady && whisperCppServerProcess && !whisperCppServerProcess.killed) {
-      return { ready: true };
-    }
-    try {
-      await ensureWhisperCppServer();
-      return { ready: true };
-    } catch (err: any) {
-      return { ready: false, error: err?.message || 'Warmup failed' };
-    }
-  });
-
   // ─── IPC: Native Audio Capturer (bypasses renderer getUserMedia) ──
 
-  ipcMain.handle('audio-capturer-warmup', async () => {
-    try {
-      await warmAudioCapturer();
-      return { ready: true };
-    } catch (err: any) {
-      return { ready: false, error: err?.message || 'Warmup failed' };
-    }
-  });
-
-  ipcMain.handle('audio-capturer-start', async () => {
-    try {
-      await startNativeAudioCapture();
-      return { recording: true };
-    } catch (err: any) {
-      return { recording: false, error: err?.message || 'Start failed' };
-    }
-  });
-
-  ipcMain.handle('audio-capturer-stop', async () => {
-    try {
-      const result = await stopNativeAudioCapture();
-      return result;
-    } catch (err: any) {
-      return { file: null, duration: 0, error: err?.message || 'Stop failed' };
-    }
-  });
-
-  ipcMain.handle('audio-capturer-snapshot', async () => {
-    try {
-      const result = await takeNativeAudioSnapshot();
-      return result;
-    } catch (err: any) {
-      return { file: null, duration: 0, error: err?.message || 'Snapshot failed' };
-    }
-  });
-
-  ipcMain.handle('audio-capturer-meter', async () => {
-    return audioCapturerMeter;
-  });
-
-  ipcMain.handle('audio-capturer-status', async () => {
-    return {
-      engineReady: audioCapturerReady,
-      recording: audioCapturerRecording,
-      processAlive: !!(audioCapturerProcess && !audioCapturerProcess.killed),
-    };
-  });
-
   // Transcribe a native-captured audio file (by path, not buffer)
-  ipcMain.handle(
-    'whisper-transcribe-file',
-    async (_event: any, audioPath: string, options?: { language?: string }) => {
-      const s = loadSettings();
-      if (isAIDisabledInSettings(s)) {
-        throw new Error('AI is disabled. Enable AI in Settings -> AI to use Whisper.');
-      }
-      if (s.ai?.whisperEnabled === false) {
-        throw new Error('SuperCmd Whisper is disabled in Settings -> AI.');
-      }
-
-      if (!fs.existsSync(audioPath)) {
-        throw new Error(`Audio file not found: ${audioPath}`);
-      }
-
-      const audioBuffer = fs.readFileSync(audioPath);
-
-      // Reuse the existing whisper-transcribe logic by reading the file into a buffer
-      const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
-      const language = normalizeWhisperLanguageCode(rawLang);
-
-      let provider: 'parakeet' | 'qwen3' | 'whispercpp' | 'openai' | 'elevenlabs' | 'mistral' = 'whispercpp';
-      let model = `ggml-${WHISPERCPP_MODEL_NAME}`;
-      const sttModel = s.ai.speechToTextModel || '';
-      if (sttModel === 'parakeet') {
-        provider = 'parakeet';
-        model = 'parakeet-tdt-0.6b-v3';
-      } else if (sttModel === 'qwen3') {
-        provider = 'qwen3';
-        model = 'qwen3-asr-0.6b';
-      } else if (!sttModel || sttModel === 'default' || sttModel === 'whispercpp') {
-        provider = 'whispercpp';
-        model = `ggml-${WHISPERCPP_MODEL_NAME}`;
-      } else if (sttModel === 'native') {
-        return '';
-      } else if (sttModel.startsWith('openai-')) {
-        provider = 'openai';
-        model = sttModel.slice('openai-'.length);
-      } else if (sttModel.startsWith('elevenlabs-')) {
-        provider = 'elevenlabs';
-        model = resolveElevenLabsSttModel(sttModel);
-      } else if (sttModel.startsWith('mistral-')) {
-        provider = 'mistral';
-        model = sttModel.slice('mistral-'.length) || 'voxtral-mini-latest';
-      } else if (sttModel) {
-        model = sttModel;
-      }
-
-      if (provider === 'openai' && !s.ai.openaiApiKey) {
-        throw new Error('OpenAI API key not configured.');
-      }
-      const elevenLabsApiKey = getElevenLabsApiKey(s);
-      if (provider === 'elevenlabs' && !elevenLabsApiKey) {
-        throw new Error('ElevenLabs API key not configured.');
-      }
-      const mistralApiKey = getMistralApiKey(s);
-      if (provider === 'mistral' && !mistralApiKey) {
-        throw new Error('Mistral API key not configured.');
-      }
-
-      // For whisper.cpp, use the file-path directly via the persistent server
-      // to avoid reading the file into a Node buffer just to write it again.
-      if (provider === 'whispercpp') {
-        const status = getWhisperCppModelStatus();
-        if (status.state === 'downloading') {
-          throw new Error('Whisper model still downloading.');
-        }
-        if (status.state !== 'downloaded') {
-          throw new Error('Whisper model not downloaded.');
-        }
-        await ensureWhisperCppServer();
-        const result = await sendWhisperCppRequest({
-          command: 'transcribe',
-          file: audioPath,
-          language,
-        });
-        // Clean up the temp file after transcription
-        try { fs.unlinkSync(audioPath); } catch {}
-        try { fs.rmdirSync(path.dirname(audioPath), { recursive: true }); } catch {}
-        return result.text || '';
-      }
-
-      // For cloud providers, use buffer-based transcription
-      const mimeType = 'audio/wav';
-      const text = provider === 'parakeet'
-        ? await transcribeAudioWithParakeet({ audioBuffer, language, mimeType })
-        : provider === 'qwen3'
-          ? await transcribeAudioWithQwen3({ audioBuffer, language, mimeType })
-          : provider === 'elevenlabs'
-            ? await transcribeAudioWithElevenLabs({ audioBuffer, apiKey: elevenLabsApiKey, model, language, mimeType })
-            : provider === 'mistral'
-              ? await transcribeAudioWithMistralVoxtral({ audioBuffer, apiKey: mistralApiKey, model, language, mimeType })
-              : await transcribeAudio({ audioBuffer, apiKey: s.ai.openaiApiKey, model, language, mimeType });
-
-      // Clean up the temp file
-      try { fs.unlinkSync(audioPath); } catch {}
-      try { fs.rmdirSync(path.dirname(audioPath), { recursive: true }); } catch {}
-
-      return text;
-    }
-  );
-  ipcMain.handle(
-    'whisper-transcribe',
-    async (_event: any, audioArrayBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }) => {
-      const s = loadSettings();
-      if (isAIDisabledInSettings(s)) {
-        throw new Error('AI is disabled. Enable AI in Settings -> AI to use Whisper.');
-      }
-      if (s.ai?.whisperEnabled === false) {
-        throw new Error('SuperCmd Whisper is disabled in Settings -> AI.');
-      }
-
-      // Parse speechToTextModel to a concrete provider/model pair.
-      let provider: 'parakeet' | 'qwen3' | 'whispercpp' | 'openai' | 'elevenlabs' | 'mistral' = 'whispercpp';
-      let model = `ggml-${WHISPERCPP_MODEL_NAME}`;
-      const sttModel = s.ai.speechToTextModel || '';
-      if (sttModel === 'parakeet') {
-        provider = 'parakeet';
-        model = 'parakeet-tdt-0.6b-v3';
-      } else if (sttModel === 'qwen3') {
-        provider = 'qwen3';
-        model = 'qwen3-asr-0.6b';
-      } else if (!sttModel || sttModel === 'default' || sttModel === 'whispercpp') {
-        provider = 'whispercpp';
-        model = `ggml-${WHISPERCPP_MODEL_NAME}`;
-      } else if (sttModel === 'native') {
-        // Renderer should not call cloud transcription in native mode.
-        // Return empty transcript instead of surfacing an IPC error.
-        return '';
-      } else if (sttModel.startsWith('openai-')) {
-        provider = 'openai';
-        model = sttModel.slice('openai-'.length);
-      } else if (sttModel.startsWith('elevenlabs-')) {
-        provider = 'elevenlabs';
-        model = resolveElevenLabsSttModel(sttModel);
-      } else if (sttModel.startsWith('mistral-')) {
-        provider = 'mistral';
-        model = sttModel.slice('mistral-'.length) || 'voxtral-mini-latest';
-      } else if (sttModel) {
-        model = sttModel;
-      }
-
-      if (provider === 'openai' && !s.ai.openaiApiKey) {
-        throw new Error('OpenAI API key not configured. Go to Settings -> AI to set it up.');
-      }
-      const elevenLabsApiKey = getElevenLabsApiKey(s);
-      if (provider === 'elevenlabs' && !elevenLabsApiKey) {
-        throw new Error('ElevenLabs API key not configured. Set it in Settings -> AI (or ELEVENLABS_API_KEY env var).');
-      }
-      const mistralApiKey = getMistralApiKey(s);
-      if (provider === 'mistral' && !mistralApiKey) {
-        throw new Error('Mistral API key not configured. Set it in Settings -> AI (or MISTRAL_API_KEY env var).');
-      }
-
-      const rawLang = options?.language || s.ai.speechLanguage || 'en-US';
-      const language = normalizeWhisperLanguageCode(rawLang);
-      const mimeType = options?.mimeType;
-
-      const audioBuffer = Buffer.from(audioArrayBuffer);
-
-      console.log(`[Whisper] Transcribing ${audioBuffer.length} bytes, provider=${provider}, model=${model}, lang=${language}, mime=${mimeType || 'unknown'}`);
-
-      const text = provider === 'parakeet'
-        ? await transcribeAudioWithParakeet({
-            audioBuffer,
-            language,
-            mimeType,
-          })
-        : provider === 'qwen3'
-          ? await transcribeAudioWithQwen3({
-              audioBuffer,
-              language,
-              mimeType,
-            })
-          : provider === 'whispercpp'
-            ? await transcribeAudioWithWhisperCpp({
-              audioBuffer,
-              language,
-              mimeType,
-              initialPrompt: s.ai.speechVocabulary,
-            })
-          : provider === 'elevenlabs'
-            ? await transcribeAudioWithElevenLabs({
-                audioBuffer,
-                apiKey: elevenLabsApiKey,
-                model,
-                language,
-                mimeType,
-              })
-            : provider === 'mistral'
-              ? await transcribeAudioWithMistralVoxtral({
-                  audioBuffer,
-                  apiKey: mistralApiKey,
-                  model,
-                  language,
-                  mimeType,
-                })
-            : await transcribeAudio({
-                audioBuffer,
-                apiKey: s.ai.openaiApiKey,
-                model,
-                language,
-                mimeType,
-              });
-
-      console.log(`[Whisper] Transcription result: "${text.slice(0, 100)}${text.length > 100 ? '...' : ''}"`);
-      return text;
-    }
-  );
 
   // ─── IPC: Native Speech Recognition (macOS SFSpeechRecognizer) ──
-
-  ipcMain.handle(
-    'whisper-start-native',
-    async (
-      event: any,
-      language?: string,
-      options?: {
-        singleUtterance?: boolean;
-      }
-    ) => {
-    if (isAIDisabledInSettings()) {
-      throw new Error('AI is disabled. Enable AI in Settings -> AI to use Whisper.');
-    }
-    // Kill any existing process
-    if (nativeSpeechProcess) {
-      try { nativeSpeechProcess.kill('SIGTERM'); } catch {}
-      nativeSpeechProcess = null;
-      nativeSpeechStdoutBuffer = '';
-    }
-
-    const lang = language || loadSettings().ai.speechLanguage || 'en-US';
-    const binaryPath = getNativeBinaryPath('speech-recognizer');
-    const fs = require('fs');
-
-    // Compile on demand (same pattern as color-picker / snippet-expander)
-    if (!fs.existsSync(binaryPath)) {
-      try {
-        const { execFileSync } = require('child_process');
-        const sourcePath = path.join(app.getAppPath(), 'src', 'native', 'speech-recognizer.swift');
-        execFileSync('swiftc', [
-          '-O', '-o', binaryPath, sourcePath,
-          '-framework', 'Speech',
-          '-framework', 'AVFoundation',
-        ]);
-        console.log('[Whisper][native] Compiled speech-recognizer binary');
-      } catch (error) {
-        console.error('[Whisper][native] Compile failed:', error);
-        throw new Error('Failed to compile native speech recognizer. Ensure Xcode Command Line Tools are installed.');
-      }
-    }
-
-    const { spawn } = require('child_process');
-    const args: string[] = [lang];
-    if (options?.singleUtterance) {
-      args.push('--single-utterance');
-    }
-
-    nativeSpeechProcess = spawn(binaryPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    nativeSpeechStdoutBuffer = '';
-    console.log(`[Whisper][native] Started speech-recognizer (lang=${lang})`);
-
-    nativeSpeechProcess.stdout.on('data', (chunk: Buffer | string) => {
-      nativeSpeechStdoutBuffer += chunk.toString();
-      const lines = nativeSpeechStdoutBuffer.split('\n');
-      nativeSpeechStdoutBuffer = lines.pop() || '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const payload = JSON.parse(trimmed);
-          // Forward to renderer
-          event.sender.send('whisper-native-chunk', payload);
-        } catch {
-          // ignore malformed lines
-        }
-      }
-    });
-
-    nativeSpeechProcess.stderr.on('data', (chunk: Buffer | string) => {
-      const text = chunk.toString().trim();
-      if (text) console.warn('[Whisper][native]', text);
-    });
-
-    nativeSpeechProcess.on('exit', (code: number | null) => {
-      console.log(`[Whisper][native] Process exited (code=${code})`);
-      nativeSpeechProcess = null;
-      nativeSpeechStdoutBuffer = '';
-      // Notify renderer that native recognition ended
-      try { event.sender.send('whisper-native-chunk', { ended: true }); } catch {}
-    });
-    }
-  );
-
-  ipcMain.handle('whisper-stop-native', async () => {
-    if (nativeSpeechProcess) {
-      try { nativeSpeechProcess.kill('SIGTERM'); } catch {}
-      nativeSpeechProcess = null;
-      nativeSpeechStdoutBuffer = '';
-    }
-  });
 
   // ─── IPC: Ollama Model Management ──────────────────────────────
 
@@ -19260,7 +14519,7 @@ if let tiff = image?.tiffRepresentation {
     if (focusedWindow === mainWindow) return;
     if (suppressBlurHide) return;
     if (oauthBlurHideSuppressionDepth > 0) return;
-    if (isWhisperOverlayActiveOrOpening()) return;
+
     if (launcherMode !== 'default') return;
     hideWindow();
   });
@@ -19344,15 +14603,10 @@ app.on('will-quit', () => {
     windowManagerWorker = null;
   }
   clearAppUpdaterAutoCheckTimer();
-  stopWhisperHoldWatcher();
-  stopFnSpeakToggleWatcher();
+
   stopAllFnCommandWatchers();
   stopHyperKeyMonitor();
-  stopSpeakSession({ resetStatus: false });
-  killWhisperCppServer();
-  killParakeetServer();
-  killQwen3Server();
-  killAudioCapturer();
+
   stopClipboardMonitor();
   stopSnippetExpander();
   stopEmojiTriggerMonitor();

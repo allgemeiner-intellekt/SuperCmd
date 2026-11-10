@@ -34,10 +34,6 @@ const swift = [
     '-framework CoreGraphics -framework AppKit -framework Carbon'],
   ['dist/native/hyper-key-monitor', 'src/native/hyper-key-monitor.swift',
     '-framework CoreGraphics -framework AppKit -framework Carbon'],
-  ['dist/native/speech-recognizer', 'src/native/speech-recognizer.swift',
-    '-framework Speech -framework AVFoundation'],
-  ['dist/native/microphone-access', 'src/native/microphone-access.swift',
-    '-framework AVFoundation'],
   ['dist/native/input-monitoring-request', 'src/native/input-monitoring-request.swift',
     '-framework CoreGraphics'],
   ['dist/native/window-adjust', 'src/native/window-adjust.swift',
@@ -46,8 +42,6 @@ const swift = [
     '-framework EventKit'],
   ['dist/native/settings-coordinator', 'src/native/settings-coordinator.swift',
     '-framework Foundation'],
-  ['dist/native/audio-capturer', 'src/native/audio-capturer.swift',
-    '-framework AVFoundation -framework Foundation'],
 ];
 
 for (const [out, src, frameworks] of swift) {
@@ -63,6 +57,4 @@ run(
   `cp build/Release/native_helpers.node ../../../dist/native/native_helpers.node`
 );
 
-run('node scripts/build-whispercpp.mjs');
-run('node scripts/build-parakeet.mjs');
 run('node scripts/build-soulver-calculator.mjs');

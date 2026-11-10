@@ -38,7 +38,6 @@ that it exists in the installed app.
 | Settings and credentials | `src/main/settings-store.ts`, `src/main/safe-storage.ts`, `src/main/extension-preferences-store.ts` | `settings/`, `utils/extension-preferences.ts` |
 | Quick links and scripts | `src/main/quicklink-store.ts`, `src/main/script-command-runner.ts` | `QuickLinkManager.tsx`, launcher execution hooks |
 | AI chat and cursor prompts | `src/main/ai-provider.ts`, `src/main/ai-chat-store.ts`, streaming IPC | `hooks/useAiChat.ts`, `hooks/useCursorPrompt.ts`, corresponding `views/` |
-| Speech and native process lifetimes | `src/main/main.ts`, `src/native/` | `hooks/useWhisperManager.ts`, `hooks/useSpeakManager.ts` |
 | Crash recovery | `src/main/renderer-recovery.ts` and window wiring | `main.tsx`, `utils/reload-budget.ts` |
 
 Renderer paths in the last column are under `src/renderer/src/`.
@@ -109,5 +108,19 @@ OpenAI text requests use `/v1/responses` with streaming events, full local messa
 history as `input`, optional `instructions`, and `store: false`. GPT-5/6 reasoning
 models omit temperature. Custom continues using Chat Completions. Removed
 provider model identifiers fail before any transport request. Ask AI, inline
-prompts, speech correction and default extension requests share this router.
+prompts and default extension requests share this router.
 Supermemory retrieval and writes are retired; chat history stays in ai-chat-store.
+
+## Retired built-in voice features
+
+The owner requested removal of Whisper and Read in PR #10. Their command entries,
+settings, recording/transcription/correction/playback IPC, renderer overlays,
+onboarding steps, and dedicated native transcribers/audio helpers are removed.
+The native hotkey-hold monitor remains because ordinary Fn shortcuts use it.
+HyperKey and input-monitoring onboarding remain supported.
+
+`src/shared/retired-commands.ts` identifies retired command IDs. Settings omit
+those hotkeys at load/save, command discovery filters stale disk entries, and
+execution rejects old IDs. Old model downloads, inactive settings and vault
+secrets are retained on disk; the app does not access the retired speech services.
+Selection capture and text replacement remain shared by Inline AI Prompt.

@@ -21,7 +21,7 @@
 
 Open-source launcher for macOS: **Raycast + Wispr Flow + Speechify + Memory + AI** in one app.
 
-SuperCmd gives you Raycast-style extension workflows, hold-to-speak dictation, natural text-to-speech, AI actions backed by configurable providers and memory, notes, canvas, clipboard history, snippet expansion, and window tiling — all from a single keyboard shortcut.
+SuperCmd gives you Raycast-style extension workflows, AI actions backed by OpenAI or Custom providers, notes, canvas, clipboard history, snippet expansion, and window tiling — all from a single keyboard shortcut.
 
 <p align="center">
   <a href="https://buymeacoffee.com/shobhit99"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="48"></a>
@@ -45,7 +45,6 @@ SuperCmd is an Electron + React launcher that focuses on Raycast extension compa
 - **Raycast backup import** — import encrypted `.rayconfig` backups with settings, hotkeys, extensions, scripts, quicklinks, snippets, notes, and extension prefs
 - **AI cursor prompt** — inline AI suggestions at your cursor position across any app
 - **AI chat** — chat with configurable providers (OpenAI / Anthropic / Ollama / Gemini / OpenAI-compatible)
-- **Hold-to-speak dictation** — Wispr Flow-style voice input; hold hotkey, speak, release to type (Whisper, Parakeet, or native macOS STT)
 - **Read aloud** — Speechify-style TTS for selected text (Edge TTS or ElevenLabs)
 - **Clipboard history** — full clipboard manager with Cmd+1–9 quick-paste shortcuts
 - **Snippet expansion** — create and trigger text snippets with keyboard shortcuts
@@ -104,16 +103,12 @@ dist/            Build output
 | `calendar-events` | EventKit calendar integration |
 | `color-picker` | System color picker |
 | `get-selected-text` | Extract selected text from frontmost app |
-| `hotkey-hold-monitor` | Hold-to-speak hotkey detection |
+| `hotkey-hold-monitor` | Fn shortcut detection |
 | `hyper-key-monitor` | Caps Lock → Hyper Key remapping |
 | `input-monitoring-request` | Request Input Monitoring permission |
-| `microphone-access` | Microphone permission checks |
 | `snippet-expander` | Keyboard-triggered snippet expansion |
-| `speech-recognizer` | macOS native speech recognition (STT) |
-| `whisper-transcriber` | OpenAI Whisper STT integration |
 | `window-adjust` | Window tiling and resizing (ApplicationServices) |
 | `fast-paste-addon/` | Node.js native module for fast clipboard paste (Cmd+1–9) |
-| `parakeet-transcriber/` | Swift package — on-device STT via swift-transformers |
 
 ## Install
 
@@ -141,7 +136,7 @@ SuperCmd needs the following permissions. The app will prompt you on first use, 
 | Permission | Why | Required for |
 |---|---|---|
 | **Accessibility** | Window management, keystroke injection | Window tiling, snippet expansion |
-| **Input Monitoring** | Global hotkey detection (hold-to-speak, launcher shortcut, hyper key) | Core launcher functionality |
+| **Input Monitoring** | Global hotkey detection (Fn shortcuts, launcher shortcut, HyperKey) | Core launcher functionality |
 | **Microphone** | Voice dictation (speech-to-text) | Optional — only if using voice features |
 | **Automation (AppleScript)** | Selected text capture, system automation | Extension actions |
 | **Calendars** | Reading today's events | Optional — only if using schedule feature |

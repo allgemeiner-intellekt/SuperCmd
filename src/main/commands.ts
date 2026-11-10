@@ -1,9 +1,10 @@
+import { isRetiredSystemCommand } from '../shared/retired-commands';
 /**
  * Command Registry
- * 
+ *
  * Dynamically discovers ALL installed applications and ALL System Settings
  * panes by scanning the filesystem directly. No hardcoded lists.
- * 
+ *
  * Icons are extracted using:
  * 1. sips for .icns files (fast, works for .app bundles)
  * 2. NSWorkspace via osascript/JXA for bundles without .icns (settings panes)
@@ -137,7 +138,7 @@ function loadCommandsDiskCache(): CommandInfo[] | null {
     const raw = fs.readFileSync(getCommandsDiskCachePath(), 'utf-8');
     const parsed = JSON.parse(raw) as { version: number; commands: CommandInfo[] };
     if (parsed?.version !== COMMANDS_DISK_CACHE_VERSION) return null;
-    const cmds = parsed.commands;
+    const cmds = parsed.commands.filter(cmd => !isRetiredSystemCommand(cmd.id));
     // Re-attach icons from the per-app icon disk cache (fast file reads).
     for (const cmd of cmds) {
       if (cmd.path) {
@@ -1322,18 +1323,7 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       keywords: ['ai', 'model', 'provider', 'openai', 'anthropic', 'gemini', 'ollama', 'supercmd'],
       category: 'system',
     },
-    {
-      id: 'system-supercmd-whisper',
-      title: 'SuperCmd Whisper',
-      keywords: ['whisper', 'speech', 'voice', 'dictation', 'transcribe', 'overlay', 'supercmd'],
-      category: 'system',
-    },
-    {
-      id: 'system-supercmd-speak',
-      title: 'SuperCmd Read',
-      keywords: ['speak', 'tts', 'read', 'selected text', 'edge-tts', 'speechify', 'jarvis', 'supercmd'],
-      category: 'system',
-    },
+
     {
       id: 'system-menu-item-search',
       title: 'Search Menu Items',
@@ -2013,9 +2003,8 @@ export function getAvailableCommands(): Promise<CommandInfo[]> {
   return commandCatalog.read();
 }
 
-
-
 export async function executeCommand(id: string): Promise<boolean> {
+  if (isRetiredSystemCommand(id)) return false;
   if (id === 'system-quit-launcher') {
     app.quit();
     return true;

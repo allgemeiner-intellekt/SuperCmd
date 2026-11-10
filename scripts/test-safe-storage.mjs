@@ -116,6 +116,7 @@ function fixture(t, { contents, encrypted = false } = {}) {
       if (specifier === 'path') return path;
       if (specifier === 'crypto') return crypto;
       if (specifier === 'child_process') return { spawnSync() { assert.fail('unexpected native invocation'); } };
+      if (specifier === '../shared/retired-commands') return load('../shared/retired-commands');
       if (specifier === '../shared/ai-models') return load('../shared/ai-models');
       if (specifier === './safe-storage' || specifier === './native-binary') return load(specifier.slice(2));
       assert.fail(`unexpected dependency: ${specifier}`);
@@ -388,3 +389,24 @@ for (const [provider, model, expectedProvider, expectedModel] of [
     }
   });
 }
+
+test('voice retirement releases legacy shortcuts without touching unrelated mappings or secrets', t => {
+  const h = fixture(t);
+  fs.writeFileSync(h.settingsPath, JSON.stringify({
+    commandHotkeys: { 'system-supercmd-whisper': 'Command+Shift+W', 'system-supercmd-whisper-speak-toggle': 'Fn', 'system-supercmd-speak': 'Command+Shift+R', 'system-add-to-memory': 'Command+M', 'extension-private': 'Hyper+P', 'system-cursor-prompt': 'Hyper+K' },
+    ai: { openaiApiKey: 'test-openai', elevenlabsApiKey: 'legacy-voice', mistralApiKey: 'legacy-mistral', openaiCompatibleApiKey: 'test-custom' },
+  }));
+  for (let i = 0; i < 2; i++) {
+    const settings = h.settings.loadSettings();
+    for (const id of ['system-supercmd-whisper', 'system-supercmd-whisper-speak-toggle', 'system-supercmd-speak', 'system-add-to-memory']) assert.equal(id in settings.commandHotkeys, false);
+    assert.equal(settings.commandHotkeys['extension-private'], 'Hyper+P');
+    assert.equal(settings.commandHotkeys['system-cursor-prompt'], 'Hyper+K');
+    assert.equal(settings.ai.openaiApiKey, 'test-openai');
+    assert.equal(settings.ai.elevenlabsApiKey, 'legacy-voice');
+    assert.equal(settings.ai.mistralApiKey, 'legacy-mistral');
+    assert.equal(settings.ai.openaiCompatibleApiKey, 'test-custom');
+    const updated = h.settings.saveSettings({ commandHotkeys: { ...settings.commandHotkeys, 'system-supercmd-whisper-stop': 'Fn' } });
+    assert.equal('system-supercmd-whisper-stop' in updated.commandHotkeys, false);
+    h.restart();
+  }
+});

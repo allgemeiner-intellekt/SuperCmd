@@ -9,7 +9,7 @@ export const DEFAULT_OPENAI_MODEL = OPENAI_MODELS[0].id;
 export function isRemovedAIModel(model: string): boolean {
   return /^(anthropic-|claude-|gemini-|ollama-|lm-studio-)/i.test(model);
 }
-export function normalizeAIModelSettings<T extends { provider: string; defaultModel: string; speechCorrectionModel: string }>(ai: T): T {
+export function normalizeAIModelSettings<T extends { provider: string; defaultModel: string }>(ai: T): T {
   const next = { ...ai };
   if (next.provider !== 'openai' && next.provider !== 'openai-compatible') {
     next.provider = 'openai';
@@ -18,6 +18,5 @@ export function normalizeAIModelSettings<T extends { provider: string; defaultMo
   if (next.provider === 'openai' && (!next.defaultModel || next.defaultModel === 'auto' || isRemovedAIModel(next.defaultModel))) {
     next.defaultModel = DEFAULT_OPENAI_MODEL;
   }
-  if (isRemovedAIModel(next.speechCorrectionModel)) next.speechCorrectionModel = '';
   return next;
 }

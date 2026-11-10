@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 const source = (file) => fs.readFileSync(new URL(`../src/main/${file}`, import.meta.url), 'utf8');
+const retiredCommands = await importTs(fileURLToPath(new URL('../src/shared/retired-commands.ts', import.meta.url)));
 const catalog = await importTs(fileURLToPath(new URL('../src/main/command-catalog-cache.ts', import.meta.url)));
 const commandsCode = (await transform(source('commands.ts'), { loader: 'ts', format: 'cjs' })).code;
 const quickLinksCode = (await transform(source('quicklink-store.ts'), { loader: 'ts', format: 'cjs' })).code;
@@ -88,6 +89,7 @@ function harness({ disk, files = new Map() } = {}) {
     ] },
     './script-command-runner': { discoverScriptCommands: () => [] },
     './command-catalog-cache': catalog,
+    '../shared/retired-commands': retiredCommands,
   };
   const quickLinks = load(quickLinksCode, mocks);
   const commands = load(commandsCode, { ...mocks, './quicklink-store': quickLinks });
@@ -195,4 +197,16 @@ test('disk cold start is stale; invalidated discovery cannot write disk or notif
   const disk = JSON.parse(h.files.get(diskPath));
   assert.equal(disk.version, 1);
   assert.ok(disk.commands.every((command) => !('iconDataUrl' in command)), 'existing disk icon stripping is preserved');
+});
+
+test('retired voice and memory commands are absent from disk seed and fresh catalog', async () => {
+  const retired = ['system-supercmd-whisper', 'system-supercmd-whisper-speak-toggle', 'system-supercmd-speak', 'system-add-to-memory'];
+  const h = harness({ disk: { version: 1, commands: [...retired, 'retained'].map(id => ({ id, title: id, category: 'system' })) } });
+  const seeded = await h.invoke('get-commands');
+  assert.deepEqual(seeded.map(c => c.id), ['retained']);
+  await h.finishScan(0);
+  const fresh = await h.invoke('get-commands');
+  assert.ok(fresh.some(c => c.id === 'system-cursor-prompt'));
+  assert.ok(fresh.some(c => c.id === 'system-open-ai-settings'));
+  assert.ok(!fresh.some(c => retired.includes(c.id)));
 });

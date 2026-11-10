@@ -16,27 +16,23 @@ import HotkeyRecorder from './settings/HotkeyRecorder';
 import { useI18n } from './i18n';
 import supercmdLogo from '../../../supercmd.png';
 import onboardingIconVideo from '../../../assets/icon.mp4';
-import type { WhisperCppModelStatus, ParakeetModelStatus } from '../types/electron';
 
 interface OnboardingExtensionProps {
   initialShortcut: string;
   requireWorkingShortcut?: boolean;
-  dictationPracticeText: string;
-  onDictationPracticeTextChange: (value: string) => void;
+
   onboardingHotkeyPresses?: number;
   onComplete: () => void;
   onClose: () => void;
 }
 
-type PermissionTargetId = 'accessibility' | 'input-monitoring' | 'speech-recognition' | 'microphone' | 'home-folder';
+type PermissionTargetId = 'accessibility' | 'input-monitoring' | 'home-folder';
 
 const STEPS = [
   'Welcome',
   'Core Features',
   'Hotkey Setup',
   'Permissions',
-  'Dictation Mode',
-  'Read Mode',
   'Final Check',
 ];
 
@@ -44,8 +40,7 @@ function getFeatureCards(t: (key: string) => string) {
   return [
     { id: 'clipboard', title: 'Clipboard', description: 'Search and paste history instantly.', icon: Clipboard },
     { id: 'snippet', title: 'Snippet', description: 'Store reusable text with quick triggers.', icon: FileText },
-    { id: 'whisper', title: t('onboarding.voice.featureCards.whisper.title'), description: t('onboarding.voice.featureCards.whisper.description'), icon: Mic },
-    { id: 'read', title: t('onboarding.voice.featureCards.read.title'), description: t('onboarding.voice.featureCards.read.description'), icon: Volume2 },
+
     { id: 'global-ai-prompt', title: 'Global AI Prompt', description: 'Transform text from anywhere.', icon: Bot },
     { id: 'unit-conversion', title: 'Unit Conversion', description: 'Convert values directly in launcher.', icon: Calculator },
   ];
@@ -81,51 +76,16 @@ function getPermissionTargets(t: (key: string) => string): Array<{
   },
   {
     id: 'input-monitoring',
-    title: t('onboarding.voice.permissions.inputMonitoringTitle'),
-    description: t('onboarding.voice.permissions.inputMonitoringDescription'),
+    title: t('onboarding.setup.permissions.inputMonitoringTitle'),
+    description: t('onboarding.setup.permissions.inputMonitoringDescription'),
     url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent',
     icon: Keyboard,
     iconTone: 'text-amber-100',
     iconBg: 'bg-amber-500/22 border-amber-100/30',
   },
-  {
-    id: 'speech-recognition',
-    title: t('onboarding.voice.permissions.speechRecognitionTitle'),
-    description: t('onboarding.voice.permissions.speechRecognitionDescription'),
-    url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition',
-    icon: Volume2,
-    iconTone: 'text-emerald-100',
-    iconBg: 'bg-emerald-500/22 border-emerald-100/30',
-  },
-  {
-    id: 'microphone',
-    title: t('onboarding.voice.permissions.microphoneTitle'),
-    description: t('onboarding.voice.permissions.microphoneDescription'),
-    url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone',
-    icon: Mic,
-    iconTone: 'text-cyan-100',
-    iconBg: 'bg-cyan-500/22 border-cyan-100/30',
-  },
+
   ];
 }
-
-const SPEECH_LANGUAGE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'ar-EG', label: 'Arabic' },
-  { value: 'zh-CN', label: 'Chinese (Mandarin)' },
-  { value: 'en-US', label: 'English (US)' },
-  { value: 'en-GB', label: 'English (UK)' },
-  { value: 'fr-CA', label: 'French (Canada)' },
-  { value: 'fr-FR', label: 'French' },
-  { value: 'de-DE', label: 'German' },
-  { value: 'it-IT', label: 'Italian' },
-  { value: 'hi-IN', label: 'Hindi' },
-  { value: 'ja-JP', label: 'Japanese' },
-  { value: 'ko-KR', label: 'Korean' },
-  { value: 'pt-BR', label: 'Portuguese (Brazil)' },
-  { value: 'ru-RU', label: 'Russian' },
-  { value: 'es-MX', label: 'Spanish (Mexico)' },
-  { value: 'es-ES', label: 'Spanish (Spain)' },
-];
 
 function toHotkeyCaps(shortcut: string): string[] {
   const map: Record<string, string> = {
@@ -147,8 +107,7 @@ function toHotkeyCaps(shortcut: string): string[] {
 const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
   initialShortcut,
   requireWorkingShortcut = false,
-  dictationPracticeText,
-  onDictationPracticeTextChange,
+
   onboardingHotkeyPresses = 0,
   onComplete,
   onClose,
@@ -156,8 +115,7 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
   const { t } = useI18n();
   const featureCards = useMemo(() => getFeatureCards(t), [t]);
   const permissionTargets = useMemo(() => getPermissionTargets(t), [t]);
-  const dictationSample = t('onboarding.voice.dictation.sampleText');
-  const readSample = t('onboarding.voice.read.sampleText');
+
   const [step, setStep] = useState(0);
   const [shortcut, setShortcut] = useState(initialShortcut || 'Alt+Space');
   const [shortcutStatus, setShortcutStatus] = useState<'idle' | 'success' | 'error'>('idle');
@@ -167,15 +125,7 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
   const [permissionLoading, setPermissionLoading] = useState<Record<string, boolean>>({});
   const [permissionNotes, setPermissionNotes] = useState<Record<string, string>>({});
   const [openAtLogin, setOpenAtLogin] = useState(true);
-  const [whisperHoldKey, setWhisperHoldKey] = useState('Fn');
-  const [whisperKeyStatus, setWhisperKeyStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  const [isHoldKeyActive, setIsHoldKeyActive] = useState(false);
-  const [speechLanguage, setSpeechLanguage] = useState('en-US');
-  const [whisperCppModelStatus, setWhisperCppModelStatus] = useState<WhisperCppModelStatus | null>(null);
-  const [whisperCppModelBusy, setWhisperCppModelBusy] = useState(false);
-  const [parakeetModelStatus, setParakeetModelStatus] = useState<ParakeetModelStatus | null>(null);
-  const [parakeetModelBusy, setParakeetModelBusy] = useState(false);
-  const [sttProvider, setSttProvider] = useState<string>('whispercpp');
+
   const introVideoRef = useRef<HTMLVideoElement | null>(null);
   const openedPermissionsRef = useRef<Record<string, boolean>>({});
   const requestedPermissionsRef = useRef<Record<string, boolean>>({});
@@ -193,152 +143,7 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
     setHasValidShortcut(!requireWorkingShortcut);
   }, [requireWorkingShortcut]);
 
-  useEffect(() => {
-    window.electron.getSettings().then((settings) => {
-      const saved = String(settings.commandHotkeys?.['system-supercmd-whisper-speak-toggle'] ?? '').trim();
-      setWhisperHoldKey(saved);
-      const savedLanguage = String(settings.ai?.speechLanguage || 'en-US').trim();
-      setSpeechLanguage(savedLanguage || 'en-US');
-      const stt = String(settings.ai?.speechToTextModel || 'whispercpp').trim();
-      setSttProvider(!stt || stt === 'default' ? 'whispercpp' : stt);
-    }).catch(() => {});
-  }, []);
-
-  const handleSpeechLanguageChange = async (nextLanguage: string) => {
-    const targetLanguage = String(nextLanguage || 'en-US').trim() || 'en-US';
-    setSpeechLanguage(targetLanguage);
-    try {
-      const settings = await window.electron.getSettings();
-      await window.electron.saveSettings({
-        ai: {
-          ...(settings?.ai || {}),
-          speechLanguage: targetLanguage,
-        },
-      } as any);
-    } catch {}
-  };
-
-  const refreshWhisperCppModelStatus = async (): Promise<WhisperCppModelStatus | null> => {
-    try {
-      const status = await window.electron.whisperCppModelStatus();
-      setWhisperCppModelStatus(status);
-      return status;
-    } catch {
-      return null;
-    }
-  };
-
-  const startWhisperCppModelDownload = async () => {
-    if (whisperCppModelBusy || whisperCppModelStatus?.state === 'downloaded') return;
-    setWhisperCppModelBusy(true);
-    setWhisperCppModelStatus((current) => ({
-      state: 'downloading',
-      modelName: current?.modelName || 'base',
-      path: current?.path || '',
-      bytesDownloaded: current?.bytesDownloaded || 0,
-      totalBytes: current?.totalBytes ?? null,
-    }));
-    try {
-      const status = await window.electron.whisperCppDownloadModel();
-      setWhisperCppModelStatus(status);
-    } catch {
-      await refreshWhisperCppModelStatus();
-    } finally {
-      setWhisperCppModelBusy(false);
-    }
-  };
-
-  const refreshParakeetModelStatus = async (): Promise<ParakeetModelStatus | null> => {
-    try {
-      const status = await window.electron.parakeetModelStatus();
-      setParakeetModelStatus(status);
-      return status;
-    } catch {
-      return null;
-    }
-  };
-
-  const startParakeetModelDownload = async () => {
-    if (parakeetModelBusy || parakeetModelStatus?.state === 'downloaded') return;
-    setParakeetModelBusy(true);
-    setParakeetModelStatus((current) => ({
-      state: 'downloading',
-      modelName: current?.modelName || 'parakeet-tdt-0.6b-v3',
-      path: current?.path || '',
-      progress: current?.progress || 0,
-    }));
-    try {
-      const status = await window.electron.parakeetDownloadModel();
-      setParakeetModelStatus(status);
-    } catch {
-      await refreshParakeetModelStatus();
-    } finally {
-      setParakeetModelBusy(false);
-    }
-  };
-
   // Step 4: auto-download the appropriate model
-  useEffect(() => {
-    if (step !== 4) return;
-    let cancelled = false;
-    let timer: number | null = null;
-
-    const scheduleNextTick = (delay: number) => {
-      timer = window.setTimeout(() => { void tick(); }, delay);
-    };
-
-    const tick = async () => {
-      if (sttProvider === 'parakeet') {
-        const status = await refreshParakeetModelStatus();
-        if (cancelled) return;
-        if (
-          !parakeetModelBusy &&
-          status &&
-          (status.state === 'not-downloaded' || status.state === 'error')
-        ) {
-          void startParakeetModelDownload();
-          scheduleNextTick(400);
-          return;
-        }
-        if (parakeetModelBusy || status?.state === 'downloading') {
-          scheduleNextTick(500);
-        }
-      } else if (sttProvider === 'whispercpp') {
-        const status = await refreshWhisperCppModelStatus();
-        if (cancelled) return;
-        if (
-          !whisperCppModelBusy &&
-          status &&
-          (status.state === 'not-downloaded' || status.state === 'error')
-        ) {
-          void startWhisperCppModelDownload();
-          scheduleNextTick(400);
-          return;
-        }
-        if (whisperCppModelBusy || status?.state === 'downloading') {
-          scheduleNextTick(500);
-        }
-      }
-    };
-
-    void tick();
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [step, sttProvider, whisperCppModelBusy, parakeetModelBusy]);
-
-  const whisperCppDownloadPercent = useMemo(() => {
-    if (!whisperCppModelStatus || whisperCppModelStatus.state !== 'downloading' || !whisperCppModelStatus.totalBytes) {
-      return 0;
-    }
-    return Math.max(0, Math.min(100, Math.round((whisperCppModelStatus.bytesDownloaded / whisperCppModelStatus.totalBytes) * 100)));
-  }, [whisperCppModelStatus]);
-
-  const parakeetDownloadPercent = useMemo(() => {
-    if (!parakeetModelStatus || parakeetModelStatus.state !== 'downloading') return 0;
-    return Math.max(0, Math.min(100, Math.round((parakeetModelStatus.progress || 0) * 100)));
-  }, [parakeetModelStatus]);
 
   // Apply the default openAtLogin preference when the user first reaches the hotkey step.
   useEffect(() => {
@@ -391,55 +196,6 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
     window.addEventListener('focus', handleFocus);
     return () => window.removeEventListener('focus', handleFocus);
   }, [step]);
-
-  // Fix 6: Enable Fn watcher when user reaches the Dictation test step (step 4).
-  // By this point the user has passed the permissions step, so Input Monitoring
-  // should already be granted and it is safe to start the CGEventTap binary.
-  useEffect(() => {
-    if (step !== 4) return;
-    void window.electron.enableFnWatcherForOnboarding().catch(() => {});
-    return () => {
-      void window.electron.disableFnWatcherForOnboarding().catch(() => {});
-    };
-  }, [step]);
-
-  useEffect(() => {
-    if (step !== 4) {
-      setIsHoldKeyActive(false);
-      return;
-    }
-
-    const holdKey = String(whisperHoldKey || '').trim().toLowerCase();
-    const matchesHoldKey = (key: string) => {
-      if (!holdKey) return false;
-      if (holdKey === 'fn') {
-        return key === 'Fn' || key === 'Function';
-      }
-      return key.toLowerCase() === holdKey;
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (matchesHoldKey(event.key)) {
-        setIsHoldKeyActive(true);
-      }
-    };
-    const handleKeyUp = (event: KeyboardEvent) => {
-      if (matchesHoldKey(event.key)) {
-        setIsHoldKeyActive(false);
-      }
-    };
-    const handleWindowBlur = () => setIsHoldKeyActive(false);
-
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    window.addEventListener('blur', handleWindowBlur);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-      window.removeEventListener('blur', handleWindowBlur);
-      setIsHoldKeyActive(false);
-    };
-  }, [step, whisperHoldKey]);
 
   useEffect(() => {
     const video = introVideoRef.current;
@@ -504,7 +260,6 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
   }, [onboardingHotkeyPresses, step, onComplete]);
 
   // Clear any lingering text selection when the user navigates between steps.
-  // Without this, text selected on the Read Mode step (step 5) stays highlighted
   // when the user continues to the Final Check step.
   useEffect(() => {
     try {
@@ -513,17 +268,15 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
   }, [step]);
 
   const localizedSteps = useMemo(() => ([
-    t('onboarding.voice.steps.welcome'),
-    t('onboarding.voice.steps.coreFeatures'),
-    t('onboarding.voice.steps.hotkeySetup'),
-    t('onboarding.voice.steps.permissions'),
-    t('onboarding.voice.steps.dictationMode'),
-    t('onboarding.voice.steps.readMode'),
-    t('onboarding.voice.steps.finalCheck'),
+    t('onboarding.setup.steps.welcome'),
+    t('onboarding.setup.steps.coreFeatures'),
+    t('onboarding.setup.steps.hotkeySetup'),
+    t('onboarding.setup.steps.permissions'),
+
+    t('onboarding.setup.steps.finalCheck'),
   ]), [t]);
   const stepTitle = useMemo(() => localizedSteps[step] || localizedSteps[0], [localizedSteps, step]);
   const hotkeyCaps = useMemo(() => toHotkeyCaps(shortcut || 'Alt+Space'), [shortcut]);
-  const whisperKeyCaps = useMemo(() => toHotkeyCaps(whisperHoldKey), [whisperHoldKey]);
 
   const handleShortcutChange = async (nextShortcut: string) => {
     setShortcutStatus('idle');
@@ -542,20 +295,6 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
     setHasValidShortcut(false);
     setShortcutStatus('error');
     setTimeout(() => setShortcutStatus('idle'), 2200);
-  };
-
-  const handleWhisperKeyChange = async (nextShortcut: string) => {
-    const target = nextShortcut;
-    setWhisperKeyStatus('idle');
-    setWhisperHoldKey(target);
-    const result = await window.electron.updateCommandHotkey('system-supercmd-whisper-speak-toggle', target);
-    if (result.success) {
-      setWhisperKeyStatus('success');
-      setTimeout(() => setWhisperKeyStatus('idle'), 1600);
-      return;
-    }
-    setWhisperKeyStatus('error');
-    setTimeout(() => setWhisperKeyStatus('idle'), 2200);
   };
 
   const openPermissionTarget = async (id: PermissionTargetId, url: string) => {
@@ -578,84 +317,23 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
         setOpenedPermissions((prev) => ({ ...prev, [id]: true }));
       }
 
-      if (id === 'microphone') {
-        // For microphone, always trigger request from renderer capture path.
-        // This ensures the real media capture path is primed in macOS privacy.
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          stream.getTracks().forEach((track) => track.stop());
-          requested = true;
-          granted = true;
-          status = 'granted';
-          latestError = '';
-        } catch {}
-        if (!granted) {
-          try {
-            const verify = await window.electron.whisperEnsureMicrophoneAccess({ prompt: true });
-            granted = granted || Boolean(verify?.granted);
-            requested = requested || Boolean(verify?.requested);
-            status = String(verify?.status || status);
-            if (verify?.error) {
-              latestError = String(verify.error || '').trim();
-            }
-          } catch {}
-        }
-      }
-      if (id === 'speech-recognition' && !granted) {
-        try {
-          const verify = await window.electron.whisperEnsureSpeechRecognitionAccess({ prompt: true });
-          granted = Boolean(verify?.granted);
-          requested = requested || Boolean(verify?.requested);
-          status = String(verify?.speechStatus || status);
-          if (verify?.error) {
-            latestError = String(verify.error || '').trim();
-          }
-        } catch {}
-      }
-
       if (requested) {
         setRequestedPermissions((prev) => ({ ...prev, [id]: true }));
       }
       if (granted) {
         setOpenedPermissions((prev) => ({ ...prev, [id]: true }));
         setPermissionNotes((prev) => ({ ...prev, [id]: '' }));
-      } else if (id === 'microphone' || id === 'speech-recognition') {
-        const targetLabel = id === 'microphone'
-          ? t('onboarding.voice.permissions.microphoneTitle')
-          : t('onboarding.voice.permissions.speechRecognitionTitle');
-        if (status === 'denied' || status === 'restricted') {
-          setPermissionNotes((prev) => ({
-            ...prev,
-            [id]: t('onboarding.voice.permissionNotes.blocked', { target: targetLabel }),
-          }));
-        } else if (latestError) {
-          if (/failed to request microphone access/i.test(latestError)) {
-            setPermissionNotes((prev) => ({
-              ...prev,
-              [id]: t('onboarding.voice.permissionNotes.promptFailed'),
-            }));
-          } else {
-            setPermissionNotes((prev) => ({ ...prev, [id]: latestError }));
-          }
-        } else if (!requested || mode === 'manual' || status === 'not-determined') {
-          setPermissionNotes((prev) => ({
-            ...prev,
-            [id]: t('onboarding.voice.permissionNotes.notShown'),
-          }));
-        }
       } else if (id === 'home-folder') {
         if (latestError) {
           setPermissionNotes((prev) => ({ ...prev, [id]: latestError }));
         } else if (!requested || mode === 'manual' || status === 'not-determined') {
           setPermissionNotes((prev) => ({
             ...prev,
-            [id]: t('onboarding.voice.permissionNotes.homeFolder'),
+            [id]: t('onboarding.setup.permissionNotes.homeFolder'),
           }));
         }
       }
-      if (id === 'microphone') {
-        await new Promise((resolve) => setTimeout(resolve, 350));
-      }
+
       // Only open Privacy & Security for input-monitoring (requires manual "+" to add app).
       // All other permissions show a native dialog and don't need the system settings panel.
       if (id === 'input-monitoring') {
@@ -676,7 +354,7 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
           // The user must click "+" in System Settings and manually select SuperCmd.
           setPermissionNotes((prev) => ({
             ...prev,
-            [id]: t('onboarding.voice.permissionNotes.inputMonitoring'),
+            [id]: t('onboarding.setup.permissionNotes.inputMonitoring'),
           }));
         }
       }
@@ -756,17 +434,17 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
                     SuperCmd Setup
                   </span>
                   <h2 className="text-white text-[26px] lg:text-[30px] leading-[1.1] font-semibold max-w-xl">
-                    {t('onboarding.voice.setupTitle')}
+                    {t('onboarding.setup.setupTitle')}
                   </h2>
                   <p className="text-white/72 text-[15px] leading-relaxed max-w-xl">
-                    {t('onboarding.voice.setupDescription')}
+                    {t('onboarding.setup.setupDescription')}
                   </p>
                   <div className="rounded-2xl border border-white/[0.07] bg-black/24 px-4 py-3">
-                    <p className="text-white/88 text-sm mb-2">{t('onboarding.voice.summary.title')}</p>
+                    <p className="text-white/88 text-sm mb-2">{t('onboarding.setup.summary.title')}</p>
                     <div className="text-white/72 text-sm space-y-1">
-                      <p>{t('onboarding.voice.summary.hotkey')}</p>
-                      <p>{t('onboarding.voice.summary.permissions')}</p>
-                      <p>3. {t('onboarding.voice.setupSummary')}</p>
+                      <p>{t('onboarding.setup.summary.hotkey')}</p>
+                      <p>{t('onboarding.setup.summary.permissions')}</p>
+                      <p>3. {t('onboarding.setup.setupSummary')}</p>
                     </div>
                   </div>
                 </div>
@@ -802,18 +480,10 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
                           <Icon className="w-4 h-4 text-white/92" />
                         </div>
                         <p className="text-white/92 text-sm font-medium mb-1">
-                          {feature.id === 'whisper'
-                            ? t('onboarding.voice.featureCards.whisper.title')
-                            : feature.id === 'read'
-                              ? t('onboarding.voice.featureCards.read.title')
-                              : feature.title}
+                          {feature.title}
                         </p>
                         <p className="text-white/60 text-xs leading-relaxed">
-                          {feature.id === 'whisper'
-                            ? t('onboarding.voice.featureCards.whisper.description')
-                            : feature.id === 'read'
-                              ? t('onboarding.voice.featureCards.read.description')
-                              : feature.description}
+                          {feature.description}
                         </p>
                       </div>
                     );
@@ -945,12 +615,8 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
                             <div className="min-w-0">
                               <div className="flex items-center gap-2 flex-wrap mb-1">
                               <p className="text-white/96 text-sm font-semibold">
-                                {target.id === 'microphone'
-                                  ? t('onboarding.voice.permissions.microphoneTitle')
-                                  : target.id === 'speech-recognition'
-                                    ? t('onboarding.voice.permissions.speechRecognitionTitle')
-                                    : target.id === 'input-monitoring'
-                                      ? t('onboarding.voice.permissions.inputMonitoringTitle')
+                                {target.id === 'input-monitoring'
+                                      ? t('onboarding.setup.permissions.inputMonitoringTitle')
                                       : target.title}
                               </p>
                                 {isDone ? (
@@ -969,12 +635,8 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
                                 )}
                               </div>
                               <p className="text-white/68 text-xs leading-relaxed">
-                                {target.id === 'microphone'
-                                  ? t('onboarding.voice.permissions.microphoneDescription')
-                                  : target.id === 'speech-recognition'
-                                    ? t('onboarding.voice.permissions.speechRecognitionDescription')
-                                    : target.id === 'input-monitoring'
-                                      ? t('onboarding.voice.permissions.inputMonitoringDescription')
+                                {target.id === 'input-monitoring'
+                                      ? t('onboarding.setup.permissions.inputMonitoringDescription')
                                       : target.description}
                               </p>
                             </div>
@@ -1016,271 +678,12 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
           )}
 
           {step === 4 && (
-            <div className="max-w-5xl mx-auto min-h-full flex flex-col justify-center">
-              <div className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-6 w-full items-start">
-                <div className="flex flex-col gap-3 lg:pt-3">
-                  <div className="w-8 h-8 rounded-lg border border-cyan-200/25 bg-cyan-500/15 flex items-center justify-center">
-                    <Mic className="w-4 h-4 text-cyan-100" />
-                  </div>
-                  <h3 className="text-white text-[26px] leading-[1.05] font-semibold">{t('onboarding.voice.dictation.title')}</h3>
-                  <div>
-                    <p className="text-white/58 text-[9px] uppercase tracking-[0.08em] mb-1">{t('onboarding.voice.dictation.howToTest')}</p>
-                    <p className="text-white/72 text-[11px] leading-relaxed">{t('onboarding.voice.dictation.howToTestHint')}</p>
-                  </div>
-                  <div className="mt-2 flex items-center gap-3 flex-wrap">
-                    <HotkeyRecorder value={whisperHoldKey} onChange={handleWhisperKeyChange} large active={isHoldKeyActive} />
-                    {whisperKeyStatus === 'success' ? <span className="text-xs text-emerald-300">{t('onboarding.voice.dictation.holdKeyUpdated')}</span> : null}
-                    {whisperKeyStatus === 'error' ? <span className="text-xs text-rose-300">{t('settings.ai.hotkeyUnavailable')}</span> : null}
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-white/82 text-xs">{t('onboarding.voice.dictation.language')}</p>
-                    <select
-                      value={speechLanguage}
-                      onChange={(e) => { void handleSpeechLanguageChange(e.target.value); }}
-                      className="w-full max-w-[200px] bg-white/[0.06] border border-white/[0.10] rounded-md px-2 py-1.5 text-xs text-white/92 focus:outline-none focus:border-cyan-300/70"
-                    >
-                      {SPEECH_LANGUAGE_OPTIONS.map((item) => (
-                        <option key={item.value} value={item.value}>{item.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="mt-2 rounded-[28px] border border-white/[0.08] bg-white/[0.05] p-4">
-                    {sttProvider === 'parakeet' ? (
-                      <>
-                        <p className="text-white/88 text-xs font-medium mb-1.5">{t('onboarding.voice.dictation.models.parakeet.title')}</p>
-                        {parakeetModelStatus?.state === 'downloaded' ? (
-                          <p className="text-emerald-200 text-[11px] leading-relaxed">
-                            {t('onboarding.voice.dictation.models.parakeet.ready')}
-                          </p>
-                        ) : parakeetModelStatus?.state === 'downloading' ? (
-                          <div className="space-y-2.5">
-                            <div className="space-y-1">
-                              <p className="text-white/90 text-[11px] font-medium leading-relaxed">
-                                {t('onboarding.voice.dictation.models.parakeet.downloadingLead')}
-                              </p>
-                              <p className="text-white/62 text-[11px] leading-relaxed">
-                                {t('onboarding.voice.dictation.models.parakeet.downloading')}
-                                {parakeetDownloadPercent > 0 ? ` (${parakeetDownloadPercent}%)` : '...'}
-                              </p>
-                            </div>
-                            <div
-                              className="h-2.5 rounded-full bg-black/25 overflow-hidden ring-1 ring-inset ring-white/[0.06]"
-                              role="progressbar"
-                              aria-valuemin={0}
-                              aria-valuemax={100}
-                              aria-valuenow={parakeetDownloadPercent > 0 ? parakeetDownloadPercent : undefined}
-                              aria-label="Parakeet model download progress"
-                            >
-                              <div
-                                className={parakeetDownloadPercent > 0
-                                  ? 'h-full bg-cyan-300/80 transition-[width] duration-300'
-                                  : 'h-full w-[34%] bg-cyan-300/70 animate-pulse'
-                                }
-                                style={parakeetDownloadPercent > 0
-                                  ? { width: `${Math.max(6, parakeetDownloadPercent)}%` }
-                                  : undefined
-                                }
-                              />
-                            </div>
-                          </div>
-                        ) : parakeetModelStatus?.state === 'error' ? (
-                          <p className="text-rose-200 text-[11px] leading-relaxed">
-                            {parakeetModelStatus.error || t('onboarding.voice.dictation.models.downloadFailed')}
-                          </p>
-                        ) : (
-                          <p className="text-white/72 text-[11px] leading-relaxed">
-                            {t('onboarding.voice.dictation.models.parakeet.notDownloaded')}
-                          </p>
-                        )}
-                        <div className="mt-3 flex items-center gap-2 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => { void startParakeetModelDownload(); }}
-                            disabled={parakeetModelBusy || parakeetModelStatus?.state === 'downloading' || parakeetModelStatus?.state === 'downloaded'}
-                            className="inline-flex min-h-[32px] items-center justify-center rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors border border-white/[0.12] bg-white/[0.10] text-white/90 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {parakeetModelStatus?.state === 'downloaded'
-                              ? t('onboarding.voice.dictation.models.actions.downloaded')
-                              : parakeetModelStatus?.state === 'downloading'
-                                ? t('onboarding.voice.dictation.models.actions.downloading')
-                                : t('onboarding.voice.dictation.models.actions.download')}
-                          </button>
-                        </div>
-                      </>
-                    ) : sttProvider === 'whispercpp' ? (
-                      <>
-                        <p className="text-white/88 text-xs font-medium mb-1.5">{t('onboarding.voice.dictation.models.whispercpp.title')}</p>
-                        {whisperCppModelStatus?.state === 'downloaded' ? (
-                          <p className="text-emerald-200 text-[11px] leading-relaxed">
-                            {t('onboarding.voice.dictation.models.whispercpp.ready')}
-                          </p>
-                        ) : whisperCppModelStatus?.state === 'downloading' ? (
-                          <div className="space-y-2.5">
-                            <div className="space-y-1">
-                              <p className="text-white/90 text-[11px] font-medium leading-relaxed">
-                                {t('onboarding.voice.dictation.models.whispercpp.downloadingLead')}
-                              </p>
-                              <p className="text-white/62 text-[11px] leading-relaxed">
-                                {t('onboarding.voice.dictation.models.whispercpp.downloading')}
-                                {whisperCppModelStatus.totalBytes ? ` (${whisperCppDownloadPercent}%)` : '...'}
-                              </p>
-                            </div>
-                            <div
-                              className="h-2.5 rounded-full bg-black/25 overflow-hidden ring-1 ring-inset ring-white/[0.06]"
-                              role="progressbar"
-                              aria-valuemin={0}
-                              aria-valuemax={100}
-                              aria-valuenow={whisperCppModelStatus.totalBytes ? whisperCppDownloadPercent : undefined}
-                              aria-label="Whisper model download progress"
-                            >
-                              <div
-                                className={whisperCppModelStatus.totalBytes
-                                  ? 'h-full bg-cyan-300/80 transition-[width] duration-300'
-                                  : 'h-full w-[34%] bg-cyan-300/70 animate-pulse'
-                                }
-                                style={whisperCppModelStatus.totalBytes
-                                  ? { width: `${Math.max(6, whisperCppDownloadPercent)}%` }
-                                  : undefined
-                                }
-                              />
-                            </div>
-                          </div>
-                        ) : whisperCppModelStatus?.state === 'error' ? (
-                          <p className="text-rose-200 text-[11px] leading-relaxed">
-                            {whisperCppModelStatus.error || t('onboarding.voice.dictation.models.downloadFailed')}
-                          </p>
-                        ) : (
-                          <p className="text-white/72 text-[11px] leading-relaxed">
-                            {t('onboarding.voice.dictation.models.whispercpp.notDownloaded')}
-                          </p>
-                        )}
-                        <div className="mt-3 flex items-center gap-2 flex-wrap">
-                          <button
-                            type="button"
-                            onClick={() => { void startWhisperCppModelDownload(); }}
-                            disabled={whisperCppModelBusy || whisperCppModelStatus?.state === 'downloading' || whisperCppModelStatus?.state === 'downloaded'}
-                            className="inline-flex min-h-[32px] items-center justify-center rounded-md px-3 py-1.5 text-[11px] font-medium transition-colors border border-white/[0.12] bg-white/[0.10] text-white/90 disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            {whisperCppModelStatus?.state === 'downloaded'
-                              ? t('onboarding.voice.dictation.models.actions.downloaded')
-                              : whisperCppModelStatus?.state === 'downloading'
-                                ? t('onboarding.voice.dictation.models.actions.downloading')
-                                : t('onboarding.voice.dictation.models.actions.download')}
-                          </button>
-                        </div>
-                      </>
-                    ) : (
-                      <>
-                        <p className="text-white/88 text-xs font-medium mb-1.5">{t('onboarding.voice.dictation.models.cloud.title')}</p>
-                        <p className="text-emerald-200 text-[11px] leading-relaxed">
-                          {t('onboarding.voice.dictation.models.cloud.description')}
-                        </p>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <div className="self-start rounded-3xl border border-white/[0.09] p-3 bg-white/[0.04]">
-                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/[0.12] text-white/85 text-xs mb-2">
-                    <Mic className="w-3.5 h-3.5" />
-                    {t('onboarding.voice.dictation.sampleTitle')}
-                  </div>
-                  <div className="rounded-2xl border border-white/[0.07] bg-white/[0.06] p-2.5 mb-2.5">
-                    <p className="text-white/92 text-[15px] leading-relaxed">“{dictationSample}”</p>
-                  </div>
-                  <p className="text-white/70 text-sm mb-2">{t('onboarding.voice.dictation.sampleHint')}</p>
-                  <textarea
-                    value={dictationPracticeText}
-                    onChange={(e) => onDictationPracticeTextChange(e.target.value)}
-                    placeholder={t('onboarding.voice.dictation.placeholder')}
-                    className="w-full h-[250px] resize-none rounded-xl border border-cyan-300/55 bg-white/[0.05] px-4 py-3 text-white/90 placeholder:text-white/40 text-base leading-relaxed outline-none shadow-[0_0_0_3px_rgba(34,211,238,0.15)]"
-                  />
-                  <p className="mt-2 text-[11px] text-white/40 leading-relaxed">
-                    {t('onboarding.voice.dictation.footerHint')}
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {step === 5 && (
-            <div className="min-h-full flex items-center justify-center">
-              <div className="w-full max-w-3xl">
-                {/* Article card */}
-                <div
-                  className="rounded-2xl border border-white/[0.10] overflow-hidden"
-                  style={{
-                    background: 'var(--onboarding-read-card-bg)',
-                    boxShadow: 'var(--onboarding-read-card-shadow)',
-                  }}
-                >
-                  {/* Article header bar */}
-                  <div className="flex items-center gap-2 px-5 py-3 border-b border-white/[0.05] bg-white/[0.03]">
-                    <div className="flex gap-1.5">
-                      <div className="w-3 h-3 rounded-full bg-rose-500/60" />
-                      <div className="w-3 h-3 rounded-full bg-amber-400/60" />
-                      <div className="w-3 h-3 rounded-full bg-emerald-400/60" />
-                    </div>
-                    <div className="flex-1 mx-3">
-                      <div className="h-5 rounded-full border border-white/[0.07] bg-white/[0.05] flex items-center px-3 gap-2">
-                        <div className="w-2.5 h-2.5 rounded-full border border-white/[0.12] bg-white/10 shrink-0" />
-                        <span className="text-[10px] text-white/35 truncate">classic-literature.com/pride-and-prejudice</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Article content */}
-                  <div className="px-8 py-6">
-                    <div className="flex items-center gap-2 mb-3">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-rose-200/25 bg-rose-500/15 text-[10px] text-rose-200/85 font-medium uppercase tracking-wider">
-                        <Volume2 className="w-2.5 h-2.5" />
-                        {t('onboarding.voice.read.badge')}
-                      </span>
-                      <span className="text-white/28 text-[10px]">·</span>
-                      <span className="text-white/38 text-[10px]">{t('onboarding.voice.read.readTime')}</span>
-                    </div>
-
-                    <h2 className="text-white/92 text-xl font-semibold mb-1 leading-snug">{t('onboarding.voice.read.articleTitle')}</h2>
-                    <p className="text-white/42 text-xs mb-4">Jane Austen · Chapter I · 1813</p>
-
-                    <div className="w-10 h-px bg-white/[0.14] mb-4" />
-
-                    <p className="text-white/88 text-[15px] leading-[1.75] select-text font-light">{readSample}</p>
-
-                    <div className="mt-5 pt-4 border-t border-white/[0.05] flex items-center gap-2 flex-wrap">
-                      <p className="text-white/45 text-xs">{t('onboarding.voice.read.instructions.before')}</p>
-                      {([
-                        { symbol: '⌘', label: 'Cmd' },
-                        { symbol: '⇧', label: 'Shift' },
-                        { symbol: 'S', label: ''},
-                      ] as Array<{ symbol: string; label: string | null }>).map((cap, i) => (
-                        <React.Fragment key={`${cap.symbol}-${i}`}>
-                          <span className="inline-flex items-center gap-2 min-w-[70px] h-9 px-3 rounded-md border border-white/[0.12] bg-white/[0.10] text-white/90 font-medium shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]">
-                            <span className="inline-flex w-5 h-5 items-center justify-center rounded bg-white/[0.08] text-[11px] leading-none">
-                              {cap.symbol}
-                            </span>
-                            <span className="text-[11px] text-white/72 leading-none">
-                              {cap.label}
-                            </span>
-                          </span>
-                          {i < 2 ? <span className="text-white/40 text-sm font-semibold">+</span> : null}
-                        </React.Fragment>
-                      ))}
-                      <p className="text-white/45 text-xs">{t('onboarding.voice.read.instructions.after')}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {step === 6 && (
             <div className="min-h-full flex items-center justify-center">
               <div className="w-full max-w-3xl space-y-4">
                 <div className="rounded-2xl border border-white/[0.10] bg-white/[0.06] p-6">
-                  <p className="text-white text-xl font-semibold mb-2">{t('onboarding.voice.final.title')}</p>
+                  <p className="text-white text-xl font-semibold mb-2">{t('onboarding.setup.final.title')}</p>
                   <p className="text-white/68 text-sm leading-relaxed mb-4">
-                    {t('onboarding.voice.final.description')}
+                    {t('onboarding.setup.final.description')}
                   </p>
 
                   <div className="flex flex-wrap gap-2 mb-4">
@@ -1294,7 +697,7 @@ const OnboardingExtension: React.FC<OnboardingExtensionProps> = ({
                     ))}
                   </div>
                   <p className="text-white/46 text-xs leading-relaxed">
-                    {t('onboarding.voice.final.nextStep')}
+                    {t('onboarding.setup.final.nextStep')}
                   </p>
                 </div>
               </div>

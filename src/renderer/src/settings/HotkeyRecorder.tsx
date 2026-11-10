@@ -16,7 +16,6 @@ interface HotkeyRecorderProps {
   compact?: boolean;
   large?: boolean;
   active?: boolean;
-  variant?: 'default' | 'whisper';
   autoRecord?: boolean;
 }
 
@@ -76,7 +75,7 @@ function keyEventToAccelerator(e: KeyboardLikeEvent): string | null {
   if (e.shiftKey) parts.push('Shift');
   // }
 
-  // Support fn/function as a standalone hold key for whisper dictation.
+  // Support Fn/Function as a standalone shortcut key.
   if (e.key === 'Fn' || e.key === 'Function') return 'Fn';
 
   // Ignore standalone modifier keys (CapsLock is handled by the native
@@ -173,7 +172,6 @@ const HotkeyRecorder: React.FC<HotkeyRecorderProps> = ({
   compact,
   large,
   active,
-  variant = 'default',
   autoRecord,
 }) => {
   const [isRecording, setIsRecording] = useState(Boolean(autoRecord));
@@ -310,9 +308,8 @@ const HotkeyRecorder: React.FC<HotkeyRecorderProps> = ({
   }, [isRecording]);
 
   if (compact) {
-    const isWhisper = variant === 'whisper';
     return (
-      <div className={`inline-flex items-center ${isWhisper ? 'gap-1.5' : 'gap-1'}`}>
+      <div className={`inline-flex items-center ${'gap-1'}`}>
         <div
           ref={ref}
           tabIndex={0}
@@ -325,23 +322,15 @@ const HotkeyRecorder: React.FC<HotkeyRecorderProps> = ({
           className={`
             inline-flex items-center justify-center rounded text-[13px] leading-none cursor-pointer
             transition-all select-none outline-none
-            ${isWhisper ? 'min-h-[34px] min-w-[84px] px-3 py-1.5 rounded-md text-[14px] font-medium' : 'px-2.5 py-1'}
+            ${'px-2.5 py-1'}
             ${
               isRecording
-                  ? isWhisper
-                    ? 'bg-[var(--accent-soft)] border border-dashed border-[var(--accent)] text-[var(--accent)] min-w-[80px]'
-                    : 'bg-blue-500/20 border border-blue-500/40 text-blue-400 min-w-[80px]'
+                  ? 'bg-blue-500/20 border border-blue-500/40 text-blue-400 min-w-[80px]'
                 : active
-                  ? isWhisper
-                    ? 'bg-[var(--ui-segment-active-bg)] border border-dashed border-[var(--ui-segment-border)] text-[var(--text-primary)]'
-                    : 'bg-[var(--ui-segment-active-bg)] border border-[var(--ui-divider)] text-[var(--text-primary)]'
+                  ? 'bg-[var(--ui-segment-active-bg)] border border-[var(--ui-divider)] text-[var(--text-primary)]'
                 : value
-                  ? isWhisper
-                    ? 'bg-[var(--ui-segment-bg)] border border-dashed border-[var(--ui-segment-border)] text-[var(--text-primary)] hover:bg-[var(--ui-segment-hover-bg)]'
-                    : 'bg-[var(--ui-segment-bg)] border border-[var(--ui-divider)] text-[var(--text-secondary)] hover:border-[var(--ui-segment-border)]'
-                  : isWhisper
-                    ? 'bg-[var(--ui-segment-bg)] border border-dashed border-[var(--ui-segment-border)] text-[var(--text-muted)] hover:bg-[var(--ui-segment-hover-bg)]'
-                    : 'text-white/20 hover:text-white/40'
+                  ? 'bg-[var(--ui-segment-bg)] border border-[var(--ui-divider)] text-[var(--text-secondary)] hover:border-[var(--ui-segment-border)]'
+                  : 'text-white/20 hover:text-white/40'
             }
           `}
         >

@@ -1,7 +1,6 @@
 import React, { memo } from 'react';
 import { createPortal } from 'react-dom';
 
-import SuperCmdRead from '../SuperCmdRead';
 import WindowManagerPanel from '../WindowManagerPanel';
 
 import type { UseCursorPromptReturn } from '../hooks/useCursorPrompt';

@@ -298,8 +298,8 @@
           "elevenlabsScribeV1": "ElevenLabs Scribe v1",
           "elevenlabsScribeV2": "ElevenLabs Scribe v2"
         },
-        "openaiWarning": "OpenAI Whisper가 선택되었습니다. API 키에서 OpenAI API 키를 추가하세요.",
-        "elevenlabsWarning": "ElevenLabs STT가 선택되었습니다. API 키에서 ElevenLabs API 키를 {action}하세요.",
+        "openaiWarning": "여기에 OpenAI API 키를 추가하세요.",
+        "elevenlabsWarning": "여기에서 ElevenLabs API 키를 {action}하세요.",
         "elevenlabsReady": "ElevenLabs STT가 선택되었습니다. 클라우드 전사에 ElevenLabs 키가 사용됩니다.",
         "recognitionLanguage": "인식 언어",
         "vocabulary": {
@@ -416,7 +416,7 @@
             "playing": "샘플 재생 중..."
           },
           "storageHint": "SuperCmd는 이를 {value}로 저장합니다.",
-          "apiKeyWarning": "API 키에 ElevenLabs API 키를 추가합니다."
+          "apiKeyWarning": "여기에 ElevenLabs API 키를 추가하세요."
         },
         "notes": {
           "title": "참고",

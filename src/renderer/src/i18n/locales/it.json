@@ -298,8 +298,8 @@
           "elevenlabsScribeV1": "ElevenLabs Scribe v1",
           "elevenlabsScribeV2": "ElevenLabs Scribe v2"
         },
-        "openaiWarning": "OpenAI Whisper selezionato. Aggiungi la chiave API OpenAI in Chiavi API.",
-        "elevenlabsWarning": "STT di ElevenLabs selezionato. {action} la chiave API di ElevenLabs in Chiavi API.",
+        "openaiWarning": "Aggiungi qui la chiave API OpenAI.",
+        "elevenlabsWarning": "{action} la chiave API ElevenLabs qui.",
         "elevenlabsReady": "STT di ElevenLabs selezionato. La trascrizione cloud userà la tua chiave ElevenLabs.",
         "recognitionLanguage": "Lingua di riconoscimento",
         "providerInfo": {
@@ -410,7 +410,7 @@
             "playing": "Riproduzione dell'esempio..."
           },
           "storageHint": "SuperCmd la memorizza come {value}.",
-          "apiKeyWarning": "Aggiungi la chiave API di ElevenLabs in Chiavi API."
+          "apiKeyWarning": "Aggiungi qui la chiave API ElevenLabs."
         },
         "notes": {
           "title": "Note",

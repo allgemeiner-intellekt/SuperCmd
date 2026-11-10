@@ -298,8 +298,8 @@
           "elevenlabsScribeV1": "ElevenLabs Scribe v1",
           "elevenlabsScribeV2": "ElevenLabs Scribe v2"
         },
-        "openaiWarning": "OpenAI Whisper ausgewaehlt. Fuege den OpenAI-API-Schluessel unter API Keys hinzu.",
-        "elevenlabsWarning": "ElevenLabs-STT ausgewaehlt. {action} den ElevenLabs-API-Schluessel unter API Keys.",
+        "openaiWarning": "Füge hier den OpenAI-API-Schlüssel hinzu.",
+        "elevenlabsWarning": "{action} den ElevenLabs-API-Schlüssel hier.",
         "elevenlabsReady": "ElevenLabs-STT ausgewaehlt. Die Cloud-Transkription verwendet deinen ElevenLabs-Schluessel.",
         "recognitionLanguage": "Recognition Language",
         "vocabulary": {
@@ -416,7 +416,7 @@
             "playing": "Beispiel wird abgespielt..."
           },
           "storageHint": "SuperCmd speichert dies als {value}.",
-          "apiKeyWarning": "Fuege unter API Keys einen ElevenLabs-API-Schluessel hinzu."
+          "apiKeyWarning": "Füge hier den ElevenLabs-API-Schlüssel hinzu."
         },
         "notes": {
           "title": "Hinweise",

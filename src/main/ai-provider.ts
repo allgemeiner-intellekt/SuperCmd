@@ -42,7 +42,6 @@ function resolveModel(model: string | undefined, config: AISettings): ModelRoute
   if (selected && isRemovedAIModel(selected)) throw new Error('This AI provider has been removed. Choose OpenAI or Custom in Settings → AI → LLM.');
   if (selected?.startsWith('openai-compatible-')) return { provider: 'openai-compatible', modelId: selected.slice(18) };
   if (selected?.startsWith('openai-')) return { provider: 'openai', modelId: selected.slice(7) };
-  if (model && /^(gpt-|o\d)/.test(model)) return { provider: 'openai', modelId: model };
   return { provider: config.provider === 'openai-compatible' ? 'openai-compatible' : 'openai', modelId: selected || (config.provider === 'openai-compatible' ? config.openaiCompatibleModel?.trim() || 'gpt-4o' : DEFAULT_OPENAI_MODEL) };
 }
 

@@ -526,7 +526,7 @@ const AITab: React.FC = () => {
     ? parsedElevenLabsSpeak.voiceId
     : DEFAULT_ELEVENLABS_VOICE_ID;
 
-  const correctionModelOptions = genericModels;
+  const correctionModelOptions = [...genericModels, ...(ai.speechCorrectionModel && !genericModels.some(m => m.id === ai.speechCorrectionModel) ? [{ id: ai.speechCorrectionModel, label: ai.speechCorrectionModel.replace(/^openai-/, '') }] : [])];
   const allEdgeVoices = (edgeVoices.length > 0 ? edgeVoices : EDGE_TTS_FALLBACK_VOICES).map((voice) => ({
     ...voice,
     languageLabel: getAiLanguageLabel(t, voice.languageCode),

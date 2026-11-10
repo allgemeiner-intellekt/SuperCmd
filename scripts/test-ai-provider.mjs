@@ -112,3 +112,9 @@ for (const phase of ['before headers', 'during stream']) {
     await rejection;
   });
 }
+test('unprefixed explicit Custom model stays on the configured service', async () => {
+  const { api, requests } = fixture({ events: [] });
+  await collect(api.streamAI({ ...config, provider: 'openai-compatible', defaultModel: 'openai-compatible-private', openaiCompatibleBaseUrl: 'https://custom.test', openaiCompatibleApiKey: 'custom' }, { prompt: 'private', model: 'gpt-4o' }));
+  assert.equal(requests[0].hostname, 'custom.test');
+  assert.equal(requests[0].body.model, 'gpt-4o');
+});

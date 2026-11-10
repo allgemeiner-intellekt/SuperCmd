@@ -425,10 +425,7 @@ export function useLauncherCommandModel({
     }
 
     const sourceMap = new Map(visibleSourceCommands.map((cmd) => [cmd.id, cmd]));
-    const hasSelection = selectedTextSnapshot.trim().length > 0;
-    const contextual = hasSelection
-      ? []
-      : [];
+    const contextual: CommandInfo[] = [];
     const contextualIds = new Set(contextual.map((c) => c.id));
 
     const pinnedFromCommands = pinnedCommands

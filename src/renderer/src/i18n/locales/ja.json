@@ -226,6 +226,11 @@
         "elevenlabs": {
           "label": "ElevenLabs API キー",
           "placeholder": "xi-..."
+        },
+        "mistral": {
+          "label": "Mistral API キー",
+          "placeholder": "Voxtral の音声文字起こし用",
+          "hint": "Voxtral の音声文字起こしを使うには、ここで Mistral API キーを設定してください。"
         }
       },
       "llm": {

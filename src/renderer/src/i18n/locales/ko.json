@@ -226,6 +226,11 @@
         "elevenlabs": {
           "label": "ElevenLabs API 키",
           "placeholder": "xi-..."
+        },
+        "mistral": {
+          "label": "Mistral API 키",
+          "placeholder": "Voxtral 음성 전사에 사용",
+          "hint": "Voxtral 음성 전사를 사용하려면 여기에 Mistral API 키를 입력하세요."
         }
       },
       "llm": {

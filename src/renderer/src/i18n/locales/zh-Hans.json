@@ -226,6 +226,11 @@
         "elevenlabs": {
           "label": "ElevenLabs API 密钥",
           "placeholder": "xi-..."
+        },
+        "mistral": {
+          "label": "Mistral API 密钥",
+          "placeholder": "用于 Voxtral 语音转文字",
+          "hint": "在此填写 Mistral API 密钥以使用 Voxtral 语音转文字。"
         }
       },
       "llm": {

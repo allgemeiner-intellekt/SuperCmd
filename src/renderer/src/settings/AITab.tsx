@@ -696,7 +696,8 @@ const AITab: React.FC = () => {
                 <p className="text-[0.75rem] text-[var(--text-muted)] mt-0.5 leading-snug">{t('settings.ai.llm.modelSelection.description')}</p>
               </div>
 
-{ai.provider === 'openai' && (<>                <div>
+{ai.provider === 'openai' && (<>
+                <div>
                   <label className="text-[0.75rem] text-[var(--text-secondary)] mb-1 block">{t('settings.ai.apiKeys.openai.label')}</label>
                   <div className="relative">
                     <input
@@ -715,7 +716,7 @@ const AITab: React.FC = () => {
                   </div>
                 </div>
 
-</>)}
+              </>)}
               <div>
                   <label className="text-[0.75rem] text-[var(--text-secondary)] mb-1 block">{t('settings.ai.llm.provider.label')}</label>
                   <div className="grid grid-cols-2 gap-2">
@@ -823,7 +824,8 @@ const AITab: React.FC = () => {
 
         {activeTab === 'whisper' && (
           <>
-{whisperModelValue.startsWith('openai-') && (<>                <div>
+{whisperModelValue.startsWith('openai-') && (<>
+                <div>
                   <label className="text-[0.75rem] text-[var(--text-secondary)] mb-1 block">{t('settings.ai.apiKeys.openai.label')}</label>
                   <div className="relative">
                     <input
@@ -842,8 +844,9 @@ const AITab: React.FC = () => {
                   </div>
                 </div>
 
-</>)}
-{whisperModelValue.startsWith('elevenlabs-') && (<>                <div>
+              </>)}
+{whisperModelValue.startsWith('elevenlabs-') && (<>
+                <div>
                   <label className="text-[0.75rem] text-[var(--text-secondary)] mb-1 block">{t('settings.ai.apiKeys.elevenlabs.label')}</label>
                   <div className="relative">
                     <input
@@ -862,15 +865,16 @@ const AITab: React.FC = () => {
                   </div>
                 </div>
 
-</>)}
-{whisperModelValue.startsWith('mistral-') && (<>                <div>
-                  <label className="text-[0.75rem] text-[var(--text-secondary)] mb-1 block">Mistral API Key</label>
+              </>)}
+{whisperModelValue.startsWith('mistral-') && (<>
+                <div>
+                  <label className="text-[0.75rem] text-[var(--text-secondary)] mb-1 block">{t('settings.ai.apiKeys.mistral.label')}</label>
                   <div className="relative">
                     <input
                       type={showMistralKey ? 'text' : 'password'}
                       value={ai.mistralApiKey || ''}
                       onChange={(e) => updateAI({ mistralApiKey: e.target.value.trim() })}
-                      placeholder="For Voxtral speech-to-text"
+                      placeholder={t('settings.ai.apiKeys.mistral.placeholder')}
                       className="sc-input pr-9"
                     />
                     <button
@@ -882,7 +886,7 @@ const AITab: React.FC = () => {
                   </div>
                 </div>
 
-</>)}
+              </>)}
           <div className="px-4 py-3 md:px-5 border-b border-[var(--ui-divider)] flex items-center justify-between gap-3">
             <div>
               <h3 className="text-[0.8125rem] font-semibold text-[var(--text-primary)]">{t('settings.ai.whisper.enableWhisper.title')}</h3>
@@ -940,7 +944,7 @@ const AITab: React.FC = () => {
                   <p className="text-[0.6875rem] text-amber-300">
                     {ai.mistralApiKey
                       ? 'Mistral Voxtral will be used for cloud speech-to-text.'
-                      : 'Add a Mistral API key here to use Voxtral speech-to-text.'}
+                      : t('settings.ai.apiKeys.mistral.hint')}
                   </p>
                 </div>
               )}
@@ -1324,7 +1328,8 @@ const AITab: React.FC = () => {
 
         {activeTab === 'speak' && (
           <>
-{speakModelValue.startsWith('elevenlabs-') && (<>                <div>
+{speakModelValue.startsWith('elevenlabs-') && (<>
+                <div>
                   <label className="text-[0.75rem] text-[var(--text-secondary)] mb-1 block">{t('settings.ai.apiKeys.elevenlabs.label')}</label>
                   <div className="relative">
                     <input
@@ -1343,7 +1348,7 @@ const AITab: React.FC = () => {
                   </div>
                 </div>
 
-</>)}
+              </>)}
 
           <div className="px-4 py-3 md:px-5 border-b border-[var(--ui-divider)] flex items-center justify-between gap-3">
             <div>

@@ -226,6 +226,11 @@
         "elevenlabs": {
           "label": "ElevenLabs-API-Schluessel",
           "placeholder": "xi-..."
+        },
+        "mistral": {
+          "label": "Mistral-API-Schlüssel",
+          "placeholder": "Für Voxtral-Spracherkennung",
+          "hint": "Gib hier einen Mistral-API-Schlüssel für die Voxtral-Spracherkennung ein."
         }
       },
       "llm": {

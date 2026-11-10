@@ -455,7 +455,7 @@ let settingsLoadDegraded = false;
  */
 function hydrateAISettings(raw: any): AISettings {
   const merged: AISettings = { ...DEFAULT_AI_SETTINGS, ...(raw || {}) };
-  if (merged.provider === 'openai-compatible' && !raw?.defaultModel) merged.defaultModel = ''; 
+  if (merged.provider === 'openai-compatible' && !raw?.defaultModel) merged.defaultModel = '';
   for (const field of SENSITIVE_AI_KEYS) {
     const fromVault = getSecret(aiVaultKey(field));
     const fromDisk = typeof merged[field] === 'string' ? (merged[field] as string) : '';

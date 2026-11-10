@@ -1,3 +1,4 @@
+import { isRemovedAIModel } from '../shared/ai-models';
 /**
  * Main Process — SuperCmd
  *
@@ -17557,6 +17558,10 @@ if let tiff = image?.tiffRepresentation {
         event.sender.send('ai-stream-error', { requestId, error: 'LLM is disabled in Settings → AI.' });
         return;
       }
+      if (options?.model && isRemovedAIModel(options.model)) {
+        event.sender.send('ai-stream-error', { requestId, error: 'This AI provider has been removed. Choose OpenAI or Custom in Settings → AI → LLM.' });
+        return;
+      }
       if (!isAIAvailable(s.ai)) {
         event.sender.send('ai-stream-error', { requestId, error: 'AI is not configured. Please set up an API key in Settings → AI.' });
         return;
@@ -17611,6 +17616,10 @@ if let tiff = image?.tiffRepresentation {
       const s = loadSettings();
       if (s.ai?.llmEnabled === false) {
         event.sender.send('ai-stream-error', { requestId, error: 'LLM is disabled in Settings → AI.' });
+        return;
+      }
+      if (options?.model && isRemovedAIModel(options.model)) {
+        event.sender.send('ai-stream-error', { requestId, error: 'This AI provider has been removed. Choose OpenAI or Custom in Settings → AI → LLM.' });
         return;
       }
       if (!isAIAvailable(s.ai)) {

@@ -226,6 +226,11 @@
         "elevenlabs": {
           "label": "ElevenLabs API Key",
           "placeholder": "xi-..."
+        },
+        "mistral": {
+          "label": "Mistral API Key",
+          "placeholder": "For Voxtral speech-to-text",
+          "hint": "Add a Mistral API key here to use Voxtral speech-to-text."
         }
       },
       "llm": {

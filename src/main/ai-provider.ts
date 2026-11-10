@@ -285,18 +285,6 @@ async function* streamOpenAICompatible(
   });
 }
 
-// ─── Anthropic ───────────────────────────────────────────────────────
-
-
-
-// ─── Gemini ──────────────────────────────────────────────────────────
-
-
-
-// ─── Ollama ──────────────────────────────────────────────────────────
-
-
-
 // ─── HTTP helpers ────────────────────────────────────────────────────
 
 interface HttpRequestOptions {
@@ -320,6 +308,7 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
       path: opts.path,
       method: opts.method,
       headers: opts.headers,
+      signal: opts.signal,
     };
 
     const req = mod.request(reqOpts, (res) => {
@@ -335,18 +324,6 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
     });
 
     req.on('error', reject);
-
-    if (opts.signal) {
-      if (opts.signal.aborted) {
-        req.destroy();
-        reject(new Error('Request aborted'));
-        return;
-      }
-      opts.signal.addEventListener('abort', () => {
-        req.destroy();
-        reject(new Error('Request aborted'));
-      }, { once: true });
-    }
 
     req.write(opts.body);
     req.end();

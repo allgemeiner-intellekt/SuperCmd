@@ -226,6 +226,11 @@
         "elevenlabs": {
           "label": "Cle API ElevenLabs",
           "placeholder": "xi-..."
+        },
+        "mistral": {
+          "label": "Clé API Mistral",
+          "placeholder": "Pour la transcription Voxtral",
+          "hint": "Ajoutez ici une clé API Mistral pour utiliser la transcription Voxtral."
         }
       },
       "llm": {

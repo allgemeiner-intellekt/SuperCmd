@@ -1,4 +1,5 @@
 import test from 'node:test';
+import * as http from 'node:http';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -6,7 +7,7 @@ import ts from 'typescript';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 
-function fixture({ events, status = 200 } = {}) {
+function fixture({ events, status = 200, nativeHttp = false } = {}) {
   const requests = [];
   const transport = { request(options, callback) {
     const req = new EventEmitter();
@@ -25,6 +26,7 @@ function fixture({ events, status = 200 } = {}) {
     const module = { exports: {} };
     const code = ts.transpileModule(fs.readFileSync(new URL(file, import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
     vm.runInThisContext(`(function(require,module,exports){${code}\n})`)(name => {
+      if (name === 'http' && nativeHttp) return http;
       if (name === 'https' || name === 'http') return transport;
       if (name === '../shared/ai-models') return load('../src/shared/ai-models.ts');
       throw new Error(name);
@@ -75,3 +77,38 @@ test('Custom keeps its address, model and URL option', async () => {
   assert.equal(requests[0].hostname, 'private.test'); assert.equal(requests[0].path, '/api/chat/completions');
   assert.equal(requests[0].body.model, 'private'); assert.equal(requests[0].headers.Authorization, 'Bearer custom');
 });
+
+test('explicit OpenAI route overrides Custom default; missing model follows settings', async () => {
+  const { api, requests } = fixture();
+  await collect(api.streamAI({ ...config, provider: 'openai-compatible', defaultModel: 'openai-compatible-private' }, { prompt: 'test', model: 'openai-gpt-6.1-sol' }));
+  assert.equal(requests[0].hostname, 'api.openai.com');
+  assert.equal(requests[0].body.model, 'gpt-6.1-sol');
+});
+test('truncated stream is an error', async () => {
+  const { api } = fixture({ events: [{ type: 'response.output_text.delta', delta: 'partial' }] });
+  await assert.rejects(collect(api.streamAI(config, { prompt: 'test' })), /before.*completed/);
+});
+
+for (const phase of ['before headers', 'during stream']) {
+  test(`cancellation closes transport ${phase}`, async t => {
+    let started;
+    const received = new Promise(resolve => { started = resolve; });
+    const server = http.createServer((req, res) => {
+      req.resume();
+      if (phase === 'during stream') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+      }
+      started();
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    const { api } = fixture({ nativeHttp: true });
+    const controller = new AbortController();
+    const result = collect(api.streamAI({ ...config, provider: 'openai-compatible', defaultModel: 'openai-compatible-test', openaiCompatibleBaseUrl: `http://127.0.0.1:${server.address().port}`, openaiCompatibleApiKey: 'test' }, { prompt: 'test', signal: controller.signal }));
+    const rejection = assert.rejects(result, /abort/i);
+    await received;
+    controller.abort();
+    await rejection;
+  });
+}

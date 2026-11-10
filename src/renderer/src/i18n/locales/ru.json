@@ -226,6 +226,11 @@
         "elevenlabs": {
           "label": "ElevenLabs API Key",
           "placeholder": "xi-..."
+        },
+        "mistral": {
+          "label": "API-ключ Mistral",
+          "placeholder": "Для распознавания речи Voxtral",
+          "hint": "Добавьте здесь API-ключ Mistral для распознавания речи Voxtral."
         }
       },
       "llm": {

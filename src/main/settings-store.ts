@@ -5,6 +5,7 @@
  * Stored at ~/Library/Application Support/SuperCmd/settings.json
  */
 
+import { DEFAULT_OPENAI_MODEL, normalizeAIModelSettings } from '../shared/ai-models';
 import { app } from 'electron';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
@@ -307,7 +308,7 @@ const DEFAULT_AI_SETTINGS: AISettings = {
   supermemoryBaseUrl: 'https://api.supermemory.ai',
   supermemoryLocalMode: false,
   ollamaBaseUrl: 'http://localhost:11434',
-  defaultModel: '',
+  defaultModel: DEFAULT_OPENAI_MODEL,
   speechCorrectionModel: '',
   speechToTextModel: 'whispercpp',
   speechLanguage: 'en-US',
@@ -454,6 +455,7 @@ let settingsLoadDegraded = false;
  */
 function hydrateAISettings(raw: any): AISettings {
   const merged: AISettings = { ...DEFAULT_AI_SETTINGS, ...(raw || {}) };
+  if (merged.provider === 'openai-compatible' && !raw?.defaultModel) merged.defaultModel = ''; 
   for (const field of SENSITIVE_AI_KEYS) {
     const fromVault = getSecret(aiVaultKey(field));
     const fromDisk = typeof merged[field] === 'string' ? (merged[field] as string) : '';
@@ -463,7 +465,7 @@ function hydrateAISettings(raw: any): AISettings {
       merged[field] = fromVault || fromDisk || '';
     }
   }
-  return merged;
+  return normalizeAIModelSettings(merged);
 }
 
 function normalizeFontSize(value: any): AppFontSize {
@@ -1543,6 +1545,7 @@ function saveSettingsInternal(
   options: SaveSettingsOptions = {}
 ): AppSettings {
   const current = loadSettings();
+  if (patch.ai) patch = { ...patch, ai: normalizeAIModelSettings({ ...current.ai, ...patch.ai }) };
   const updated = {
     ...current,
     ...patch,

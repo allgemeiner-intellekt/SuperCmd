@@ -1292,12 +1292,6 @@ async function discoverAndBuildCommands(): Promise<CommandInfo[]> {
       category: 'system',
     },
     {
-      id: 'system-add-to-memory',
-      title: 'Add This to Memory',
-      keywords: ['memory', 'supermemory', 'selected text', 'remember', 'save context'],
-      category: 'system',
-    },
-    {
       id: 'system-clipboard-manager',
       title: 'Clipboard History',
       keywords: ['clipboard', 'history', 'copy', 'paste', 'manager'],

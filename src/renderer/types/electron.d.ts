@@ -1159,7 +1159,6 @@ export interface ElectronAPI {
 
   getSelectedText: () => Promise<string>;
   getSelectedTextStrict: () => Promise<string>;
-  memoryAdd: (payload: { text: string; userId?: string; source?: string; metadata?: Record<string, any> }) => Promise<{ success: boolean; memoryId?: string; error?: string }>;
 
   // Snippet Manager
   snippetGetAll: () => Promise<Snippet[]>;

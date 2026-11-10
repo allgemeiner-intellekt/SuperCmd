@@ -214,7 +214,6 @@
         "description": "AI 機能のマスタースイッチです。"
       },
       "tabs": {
-        "apiKeys": "API キー",
         "llm": "LLM",
         "whisper": "SuperCmd Whisper",
         "speak": "SuperCmd Read"
@@ -224,35 +223,9 @@
           "label": "ChatGPT (OpenAI) API キー",
           "placeholder": "sk-..."
         },
-        "anthropic": {
-          "label": "Claude (Anthropic) API キー",
-          "placeholder": "sk-ant-..."
-        },
-        "gemini": {
-          "label": "Gemini (Google) API キー",
-          "placeholder": "AIza..."
-        },
         "elevenlabs": {
           "label": "ElevenLabs API キー",
           "placeholder": "xi-..."
-        },
-        "supermemory": {
-          "title": "Supermemory",
-          "description": "長期コンテキスト用のメモリバックエンド。",
-          "apiKey": {
-            "label": "Supermemory API キー",
-            "placeholder": "sm-..."
-          },
-          "client": {
-            "label": "Supermemory クライアント",
-            "placeholder": "client-123",
-            "hint": "ユーザーメモリ取得のスコープに使用します。"
-          },
-          "baseUrl": {
-            "label": "Supermemory ベース URL",
-            "placeholder": "https://api.supermemory.ai"
-          },
-          "localMode": "ローカルモードを使用（ローカルに保存）"
         }
       },
       "llm": {
@@ -267,62 +240,11 @@
         "provider": {
           "label": "プロバイダ",
           "openai": "OpenAI",
-          "anthropic": "Claude",
-          "gemini": "Gemini",
-          "ollama": "Ollama",
-          "lmStudio": "LM Studio",
           "openaiCompatible": "カスタム（OpenAI 互換）"
         },
         "providerDescriptions": {
           "openai": "GPT 系モデル",
-          "anthropic": "Anthropic Claude モデル",
-          "gemini": "Google Gemini モデル",
-          "ollama": "ローカルモデル",
-          "lmStudio": "LM Studio でローカルモデルを使用",
           "openaiCompatible": "任意の OpenAI 互換 API（OpenRouter、Together など）"
-        },
-        "ollama": {
-          "serverUrl": {
-            "label": "Ollama サーバー URL",
-            "placeholder": "http://localhost:11434"
-          },
-          "models": "Ollama モデル",
-          "refresh": "更新",
-          "checking": "Ollama のステータスを確認中...",
-          "notRunning": {
-            "title": "Ollama が実行されていません",
-            "description": "ローカルモデルを使用するには Ollama をインストールして実行してください。",
-            "download": "Ollama をダウンロード"
-          },
-          "running": "Ollama は実行中です",
-          "installed": "インストール済み",
-          "downloadModel": "ダウンロード",
-          "removeModel": "削除",
-          "downloading": "ダウンロード中...",
-          "removing": "削除中...",
-          "startingDownload": "ダウンロードを開始しています...",
-          "deleteFailed": "モデルの削除に失敗しました。",
-          "curatedDescriptions": {
-            "llama32": "Meta 汎用モデル（3B）",
-            "llama32_1b": "小型で高速",
-            "mistral": "効率的な汎用モデル",
-            "codellama": "コード生成と補完",
-            "phi3": "Microsoft 小型言語モデル",
-            "gemma2": "Google オープンモデル（9B）",
-            "qwen25": "Alibaba 多言語モデル（7B）",
-            "deepseekR1": "推論重視モデル（7B）"
-          }
-        },
-        "lmStudio": {
-          "baseUrl": {
-            "label": "サーバー URL",
-            "hint": "LM Studio のローカルサーバー URL（デフォルト：http://127.0.0.1:1234/v1）"
-          },
-          "apiKey": {
-            "toggle": "オプションのAPIキー",
-            "placeholder": "不要な場合は空白のままにしてください",
-            "hint": "LM Studioで認証を設定している場合のみ必要です。"
-          }
         },
         "openaiCompatible": {
           "baseUrl": {

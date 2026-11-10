@@ -214,7 +214,6 @@
         "description": "AI 기능을 위한 마스터 스위치."
       },
       "tabs": {
-        "apiKeys": "API 키",
         "llm": "LLM",
         "whisper": "SuperCmd Whisper",
         "speak": "SuperCmd Read"
@@ -224,35 +223,9 @@
           "label": "ChatGPT (OpenAI) API 키",
           "placeholder": "sk-..."
         },
-        "anthropic": {
-          "label": "Claude (Anthropic) API 키",
-          "placeholder": "sk-ant-..."
-        },
-        "gemini": {
-          "label": "Gemini (Google) API 키",
-          "placeholder": "AIza..."
-        },
         "elevenlabs": {
           "label": "ElevenLabs API 키",
           "placeholder": "xi-..."
-        },
-        "supermemory": {
-          "title": "Supermemory",
-          "description": "장기 컨텍스트를 위한 메모리 백엔드.",
-          "apiKey": {
-            "label": "Supermemory API 키",
-            "placeholder": "sm-..."
-          },
-          "client": {
-            "label": "Supermemory 클라이언트",
-            "placeholder": "client-123",
-            "hint": "사용자별 메모리 검색 범위를 구분할 때 사용합니다."
-          },
-          "baseUrl": {
-            "label": "Supermemory 기본 URL",
-            "placeholder": "https://api.supermemory.ai"
-          },
-          "localMode": "로컬 모드 사용(로컬에 저장됨)"
         }
       },
       "llm": {
@@ -267,62 +240,11 @@
         "provider": {
           "label": "제공자",
           "openai": "OpenAI",
-          "anthropic": "Claude",
-          "gemini": "Gemini",
-          "ollama": "Ollama",
-          "lmStudio": "LM Studio",
           "openaiCompatible": "사용자 지정(OpenAI 호환)"
         },
         "providerDescriptions": {
           "openai": "GPT 제품군 모델",
-          "anthropic": "Claude 계열 모델",
-          "gemini": "Google Gemini 모델",
-          "ollama": "로컬 모델",
-          "lmStudio": "LM Studio를 통한 로컬 모델",
           "openaiCompatible": "모든 OpenAI 호환 API(OpenRouter, Together 등)"
-        },
-        "ollama": {
-          "serverUrl": {
-            "label": "Ollama 서버 URL",
-            "placeholder": "http://localhost:11434"
-          },
-          "models": "Ollama 모델",
-          "refresh": "새로고침",
-          "checking": "Ollama 상태 확인 중...",
-          "notRunning": {
-            "title": "Ollama가 실행되고 있지 않습니다.",
-            "description": "로컬 모델을 사용하려면 Ollama를 설치하고 실행하세요.",
-            "download": "Ollama 다운로드"
-          },
-          "running": "Ollama 실행 중",
-          "installed": "설치됨",
-          "downloadModel": "다운로드",
-          "removeModel": "제거",
-          "downloading": "다운로드 중...",
-          "removing": "제거 중...",
-          "startingDownload": "다운로드 시작 중...",
-          "deleteFailed": "모델을 삭제하지 못했습니다.",
-          "curatedDescriptions": {
-            "llama32": "메타범용(3B)",
-            "llama32_1b": "작고 빠름",
-            "mistral": "효율적인 범용",
-            "codellama": "코드 생성 및 완성",
-            "phi3": "Microsoft 소규모 언어 모델",
-            "gemma2": "Google 개방형 모델(9B)",
-            "qwen25": "Alibaba 다국어 모델(7B)",
-            "deepseekR1": "추론 중심 모델(7B)"
-          }
-        },
-        "lmStudio": {
-          "baseUrl": {
-            "label": "서버 URL",
-            "hint": "LM Studio 로컬 서버 URL（기본값：http://127.0.0.1:1234/v1）"
-          },
-          "apiKey": {
-            "toggle": "선택적 API 키",
-            "placeholder": "필요하지 않으면 비워두세요",
-            "hint": "LM Studio에서 인증을 구성한 경우에만 필요합니다."
-          }
         },
         "openaiCompatible": {
           "baseUrl": {

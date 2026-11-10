@@ -236,3 +236,8 @@ Use this map when working in the Raycast compatibility layer:
 - `src/renderer/src/raycast-api/raycast-icon-enum.ts`
   Purpose: Canonical Raycast icon enum/value mapping used by icon resolution (auto-generated).
   Use for: adding/fixing icon names and legacy icon token compatibility.
+
+AI requests without a model follow the common LLM configuration. Explicit OpenAI
+models use the OpenAI Responses transport. Anthropic/Claude, Gemini, Ollama and
+LM Studio model identifiers return a provider-removed error before network IO.
+Custom model identifiers keep the existing OpenAI-compatible transport.

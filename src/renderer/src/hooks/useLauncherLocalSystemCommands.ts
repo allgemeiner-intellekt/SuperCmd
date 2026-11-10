@@ -296,35 +296,6 @@ export function useLauncherLocalSystemCommands(
       setSelectedIndex(0);
       return true;
     }
-    if (commandId === 'system-add-to-memory') {
-      if (memoryActionLoading) return true;
-      setMemoryActionLoading(true);
-      setMemoryFeedback(null);
-      const selectedText = String(
-        await window.electron.getSelectedTextStrict() || selectedTextSnapshot || ''
-      ).trim();
-      if (!selectedText) {
-        setSelectedTextSnapshot('');
-        setMemoryActionLoading(false);
-        return true;
-      }
-      try {
-        const result = await window.electron.memoryAdd({
-          text: selectedText,
-          source: 'launcher-selection',
-        });
-        if (!result.success) {
-          console.error('[Supermemory] Failed to add memory:', result.error || 'Unknown error');
-          return true;
-        }
-        setSelectedTextSnapshot('');
-        setSearchQuery('');
-        setSelectedIndex(0);
-      } finally {
-        setMemoryActionLoading(false);
-      }
-      return true;
-    }
     if (commandId === 'system-cursor-prompt') {
       await window.electron.executeCommand(commandId);
       return true;

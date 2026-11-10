@@ -96,3 +96,18 @@ source of commands and runner configuration.
 acceptance evidence. The [maintenance audit](maintenance/2026-11-03-audit.md)
 records source findings against a fixed baseline; its follow-up items need their
 own tests before a fix can be called verified.
+
+## AI configuration and transport
+
+`src/shared/ai-models.ts` owns the fixed OpenAI menu, default, and model-setting
+normalization. Settings hydrate and save through that normalization. Legacy
+explicit OpenAI IDs remain selected until changed. Custom retains its existing
+address, authentication, model and URL options. Retired credentials remain in
+the vault; this upgrade does not delete secrets or existing memory files.
+
+OpenAI text requests use `/v1/responses` with streaming events, full local message
+history as `input`, optional `instructions`, and `store: false`. GPT-5/6 reasoning
+models omit temperature. Custom continues using Chat Completions. Removed
+provider model identifiers fail before any transport request. Ask AI, inline
+prompts, speech correction and default extension requests share this router.
+Supermemory retrieval and writes are retired; chat history stays in ai-chat-store.

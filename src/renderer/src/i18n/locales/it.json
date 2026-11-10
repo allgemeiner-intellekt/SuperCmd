@@ -214,7 +214,6 @@
         "description": "Interruttore principale per le funzionalità AI."
       },
       "tabs": {
-        "apiKeys": "Chiavi API",
         "llm": "LLM",
         "whisper": "SuperCmd Whisper",
         "speak": "SuperCmd Read"
@@ -224,35 +223,9 @@
           "label": "Chiave API di ChatGPT (OpenAI)",
           "placeholder": "sk-..."
         },
-        "anthropic": {
-          "label": "Chiave API di Claude (Anthropic)",
-          "placeholder": "sk-ant-..."
-        },
-        "gemini": {
-          "label": "Chiave API di Gemini (Google)",
-          "placeholder": "AIza..."
-        },
         "elevenlabs": {
           "label": "Chiave API di ElevenLabs",
           "placeholder": "xi-..."
-        },
-        "supermemory": {
-          "title": "Supermemory",
-          "description": "Backend di memoria per il contesto a lungo termine.",
-          "apiKey": {
-            "label": "Chiave API di Supermemory",
-            "placeholder": "sm-..."
-          },
-          "client": {
-            "label": "Client Supermemory",
-            "placeholder": "client-123",
-            "hint": "Usato per delimitare il recupero della memoria utente."
-          },
-          "baseUrl": {
-            "label": "URL base di Supermemory",
-            "placeholder": "https://api.supermemory.ai"
-          },
-          "localMode": "Usa la modalità locale (salvata in locale)"
         }
       },
       "llm": {
@@ -267,62 +240,11 @@
         "provider": {
           "label": "Provider",
           "openai": "OpenAI",
-          "anthropic": "Claude",
-          "gemini": "Gemini",
-          "ollama": "Ollama",
-          "lmStudio": "LM Studio",
           "openaiCompatible": "Personalizzato (compatibile OpenAI)"
         },
         "providerDescriptions": {
           "openai": "Modelli della famiglia GPT",
-          "anthropic": "Modelli Anthropic Claude",
-          "gemini": "Modelli Google Gemini",
-          "ollama": "Modelli locali",
-          "lmStudio": "Modelli locali tramite LM Studio",
           "openaiCompatible": "Qualsiasi API compatibile OpenAI (OpenRouter, Together, ecc.)"
-        },
-        "ollama": {
-          "serverUrl": {
-            "label": "URL del server Ollama",
-            "placeholder": "http://localhost:11434"
-          },
-          "models": "Modelli Ollama",
-          "refresh": "Aggiorna",
-          "checking": "Verifica dello stato di Ollama...",
-          "notRunning": {
-            "title": "Ollama non è in esecuzione",
-            "description": "Installa e avvia Ollama per usare i modelli locali.",
-            "download": "Scarica Ollama"
-          },
-          "running": "Ollama è in esecuzione",
-          "installed": "Installato",
-          "downloadModel": "Scarica",
-          "removeModel": "Rimuovi",
-          "downloading": "Download in corso...",
-          "removing": "Rimozione in corso...",
-          "startingDownload": "Avvio del download...",
-          "deleteFailed": "Impossibile eliminare il modello.",
-          "curatedDescriptions": {
-            "llama32": "Meta multiuso (3B)",
-            "llama32_1b": "Piccolo e veloce",
-            "mistral": "Multiuso ed efficiente",
-            "codellama": "Generazione e completamento di codice",
-            "phi3": "Modello linguistico compatto di Microsoft",
-            "gemma2": "Modello open di Google (9B)",
-            "qwen25": "Modello multilingue di Alibaba (7B)",
-            "deepseekR1": "Modello orientato al ragionamento (7B)"
-          }
-        },
-        "lmStudio": {
-          "baseUrl": {
-            "label": "URL del server",
-            "hint": "URL del server locale di LM Studio (predefinito: http://127.0.0.1:1234/v1)"
-          },
-          "apiKey": {
-            "toggle": "Chiave API opzionale",
-            "placeholder": "Lascia vuoto se non richiesto",
-            "hint": "Necessario solo se hai configurato l'autenticazione in LM Studio."
-          }
         },
         "openaiCompatible": {
           "baseUrl": {

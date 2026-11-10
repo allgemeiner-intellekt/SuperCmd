@@ -214,7 +214,6 @@
         "description": "AI 功能的總開關。"
       },
       "tabs": {
-        "apiKeys": "API 金鑰",
         "llm": "大型語言模型",
         "whisper": "SuperCmd 語音輸入",
         "speak": "SuperCmd 語音朗讀"
@@ -224,35 +223,9 @@
           "label": "ChatGPT (OpenAI) API 金鑰",
           "placeholder": "sk-..."
         },
-        "anthropic": {
-          "label": "Claude (Anthropic) API 金鑰",
-          "placeholder": "sk-ant-..."
-        },
-        "gemini": {
-          "label": "Gemini (Google) API 金鑰",
-          "placeholder": "AIza..."
-        },
         "elevenlabs": {
           "label": "ElevenLabs API 金鑰",
           "placeholder": "xi-..."
-        },
-        "supermemory": {
-          "title": "Supermemory",
-          "description": "用於長期上下文記憶的儲存後端。",
-          "apiKey": {
-            "label": "Supermemory API 金鑰",
-            "placeholder": "sm-..."
-          },
-          "client": {
-            "label": "Supermemory 用戶端",
-            "placeholder": "client-123",
-            "hint": "用於限定使用者記憶檢索的範圍。"
-          },
-          "baseUrl": {
-            "label": "Supermemory 基礎 URL",
-            "placeholder": "https://api.supermemory.ai"
-          },
-          "localMode": "使用本機模式（儲存在本機）"
         }
       },
       "llm": {
@@ -267,62 +240,11 @@
         "provider": {
           "label": "提供者",
           "openai": "OpenAI",
-          "anthropic": "Claude",
-          "gemini": "Gemini",
-          "ollama": "Ollama",
-          "lmStudio": "LM Studio",
           "openaiCompatible": "自訂 (OpenAI 相容)"
         },
         "providerDescriptions": {
           "openai": "GPT 系列模型",
-          "anthropic": "Anthropic Claude 模型",
-          "gemini": "Google Gemini 模型",
-          "ollama": "本地模型",
-          "lmStudio": "透過 LM Studio 使用本地模型",
           "openaiCompatible": "任何 OpenAI 相容 API（OpenRouter、Together 等）"
-        },
-        "ollama": {
-          "serverUrl": {
-            "label": "Ollama 伺服器位址",
-            "placeholder": "http://localhost:11434"
-          },
-          "models": "Ollama 模型",
-          "refresh": "重新整理",
-          "checking": "正在檢查 Ollama 狀態...",
-          "notRunning": {
-            "title": "Ollama 未執行",
-            "description": "安裝並執行 Ollama 以使用本機模型。",
-            "download": "下載 Ollama"
-          },
-          "running": "Ollama 執行中",
-          "installed": "已安裝",
-          "downloadModel": "下載",
-          "removeModel": "移除",
-          "downloading": "正在下載...",
-          "removing": "正在移除...",
-          "startingDownload": "開始下載...",
-          "deleteFailed": "刪除模型失敗。",
-          "curatedDescriptions": {
-            "llama32": "Meta 通用模型（3B）",
-            "llama32_1b": "體積小，速度快",
-            "mistral": "高效通用模型",
-            "codellama": "程式碼生成與補全",
-            "phi3": "Microsoft 小型語言模型",
-            "gemma2": "Google 開源模型（9B）",
-            "qwen25": "Alibaba 多語言模型（7B）",
-            "deepseekR1": "側重推理能力的模型（7B）"
-          }
-        },
-        "lmStudio": {
-          "baseUrl": {
-            "label": "伺服器網址",
-            "hint": "LM Studio 本地伺服器網址（預設：http://127.0.0.1:1234/v1）"
-          },
-          "apiKey": {
-            "toggle": "可選 API 金鑰",
-            "placeholder": "如不需要，請留空",
-            "hint": "僅當您在 LM Studio 中設定了驗證時才需要。"
-          }
         },
         "openaiCompatible": {
           "baseUrl": {

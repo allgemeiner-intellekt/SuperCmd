@@ -47,7 +47,6 @@ import { recordRootSearchLaunchInState, type RootSearchRankingState } from '../s
 import { streamAI, streamAIChat, isAIAvailable, transcribeAudio } from './ai-provider';
 import { scanAppRemnants } from './app-uninstaller';
 import * as soulverCalculator from './soulver-calculator';
-import { addMemory, buildMemoryContextSystemPrompt } from './memory';
 import {
   createScriptCommandTemplate,
   ensureSampleScriptCommand,
@@ -10487,7 +10486,6 @@ async function dispatchRendererCustomEvent(eventName: string, detail: any): Prom
 
 const AI_DISABLED_SYSTEM_COMMANDS = new Set<string>([
   'system-cursor-prompt',
-  'system-add-to-memory',
   'system-supercmd-whisper',
   'system-supercmd-whisper-toggle',
   'system-supercmd-whisper-speak-toggle',
@@ -10511,7 +10509,7 @@ function isAISectionDisabledForCommand(commandId: string, settings?: AppSettings
   if (id === 'system-supercmd-whisper' || id === 'system-supercmd-whisper-toggle' || id === 'system-supercmd-whisper-speak-toggle') {
     return resolved.ai?.whisperEnabled === false;
   }
-  if (id === 'system-cursor-prompt' || id === 'system-add-to-memory') return resolved.ai?.llmEnabled === false;
+  if (id === 'system-cursor-prompt') return resolved.ai?.llmEnabled === false;
   return false;
 }
 
@@ -10843,35 +10841,6 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
     showPromptWindow(earlyCaretRect, earlyInputRect);
     return true;
   }
-  if (commandId === 'system-add-to-memory') {
-    const selectedTextRaw = String(
-      await getSelectedTextForSpeak({
-        allowClipboardFallback: source !== 'launcher',
-      }) || getRecentSelectionSnapshot() || ''
-    );
-    const selectedText = selectedTextRaw.trim();
-    if (!selectedText) {
-      void showMemoryStatusBar('error', 'No selected text found.');
-      return false;
-    }
-    rememberSelectionSnapshot(selectedTextRaw);
-    void showMemoryStatusBar('processing', 'Adding to memory...');
-    const result = await addMemory(loadSettings(), {
-      text: selectedText,
-      source: source === 'hotkey' ? 'hotkey' : 'launcher',
-    });
-    if (!result.success) {
-      console.warn('[Supermemory] add memory failed:', result.error || 'Unknown error');
-      void showMemoryStatusBar('error', result.error || 'Failed to add to memory.');
-      return false;
-    }
-    void showMemoryStatusBar('success', 'Added to memory.');
-    if (source === 'launcher') {
-      setTimeout(() => hideWindow(), 50);
-    }
-    return true;
-  }
-
   if (commandId === 'system-reset-launcher-position') {
     clearWindowState();
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -17060,34 +17029,6 @@ if let tiff = image?.tiffRepresentation {
     return String(getRecentSelectionSnapshot() || '');
   });
 
-  ipcMain.handle(
-    'memory-add',
-    async (
-      _event: any,
-      payload: { text: string; userId?: string; source?: string; metadata?: Record<string, any> }
-    ) => {
-      const text = String(payload?.text || '').trim();
-      if (!text) {
-        void showMemoryStatusBar('error', 'No selected text found.');
-        return { success: false, error: 'No selected text found.' };
-      }
-      void showMemoryStatusBar('processing', 'Adding to memory...');
-      return await addMemory(loadSettings(), {
-        text,
-        userId: payload?.userId,
-        source: payload?.source || 'launcher-selection',
-        metadata: payload?.metadata,
-      }).then((result) => {
-        if (result?.success) {
-          void showMemoryStatusBar('success', 'Added to memory.');
-        } else {
-          void showMemoryStatusBar('error', result?.error || 'Failed to add to memory.');
-        }
-        return result;
-      });
-    }
-  );
-
   // ─── IPC: Snippet Manager ─────────────────────────────────────
 
   ipcMain.handle('snippet-get-all', () => {
@@ -17625,20 +17566,11 @@ if let tiff = image?.tiffRepresentation {
       activeAIRequests.set(requestId, controller);
 
       try {
-        const memoryContextSystemPrompt = await buildMemoryContextSystemPrompt(
-          s,
-          String(prompt || ''),
-          { limit: 6 }
-        );
-        const mergedSystemPrompt = [options?.systemPrompt, memoryContextSystemPrompt]
-          .filter((part) => typeof part === 'string' && part.trim().length > 0)
-          .join('\n\n');
-
         const gen = streamAI(s.ai, {
           prompt,
           model: options?.model,
           creativity: options?.creativity,
-          systemPrompt: mergedSystemPrompt || undefined,
+          systemPrompt: options?.systemPrompt,
           signal: controller.signal,
         });
 
@@ -17690,21 +17622,12 @@ if let tiff = image?.tiffRepresentation {
       activeAIRequests.set(requestId, controller);
 
       try {
-        const latestUser = [...(messages || [])].reverse().find((m) => m.role === 'user');
-        const memoryContextSystemPrompt = await buildMemoryContextSystemPrompt(
-          s,
-          String(latestUser?.content || ''),
-          { limit: 6 }
-        );
-        const mergedSystemPrompt = [options?.systemPrompt, memoryContextSystemPrompt]
-          .filter((part) => typeof part === 'string' && part.trim().length > 0)
-          .join('\n\n');
 
         const gen = streamAIChat(s.ai, {
           messages: (messages || []).map((m) => ({ role: m.role, content: String(m.content || '') })),
           model: options?.model,
           creativity: options?.creativity,
-          systemPrompt: mergedSystemPrompt || undefined,
+          systemPrompt: options?.systemPrompt,
           signal: controller.signal,
         });
 

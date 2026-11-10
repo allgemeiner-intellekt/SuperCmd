@@ -352,7 +352,7 @@ export function useLauncherCommandModel({
       ? contextualCommands
       : filteredCommands;
   const hiddenListOnlyCommandIds = useMemo(
-    () => new Set(['system-add-to-memory', 'system-cursor-prompt', 'system-emoji-picker']),
+    () => new Set(['system-cursor-prompt', 'system-emoji-picker']),
     []
   );
   const hasSearchQuery = searchQuery.trim().length > 0;
@@ -427,7 +427,7 @@ export function useLauncherCommandModel({
     const sourceMap = new Map(visibleSourceCommands.map((cmd) => [cmd.id, cmd]));
     const hasSelection = selectedTextSnapshot.trim().length > 0;
     const contextual = hasSelection
-      ? (sourceMap.get('system-add-to-memory') ? [sourceMap.get('system-add-to-memory') as CommandInfo] : [])
+      ? []
       : [];
     const contextualIds = new Set(contextual.map((c) => c.id));
 

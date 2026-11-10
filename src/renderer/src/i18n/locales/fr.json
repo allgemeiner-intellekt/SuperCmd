@@ -1213,7 +1213,7 @@
       "final": {
         "title": "Final step: start SuperCmd from anywhere",
         "description": "Press your global shortcut now to start SuperCmd from any app.",
-        "nextStep": "Next step: Setup Hotkeys for AI Prompt and Memory from SuperCmd Settings -> Extensions to start using AI anywhere."
+        "nextStep": "Étape suivante : configurez un raccourci pour Inline AI Prompt dans les réglages SuperCmd → Extensions."
       },
       "setupDescription": "We will configure launcher hotkeys, privacy permissions, and whisper mode in one pass.",
       "setupSummary": "Whisper dictation and Read mode practice",

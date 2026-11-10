@@ -1195,7 +1195,7 @@
       "final": {
         "title": "Ultimo passo: avvia SuperCmd da ovunque",
         "description": "Premi ora la tua scorciatoia globale per avviare SuperCmd da qualsiasi app.",
-        "nextStep": "Prossimo passo: configura le scorciatoie per Prompt AI e Memoria in Impostazioni SuperCmd -> Estensioni per iniziare a usare l'AI ovunque."
+        "nextStep": "Passaggio successivo: imposta una scorciatoia per Inline AI Prompt in Impostazioni SuperCmd → Estensioni."
       },
       "setupDescription": "Configureremo in un unico passaggio le scorciatoie del launcher, le autorizzazioni di privacy e la modalità whisper.",
       "setupSummary": "Dettatura Whisper e pratica della modalità Read",

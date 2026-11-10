@@ -1213,7 +1213,7 @@
       "final": {
         "title": "最終ステップ: どこからでも SuperCmd を起動",
         "description": "今すぐグローバルショートカットを押して、任意のアプリから SuperCmd を起動してください。",
-        "nextStep": "次のステップ: SuperCmd 設定 -> 拡張機能から AI Prompt と Memory のホットキーを設定して、どこでも AI を使い始めましょう。"
+        "nextStep": "次のステップ：SuperCmd 設定 → 拡張機能で Inline AI Prompt のショートカットを設定してください。"
       },
       "setupDescription": "ランチャーのホットキー、プライバシー権限、Whisper モードを一度に設定します。",
       "setupSummary": "Whisper ディクテーションと Read モードの練習",

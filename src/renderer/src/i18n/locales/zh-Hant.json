@@ -1213,7 +1213,7 @@
       "final": {
         "title": "最後一步：從任何地方啟動 SuperCmd",
         "description": "現在按一次你的全域快捷鍵，從任何 App 裡啟動 SuperCmd。",
-        "nextStep": "下一步：去 SuperCmd 設定 -> 擴充功能，為 AI Prompt 和 Memory 配置快捷鍵，開始在任何地方使用 AI。"
+        "nextStep": "下一步：在 SuperCmd 設定 → 擴充功能中為 Inline AI Prompt 設定快捷鍵，隨處使用 AI。"
       },
       "setupDescription": "我們會一次完成啟動器快捷鍵、隱私權限和 Whisper 模式設定。",
       "setupSummary": "Whisper 聽寫與朗讀模式練習",

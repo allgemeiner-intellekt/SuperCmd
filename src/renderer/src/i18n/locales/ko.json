@@ -1213,7 +1213,7 @@
       "final": {
         "title": "마지막 단계: 어디서든 SuperCmd 시작하기",
         "description": "이제 전역 단축키를 눌러 모든 앱에서 SuperCmd를 시작하세요.",
-        "nextStep": "다음 단계: SuperCmd 설정 -> 확장에서 AI 프롬프트 및 메모리용 단축키를 설정하여 어디에서나 AI 사용을 시작할 수 있습니다."
+        "nextStep": "다음 단계: SuperCmd 설정 → 확장 프로그램에서 Inline AI Prompt 단축키를 설정하세요."
       },
       "setupDescription": "런처 단축키, 개인정보 보호 권한, Whisper 모드를 한 번에 설정합니다.",
       "setupSummary": "Whisper 받아쓰기와 읽기 모드 연습",

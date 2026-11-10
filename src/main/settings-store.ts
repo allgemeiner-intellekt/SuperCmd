@@ -1,3 +1,4 @@
+import { removeRetiredCommandHotkeys } from '../shared/retired-commands';
 /**
  * Settings Store
  *
@@ -5,6 +6,7 @@
  * Stored at ~/Library/Application Support/SuperCmd/settings.json
  */
 
+import { DEFAULT_OPENAI_MODEL, normalizeAIModelSettings } from '../shared/ai-models';
 import { app } from 'electron';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
@@ -49,17 +51,8 @@ export interface AISettings {
   supermemoryLocalMode: boolean;
   ollamaBaseUrl: string;
   defaultModel: string;
-  speechCorrectionModel: string;
-  speechToTextModel: string;
-  speechLanguage: string;
-  speechVocabulary: string;
-  textToSpeechModel: string;
-  edgeTtsVoice: string;
-  speechCorrectionEnabled: boolean;
   enabled: boolean;
   llmEnabled: boolean;
-  whisperEnabled: boolean;
-  readEnabled: boolean;
   openaiCompatibleAppendV1: boolean;
   openaiCompatibleBaseUrl: string;
   openaiCompatibleApiKey: string;
@@ -226,7 +219,6 @@ export interface AppSettings {
   recentCommands: string[];
   recentCommandLaunchCounts: Record<string, number>;
   hasSeenOnboarding: boolean;
-  hasSeenWhisperOnboarding: boolean;
   fileSearchProtectedRootsEnabled: boolean;
   disableFileSearchResults: boolean;
   showMenuBarIcon: boolean;
@@ -307,18 +299,9 @@ const DEFAULT_AI_SETTINGS: AISettings = {
   supermemoryBaseUrl: 'https://api.supermemory.ai',
   supermemoryLocalMode: false,
   ollamaBaseUrl: 'http://localhost:11434',
-  defaultModel: '',
-  speechCorrectionModel: '',
-  speechToTextModel: 'whispercpp',
-  speechLanguage: 'en-US',
-  speechVocabulary: '',
-  textToSpeechModel: 'edge-tts',
-  edgeTtsVoice: 'en-US-EricNeural',
-  speechCorrectionEnabled: false,
+  defaultModel: DEFAULT_OPENAI_MODEL,
   enabled: true,
   llmEnabled: true,
-  whisperEnabled: true,
-  readEnabled: true,
   openaiCompatibleAppendV1: true,
   openaiCompatibleBaseUrl: '',
   openaiCompatibleApiKey: '',
@@ -344,9 +327,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   customExtensionFolders: [],
   scriptCommandFolders: [],
   commandHotkeys: {
-    'system-supercmd-whisper': 'Command+Shift+W',
-    'system-supercmd-whisper-speak-toggle': 'Fn',
-    'system-supercmd-speak': 'Command+Shift+S',
     'system-window-management-left': 'Control+Alt+Left',
     'system-window-management-right': 'Control+Alt+Right',
     'system-window-management-top': 'Control+Alt+Up',
@@ -372,7 +352,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   recentCommands: [],
   recentCommandLaunchCounts: {},
   hasSeenOnboarding: false,
-  hasSeenWhisperOnboarding: false,
   fileSearchProtectedRootsEnabled: false,
   disableFileSearchResults: false,
   showMenuBarIcon: true,
@@ -454,6 +433,7 @@ let settingsLoadDegraded = false;
  */
 function hydrateAISettings(raw: any): AISettings {
   const merged: AISettings = { ...DEFAULT_AI_SETTINGS, ...(raw || {}) };
+  if (merged.provider === 'openai-compatible' && !raw?.defaultModel) merged.defaultModel = '';
   for (const field of SENSITIVE_AI_KEYS) {
     const fromVault = getSecret(aiVaultKey(field));
     const fromDisk = typeof merged[field] === 'string' ? (merged[field] as string) : '';
@@ -463,7 +443,7 @@ function hydrateAISettings(raw: any): AISettings {
       merged[field] = fromVault || fromDisk || '';
     }
   }
-  return merged;
+  return normalizeAIModelSettings(merged);
 }
 
 function normalizeFontSize(value: any): AppFontSize {
@@ -1205,27 +1185,9 @@ export function loadSettings(): AppSettings {
     // arbitrary keys a power user might add by hand.
     const parsedLocal = loadLocalSettings();
     const parsed: any = { ...parsedSync, ...parsedLocal };
-    const parsedHotkeys = { ...(parsed.commandHotkeys || {}) };
+    const parsedHotkeys = removeRetiredCommandHotkeys(parsed.commandHotkeys || {});
     const parsedAliases = { ...(parsed.commandAliases || {}) } as Record<string, any>;
-    const hasParsedHotkey = (key: string) => Object.prototype.hasOwnProperty.call(parsedHotkeys, key);
-    if (!hasParsedHotkey('system-supercmd-whisper-speak-toggle')) {
-      if (parsedHotkeys['system-supercmd-whisper-start']) {
-        parsedHotkeys['system-supercmd-whisper-speak-toggle'] = parsedHotkeys['system-supercmd-whisper-start'];
-      } else if (parsedHotkeys['system-supercmd-whisper-stop']) {
-        parsedHotkeys['system-supercmd-whisper-speak-toggle'] = parsedHotkeys['system-supercmd-whisper-stop'];
-      }
-    }
-    if (hasParsedHotkey('system-supercmd-whisper-toggle')) {
-      if (!hasParsedHotkey('system-supercmd-whisper-start')) {
-        parsedHotkeys['system-supercmd-whisper-start'] = parsedHotkeys['system-supercmd-whisper-toggle'];
-      }
-      if (!hasParsedHotkey('system-supercmd-whisper')) {
-        parsedHotkeys['system-supercmd-whisper'] = parsedHotkeys['system-supercmd-whisper-toggle'];
-      }
-    }
-    delete parsedHotkeys['system-supercmd-whisper-toggle'];
-    delete parsedHotkeys['system-supercmd-whisper-start'];
-    delete parsedHotkeys['system-supercmd-whisper-stop'];
+
     const normalizedAliases: Record<string, string> = {};
     for (const [commandId, aliasValue] of Object.entries(parsedAliases)) {
       const normalizedCommandId = String(commandId || '').trim();
@@ -1270,8 +1232,6 @@ export function loadSettings(): AppSettings {
       // Existing users with older settings should not be forced into onboarding.
       hasSeenOnboarding:
         parsed.hasSeenOnboarding ?? true,
-      hasSeenWhisperOnboarding:
-        parsed.hasSeenWhisperOnboarding ?? false,
       fileSearchProtectedRootsEnabled:
         parsed.fileSearchProtectedRootsEnabled ?? DEFAULT_SETTINGS.fileSearchProtectedRootsEnabled,
       disableFileSearchResults: normalizeBoolean(
@@ -1543,6 +1503,8 @@ function saveSettingsInternal(
   options: SaveSettingsOptions = {}
 ): AppSettings {
   const current = loadSettings();
+  if (patch.ai) patch = { ...patch, ai: normalizeAIModelSettings({ ...current.ai, ...patch.ai }) };
+  patch = { ...patch, commandHotkeys: removeRetiredCommandHotkeys(patch.commandHotkeys ?? current.commandHotkeys) };
   const updated = {
     ...current,
     ...patch,

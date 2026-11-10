@@ -5,16 +5,15 @@
  * - filterCommands: text search + hidden-command filtering
  * - Icon renderers: renderCommandIcon, renderSuperCmdLogoIcon, getSystemCommandFallbackIcon
  * - Display helpers: getCommandDisplayTitle, getCategoryLabel, getCommandAccessoryLabel, formatShortcutLabel, renderShortcutLabel
- * - Voice utilities: buildReadVoiceOptions, getVoiceLanguageCode, getFallbackVoiceLabel
  * - parseIntervalToMs: converts interval strings like "1m", "12h" to milliseconds
- * - Types: LauncherAction, MemoryFeedback, ReadVoiceOption
+ * - Types: LauncherAction, MemoryFeedback
  *
  * No side-effects; all functions are stateless and safe to import anywhere.
  */
 
 import React from 'react';
 import { Search, Power, Settings, Puzzle, Sparkles, FileText, Mic, Volume2, Brain, TerminalSquare, RefreshCw, LayoutGrid, Lock, Trash2, Store, Globe, PanelTop, Bookmark, Clock, Menu } from 'lucide-react';
-import type { CommandInfo, EdgeTtsVoice } from '../../types/electron';
+import type { CommandInfo } from '../../types/electron';
 import supercmdLogo from '../../../../supercmd.svg';
 import IconCalendar from '../icons/Calendar';
 import IconCamera from '../icons/Camera';
@@ -68,11 +67,6 @@ export type MemoryFeedback = {
   type: 'success' | 'error';
   text: string;
 } | null;
-
-export type ReadVoiceOption = {
-  value: string;
-  label: string;
-};
 
 type Translator = (key: string, params?: Record<string, string | number>) => string;
 
@@ -451,64 +445,6 @@ export function isSuperCmdSystemCommand(commandId: string): boolean {
   );
 }
 
-export function getVoiceLanguageCode(voiceId: string): string {
-  const id = String(voiceId || '').trim();
-  const match = /^([a-z]{2}-[A-Z]{2})-/.exec(id);
-  return match?.[1] || '';
-}
-
-export function getFallbackVoiceLabel(voiceId: string): string {
-  const id = String(voiceId || '').trim();
-  if (!id) return 'Voice';
-  const base = id.split('-').slice(2).join('-').replace(/Neural$/i, '').trim();
-  const lang = getVoiceLanguageCode(id);
-  return base ? `${base} (${lang || 'Unknown'})` : id;
-}
-
-export function buildReadVoiceOptions(
-  allVoices: EdgeTtsVoice[],
-  currentVoice: string,
-  configuredVoice: string
-): ReadVoiceOption[] {
-  const configured = String(configuredVoice || '').trim();
-  const current = String(currentVoice || '').trim();
-  const targetVoice = configured || current;
-  const targetLang = getVoiceLanguageCode(targetVoice) || getVoiceLanguageCode(current);
-
-  const filtered = allVoices
-    .filter((voice) => (targetLang ? voice.languageCode === targetLang : true))
-    .slice()
-    .sort((a, b) => {
-      const genderScore = (v: EdgeTtsVoice) => (String(v.gender).toLowerCase() === 'female' ? 0 : 1);
-      const genderCmp = genderScore(a) - genderScore(b);
-      if (genderCmp !== 0) return genderCmp;
-      return String(a.label || '').localeCompare(String(b.label || ''));
-    });
-
-  const options: ReadVoiceOption[] = filtered.map((voice) => {
-    const style = String(voice.style || '').trim();
-    const gender = String(voice.gender || '').toLowerCase() === 'male' ? 'Male' : 'Female';
-    const languageCode = String(voice.languageCode || '').trim();
-    const languageSuffix = languageCode ? ` (${languageCode})` : '';
-    const styleSuffix = style ? ` - ${style}` : '';
-    return {
-      value: voice.id,
-      label: `${voice.label}${styleSuffix} - ${gender}${languageSuffix}`,
-    };
-  });
-
-  const ensureVoicePresent = (voiceId: string) => {
-    const id = String(voiceId || '').trim();
-    if (!id) return;
-    if (options.some((opt) => opt.value === id)) return;
-    options.unshift({ value: id, label: getFallbackVoiceLabel(id) });
-  };
-  ensureVoicePresent(current);
-  ensureVoicePresent(configured);
-
-  return options;
-}
-
 export function renderSuperCmdLogoIcon(): React.ReactNode {
   return (
     <img
@@ -526,10 +462,6 @@ export function getCommandDisplayTitle(command: CommandInfo, t?: Translator): st
     switch (String(command.id || '').trim()) {
       case 'system-open-settings':
         return t('settings.title');
-      case 'system-supercmd-whisper':
-        return t('whisper.title');
-      case 'system-supercmd-speak':
-        return t('read.title');
       default:
         break;
     }
@@ -1178,14 +1110,6 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
     );
   }
 
-  if (commandId === 'system-add-to-memory') {
-    return (
-      <div className="w-5 h-5 rounded bg-fuchsia-500/20 flex items-center justify-center">
-        <Brain className="w-3 h-3 text-fuchsia-200" />
-      </div>
-    );
-  }
-
   if (commandId === 'system-clipboard-manager') {
     return (
       <div className="w-5 h-5 flex items-center justify-center">
@@ -1302,30 +1226,6 @@ export function getSystemCommandFallbackIcon(commandId: string): React.ReactNode
             } as React.CSSProperties
           }
         />
-      </div>
-    );
-  }
-
-  if (commandId === 'system-supercmd-whisper') {
-    return (
-      <div className="w-5 h-5 rounded bg-sky-500/20 flex items-center justify-center">
-        <Mic className="w-3 h-3 text-sky-300" />
-      </div>
-    );
-  }
-
-  if (commandId === 'system-whisper-onboarding') {
-    return (
-      <div className="w-5 h-5 rounded bg-sky-500/20 flex items-center justify-center">
-        <Sparkles className="w-3 h-3 text-sky-200" />
-      </div>
-    );
-  }
-
-  if (commandId === 'system-supercmd-speak') {
-    return (
-      <div className="w-5 h-5 rounded bg-indigo-500/20 flex items-center justify-center">
-        <Volume2 className="w-3 h-3 text-indigo-200" />
       </div>
     );
   }

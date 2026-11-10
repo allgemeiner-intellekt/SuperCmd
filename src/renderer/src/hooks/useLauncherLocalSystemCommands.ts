@@ -48,11 +48,10 @@ type UseLauncherLocalSystemCommandsOptions = {
   showOnboarding: boolean;
   showWindowManager: boolean;
 
-  whisperSessionRef: React.MutableRefObject<boolean>;
   windowPresetCommandQueueRef: React.MutableRefObject<Promise<void>>;
 
   openOnboarding: () => void;
-  openWhisper: () => void;
+
   openClipboardManager: (openedViaShortcut?: boolean) => void;
   openSnippetManager: (mode: 'search' | 'create') => void;
   openNotesSearch: () => void;
@@ -61,15 +60,11 @@ type UseLauncherLocalSystemCommandsOptions = {
   openFileSearch: () => void;
   openWebSearchMode: (initialQuery?: string) => void;
   openCamera: () => void;
-  openSpeak: () => void;
+
   openWindowManager: () => void;
   openMenuItemSearch: () => void;
   openSchedule: () => void;
 
-  setShowWhisper: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowWhisperOnboarding: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowWhisperHint: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowSpeak: React.Dispatch<React.SetStateAction<boolean>>;
   setShowWindowManager: React.Dispatch<React.SetStateAction<boolean>>;
 
   setSearchQuery: React.Dispatch<React.SetStateAction<string>>;
@@ -101,10 +96,10 @@ export function useLauncherLocalSystemCommands(
     setMemoryFeedback,
     showOnboarding,
     showWindowManager,
-    whisperSessionRef,
+
     windowPresetCommandQueueRef,
     openOnboarding,
-    openWhisper,
+
     openClipboardManager,
     openSnippetManager,
     openNotesSearch,
@@ -113,14 +108,11 @@ export function useLauncherLocalSystemCommands(
     openFileSearch,
     openWebSearchMode,
     openCamera,
-    openSpeak,
+
     openWindowManager,
     openMenuItemSearch,
     openSchedule,
-    setShowWhisper,
-    setShowWhisperOnboarding,
-    setShowWhisperHint,
-    setShowSpeak,
+
     setShowWindowManager,
     setSearchQuery,
     setSelectedIndex,
@@ -142,97 +134,85 @@ export function useLauncherLocalSystemCommands(
     }
     setBrowserResultsViewQuery(null);
     setWebSearchQuery(null);
-    if (commandId === 'system-supercmd-whisper' || commandId === 'system-supercmd-speak') {
-      try {
-        const settings = await window.electron.getSettings();
-        if (settings.ai?.enabled === false) {
-          return true;
-        }
-      } catch {}
-    }
+
     if (commandId === 'system-open-onboarding') {
       await window.electron.setLauncherMode('onboarding');
-      whisperSessionRef.current = false;
+
       openOnboarding();
       return true;
     }
-    if (commandId === 'system-whisper-onboarding') {
-      await window.electron.setLauncherMode('onboarding');
-      whisperSessionRef.current = false;
-      openOnboarding();
-      return true;
-    }
+
     if (commandId === 'system-clipboard-manager') {
-      whisperSessionRef.current = false;
+
       openClipboardManager(options?.fromMainEvent === true);
       return true;
     }
     if (commandId === 'system-search-snippets') {
-      whisperSessionRef.current = false;
+
       openSnippetManager('search');
       return true;
     }
     if (commandId === 'system-create-snippet') {
-      whisperSessionRef.current = false;
+
       openSnippetManager('create');
       return true;
     }
     if (commandId === 'system-search-notes') {
-      whisperSessionRef.current = false;
+
       openNotesSearch();
       return true;
     }
     if (commandId === 'system-create-note') {
-      whisperSessionRef.current = false;
+
       window.electron.openNotesWindow('create');
       return true;
     }
     if (commandId === 'system-search-canvases') {
-      whisperSessionRef.current = false;
+
       openCanvasSearch();
       return true;
     }
     if (commandId === 'system-create-canvas') {
-      whisperSessionRef.current = false;
+
       window.electron.openCanvasWindow('create');
       return true;
     }
     if (commandId === 'system-search-quicklinks') {
-      whisperSessionRef.current = false;
+
       openQuickLinkManager('search');
       return true;
     }
     if (commandId === 'system-create-quicklink') {
-      whisperSessionRef.current = false;
+
       openQuickLinkManager('create');
       return true;
     }
     if (commandId === 'system-search-files') {
-      whisperSessionRef.current = false;
+
       openFileSearch();
       return true;
     }
     if (commandId === WEB_SEARCH_COMMAND_ID) {
-      whisperSessionRef.current = false;
+
       openWebSearchMode('');
       return true;
     }
     if (commandId === BROWSER_SEARCH_OPEN_TABS_COMMAND_ID) {
-      whisperSessionRef.current = false;
+
       refreshBrowserOpenTabs();
       setBrowserResultsViewScope('open-tabs');
       setBrowserResultsViewQuery('');
       return true;
     }
     if (commandId === BROWSER_SEARCH_BOOKMARKS_COMMAND_ID) {
-      whisperSessionRef.current = false;
+
       setBrowserResultsViewScope('bookmarks');
       setBrowserResultsViewQuery('');
       refreshBrowserEntriesIfStale();
       return true;
     }
     if (commandId === BROWSER_SEARCH_HISTORY_COMMAND_ID) {
-      whisperSessionRef.current = false;
+
       setBrowserHistoryProfileMenuOpen(false);
       setBrowserResultsViewScope('history');
       setBrowserResultsViewQuery('');
@@ -240,17 +220,17 @@ export function useLauncherLocalSystemCommands(
       return true;
     }
     if (commandId === 'system-my-schedule') {
-      whisperSessionRef.current = false;
+
       openSchedule();
       return true;
     }
     if (commandId === 'system-camera') {
-      whisperSessionRef.current = false;
+
       openCamera();
       return true;
     }
     if (isWindowManagementPresetCommandId(commandId)) {
-      whisperSessionRef.current = false;
+
       // For launcher-initiated execution, route through main first so it can
       // capture the real frontmost target window before running the preset.
       if (!options?.fromMainEvent) {
@@ -270,7 +250,7 @@ export function useLauncherLocalSystemCommands(
       return true;
     }
     if (commandId === 'system-window-management') {
-      whisperSessionRef.current = false;
+
       if (showWindowManager) {
         setShowWindowManager(false);
         return true;
@@ -289,70 +269,18 @@ export function useLauncherLocalSystemCommands(
       return true;
     }
     if (commandId === 'system-menu-item-search') {
-      whisperSessionRef.current = false;
+
       // In-window view — keep the launcher open (do NOT hideWindow).
       openMenuItemSearch();
       setSearchQuery('');
       setSelectedIndex(0);
       return true;
     }
-    if (commandId === 'system-add-to-memory') {
-      if (memoryActionLoading) return true;
-      setMemoryActionLoading(true);
-      setMemoryFeedback(null);
-      const selectedText = String(
-        await window.electron.getSelectedTextStrict() || selectedTextSnapshot || ''
-      ).trim();
-      if (!selectedText) {
-        setSelectedTextSnapshot('');
-        setMemoryActionLoading(false);
-        return true;
-      }
-      try {
-        const result = await window.electron.memoryAdd({
-          text: selectedText,
-          source: 'launcher-selection',
-        });
-        if (!result.success) {
-          console.error('[Supermemory] Failed to add memory:', result.error || 'Unknown error');
-          return true;
-        }
-        setSelectedTextSnapshot('');
-        setSearchQuery('');
-        setSelectedIndex(0);
-      } finally {
-        setMemoryActionLoading(false);
-      }
-      return true;
-    }
     if (commandId === 'system-cursor-prompt') {
       await window.electron.executeCommand(commandId);
       return true;
     }
-    if (commandId === 'system-supercmd-whisper') {
-      whisperSessionRef.current = true;
-      if (showOnboarding) {
-        setShowWhisper(true);
-        setShowWhisperOnboarding(true);
-        setShowWhisperHint(true);
-        return true;
-      }
-      openWhisper();
-      return true;
-    }
-    if (commandId === 'system-supercmd-speak') {
-      whisperSessionRef.current = false;
-      if (showOnboarding) {
-        setShowSpeak(true);
-        return true;
-      }
-      openSpeak();
-      return true;
-    }
-    if (commandId === 'system-supercmd-speak-close') {
-      setShowSpeak(false);
-      return true;
-    }
+
     if (commandId === 'system-import-snippets') {
       await window.electron.snippetImport();
       return true;
@@ -388,10 +316,10 @@ export function useLauncherLocalSystemCommands(
     selectedTextSnapshot,
     showOnboarding,
     showWindowManager,
-    whisperSessionRef,
+
     windowPresetCommandQueueRef,
     openOnboarding,
-    openWhisper,
+
     openClipboardManager,
     openSnippetManager,
     openNotesSearch,
@@ -400,14 +328,11 @@ export function useLauncherLocalSystemCommands(
     openFileSearch,
     openWebSearchMode,
     openCamera,
-    openSpeak,
+
     openWindowManager,
     openMenuItemSearch,
     openSchedule,
-    setShowWhisper,
-    setShowWhisperOnboarding,
-    setShowWhisperHint,
-    setShowSpeak,
+
     setShowWindowManager,
     setSearchQuery,
     setSelectedIndex,

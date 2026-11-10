@@ -214,45 +214,12 @@
         "description": "AI 기능을 위한 마스터 스위치."
       },
       "tabs": {
-        "apiKeys": "API 키",
-        "llm": "LLM",
-        "whisper": "SuperCmd Whisper",
-        "speak": "SuperCmd Read"
+        "llm": "LLM"
       },
       "apiKeys": {
         "openai": {
           "label": "ChatGPT (OpenAI) API 키",
           "placeholder": "sk-..."
-        },
-        "anthropic": {
-          "label": "Claude (Anthropic) API 키",
-          "placeholder": "sk-ant-..."
-        },
-        "gemini": {
-          "label": "Gemini (Google) API 키",
-          "placeholder": "AIza..."
-        },
-        "elevenlabs": {
-          "label": "ElevenLabs API 키",
-          "placeholder": "xi-..."
-        },
-        "supermemory": {
-          "title": "Supermemory",
-          "description": "장기 컨텍스트를 위한 메모리 백엔드.",
-          "apiKey": {
-            "label": "Supermemory API 키",
-            "placeholder": "sm-..."
-          },
-          "client": {
-            "label": "Supermemory 클라이언트",
-            "placeholder": "client-123",
-            "hint": "사용자별 메모리 검색 범위를 구분할 때 사용합니다."
-          },
-          "baseUrl": {
-            "label": "Supermemory 기본 URL",
-            "placeholder": "https://api.supermemory.ai"
-          },
-          "localMode": "로컬 모드 사용(로컬에 저장됨)"
         }
       },
       "llm": {
@@ -267,62 +234,11 @@
         "provider": {
           "label": "제공자",
           "openai": "OpenAI",
-          "anthropic": "Claude",
-          "gemini": "Gemini",
-          "ollama": "Ollama",
-          "lmStudio": "LM Studio",
           "openaiCompatible": "사용자 지정(OpenAI 호환)"
         },
         "providerDescriptions": {
           "openai": "GPT 제품군 모델",
-          "anthropic": "Claude 계열 모델",
-          "gemini": "Google Gemini 모델",
-          "ollama": "로컬 모델",
-          "lmStudio": "LM Studio를 통한 로컬 모델",
           "openaiCompatible": "모든 OpenAI 호환 API(OpenRouter, Together 등)"
-        },
-        "ollama": {
-          "serverUrl": {
-            "label": "Ollama 서버 URL",
-            "placeholder": "http://localhost:11434"
-          },
-          "models": "Ollama 모델",
-          "refresh": "새로고침",
-          "checking": "Ollama 상태 확인 중...",
-          "notRunning": {
-            "title": "Ollama가 실행되고 있지 않습니다.",
-            "description": "로컬 모델을 사용하려면 Ollama를 설치하고 실행하세요.",
-            "download": "Ollama 다운로드"
-          },
-          "running": "Ollama 실행 중",
-          "installed": "설치됨",
-          "downloadModel": "다운로드",
-          "removeModel": "제거",
-          "downloading": "다운로드 중...",
-          "removing": "제거 중...",
-          "startingDownload": "다운로드 시작 중...",
-          "deleteFailed": "모델을 삭제하지 못했습니다.",
-          "curatedDescriptions": {
-            "llama32": "메타범용(3B)",
-            "llama32_1b": "작고 빠름",
-            "mistral": "효율적인 범용",
-            "codellama": "코드 생성 및 완성",
-            "phi3": "Microsoft 소규모 언어 모델",
-            "gemma2": "Google 개방형 모델(9B)",
-            "qwen25": "Alibaba 다국어 모델(7B)",
-            "deepseekR1": "추론 중심 모델(7B)"
-          }
-        },
-        "lmStudio": {
-          "baseUrl": {
-            "label": "서버 URL",
-            "hint": "LM Studio 로컬 서버 URL（기본값：http://127.0.0.1:1234/v1）"
-          },
-          "apiKey": {
-            "toggle": "선택적 API 키",
-            "placeholder": "필요하지 않으면 비워두세요",
-            "hint": "LM Studio에서 인증을 구성한 경우에만 필요합니다."
-          }
         },
         "openaiCompatible": {
           "baseUrl": {
@@ -344,159 +260,6 @@
         "defaultModel": {
           "label": "기본 모델",
           "auto": "자동(제공자 기본값)"
-        }
-      },
-      "whisper": {
-        "enableWhisper": {
-          "title": "SuperCmd Whisper 활성화",
-          "description": "음성 받아쓰기 기능을 켜거나 끕니다."
-        },
-        "title": "SuperCmd Whisper",
-        "description": "음성을 텍스트로 변환하고 전사 결과를 정리합니다.",
-        "model": {
-          "label": "전사 모델",
-          "native": "기본(권장)",
-          "openaiGpt4o": "OpenAI GPT-4o Transcribe",
-          "openaiWhisper": "OpenAI Whisper-1",
-          "elevenlabsScribeV1": "ElevenLabs Scribe v1",
-          "elevenlabsScribeV2": "ElevenLabs Scribe v2"
-        },
-        "modelOptions": {
-          "whispercpp": "SuperCmd Whisper (기본값)",
-          "parakeet": "Parakeet TDT v3(가장 빠름, 25개 이상의 유럽 언어 지원)",
-          "qwen3": "Qwen3 ASR(중국어, 일본어, 한국어, 태국어, 베트남어, 힌디어를 포함한 30개 이상의 언어)",
-          "native": "Apple Speech Recognition",
-          "openaiGpt4o": "OpenAI GPT-4o Transcribe",
-          "openaiWhisper": "OpenAI Whisper-1",
-          "elevenlabsScribeV1": "ElevenLabs Scribe v1",
-          "elevenlabsScribeV2": "ElevenLabs Scribe v2"
-        },
-        "openaiWarning": "OpenAI Whisper가 선택되었습니다. API 키에서 OpenAI API 키를 추가하세요.",
-        "elevenlabsWarning": "ElevenLabs STT가 선택되었습니다. API 키에서 ElevenLabs API 키를 {action}하세요.",
-        "elevenlabsReady": "ElevenLabs STT가 선택되었습니다. 클라우드 전사에 ElevenLabs 키가 사용됩니다.",
-        "recognitionLanguage": "인식 언어",
-        "vocabulary": {
-          "label": "사용자 지정 어휘",
-          "placeholder": "Kotlin, Electron, Raycast, SuperCmd…",
-          "hint": "선택 사항. 인식을 올바른 철자로 유도하려면 잘 쓰이지 않는 단어, 이름, 전문 용어를 쉼표나 줄바꿈으로 구분하여 입력하세요.",
-          "tokenWarning": "약 {count}개 토큰. Whisper는 대략 처음 224개만 사용하므로 그 이후의 단어는 무시됩니다."
-        },
-        "providerInfo": {
-          "parakeet": "Parakeet TDT v3를 통한 오프라인 기기 내 전사. Apple Neural Engine에서 실행됩니다. 처음 사용할 때 모델 준비가 필요합니다. 받아쓰기를 사용하기 전에 아래 모델을 다운로드하세요.",
-          "qwen3": "Qwen3 ASR을 통한 오프라인 온디바이스 전사. 30개 이상의 언어를 지원하고 macOS 15 이상이 필요하며 처음 사용할 때 예열됩니다.",
-          "whispercpp": "Whisper.cpp를 통한 오프라인 온디바이스 전사입니다. 받아쓰기를 사용하기 전에 아래의 기본 ggml 모델을 다운로드하세요.",
-          "native": "SuperCmd Whisper 대신 Apple Speech Recognition을 사용합니다."
-        },
-        "hotkeys": {
-          "title": "Whisper 단축키",
-          "startStop": "말하기 시작/중지",
-          "custom": "사용자 지정…",
-          "holdToTalkHint": "길게 눌러 말하기 키를 선택하세요. 눌러서 녹음, 놓아서 입력. 사용자 지정으로 원하는 조합을 녹음할 수 있습니다."
-        },
-        "autoClose": {
-          "title": "받아쓰기 후 자동 닫기",
-          "description": "받아쓰기가 끝나면 Whisper 바를 자동으로 닫습니다."
-        },
-        "smoothOutput": {
-          "title": "부드러운 출력",
-          "description": "군더더기 표현과 자기 수정 표현을 정리합니다."
-        },
-        "smoothingModel": {
-          "label": "스무딩 모델",
-          "useDefault": "일반 기본 모델 사용",
-          "hint": "현재 제공자의 모델을 사용합니다."
-        },
-        "downloadCards": {
-          "modelDownloadFailed": "모델 다운로드에 실패했습니다.",
-          "actions": {
-            "downloaded": "모델이 다운로드됨",
-            "downloading": "다운로드 중...",
-            "download": "모델 다운로드"
-          },
-          "parakeet": {
-            "title": "Parakeet TDT v3",
-            "description": "다국어 온디바이스 전사. Apple Neural Engine에서 실행됩니다.",
-            "ready": "다운로드되었습니다. Parakeet v3를 오프라인에서 사용할 수 있습니다.",
-            "downloading": "Parakeet v3 모델 다운로드 중",
-            "notDownloaded": "모델이 아직 다운로드되지 않았습니다. 지금 다운로드하여 Parakeet 받아쓰기를 사용하세요."
-          },
-          "qwen3": {
-            "title": "Qwen3 ASR",
-            "description": "30개 언어 온디바이스 전사. macOS 15 이상이 필요합니다.",
-            "ready": "다운로드되었습니다. Qwen3 ASR은 오프라인에서도 사용할 수 있습니다.",
-            "downloading": "Qwen3 ASR 모델 다운로드",
-            "notDownloaded": "모델이 아직 다운로드되지 않았습니다. Qwen3 받아쓰기를 사용하려면 ~900MB int8 모델을 다운로드하세요."
-          },
-          "whispercpp": {
-            "title": "SuperCmd Whisper",
-            "description": "로컬 받아쓰기를 활성화하려면 ggml 기본 모델을 한 번 다운로드하세요.",
-            "ready": "다운로드되었습니다. SuperCmd Whisper를 오프라인에서 사용할 수 있습니다.",
-            "downloading": "SuperCmd Whisper 다운로드 중",
-            "notDownloaded": "모델이 아직 다운로드되지 않았습니다. SuperCmd Whisper 받아쓰기를 사용하려면 지금 다운로드하세요."
-          }
-        }
-      },
-      "speak": {
-        "enableRead": {
-          "title": "SuperCmd Read 활성화",
-          "description": "텍스트 음성 변환 기능을 켜거나 끕니다."
-        },
-        "title": "SuperCmd Read",
-        "description": "선택한 텍스트를 음성으로 읽어줍니다.",
-        "provider": {
-          "label": "음성 제공자",
-          "edgeTTS": "Edge TTS(기본값)",
-          "elevenlabsMultilingual": "ElevenLabs 다국어 v2",
-          "elevenlabsFlash": "ElevenLabs 플래시 v2.5",
-          "elevenlabsTurbo": "ElevenLabs 터보 v2.5",
-          "elevenlabsV3": "ElevenLabs v3(알파)"
-        },
-        "edgeTTS": {
-          "voice": "Edge TTS 음성",
-          "fetching": "전체 음성 목록을 가져오는 중...",
-          "language": {
-            "label": "언어"
-          },
-          "gender": {
-            "label": "음성 성별",
-            "female": "여성",
-            "male": "남성"
-          },
-          "voiceLabel": {
-            "label": "목소리"
-          },
-          "playSample": {
-            "idle": "샘플 음성 재생",
-            "playing": "샘플 재생 중..."
-          }
-        },
-        "elevenlabs": {
-          "model": {
-            "label": "ElevenLabs 모델"
-          },
-          "voice": {
-            "label": "ElevenLabs 음성",
-            "fetching": "목소리를 가져오는 중...",
-            "fetchFailed": "음성을 가져오지 못했습니다.",
-            "builtIn": "기본 제공 음성",
-            "premade": "추가 사전 제작 음성",
-            "custom": "사용자 지정 음성(복제/생성)",
-            "professional": "전문 음성 복제",
-            "available": "ElevenLabs 계정에서 사용자 지정 음성 {count}개{plural}를 사용할 수 있습니다."
-          },
-          "playSample": {
-            "idle": "샘플 음성 재생",
-            "playing": "샘플 재생 중..."
-          },
-          "storageHint": "SuperCmd는 이를 {value}로 저장합니다.",
-          "apiKeyWarning": "API 키에 ElevenLabs API 키를 추가합니다."
-        },
-        "notes": {
-          "title": "참고",
-          "whisperDefault": "Whisper 기본값은 로컬 ggml base 모델을 사용하는 SuperCmd Whisper입니다.",
-          "speakDefault": "말하기 기본값은 언어별 남성/여성 음성 선택이 가능한 Edge TTS입니다.",
-          "englishVoice": "영어 음성 옵션은 의도적으로 미국 및 영국 변형으로 제한됩니다.",
-          "elevenlabsVoices": "API 키가 구성되면 ElevenLabs 사용자 정의 음성(복제/생성)이 자동으로 나타납니다."
         }
       },
       "hotkeyUpdated": "단축키가 업데이트되었습니다.",
@@ -1186,167 +949,36 @@
         "description": "AI와 대화하고, 음성 입력을 사용하고, 글쓰기와 편집에 도움을 받을 수 있습니다."
       }
     },
-    "whisper": {
-      "quick": {
-        "title": "Whisper 빠른 온보딩",
-        "subtitle": "길게 누르면 녹음되고, 떼면 입력됩니다.",
-        "instructions": {
-          "before": "길게 누르기",
-          "after": "한 상태로 말해 보세요. 놓으면 현재 커서 위치에 입력됩니다."
-        },
-        "practiceTitle": "문단 연습",
-        "practicePlaceholder": "오늘 저는 로드맵을 검토하고 이번 주에 가장 중요한 세 가지 작업의 우선순위를 정했습니다. 간단한 요약 초안을 작성하여 점심 식사 전에 팀과 공유하세요.",
-        "practiceHint": "이 편집기에서 연습하세요. 단축키를 누른 상태에서 이 두 문장을 말한 후 손을 떼고 출력을 확인하세요.",
-        "footerHint": "Whisper는 활성화되면 화면 하단 근처에 유지됩니다."
-      }
-    },
-    "voice": {
+    "setup": {
       "steps": {
         "welcome": "환영",
         "coreFeatures": "핵심 기능",
         "hotkeySetup": "단축키 설정",
         "permissions": "권한",
-        "dictationMode": "받아쓰기 모드",
-        "readMode": "읽기 모드",
         "finalCheck": "최종 확인"
-      },
-      "featureCards": {
-        "whisper": {
-          "title": "Whisper",
-          "description": "말하려면 길게 누르고 입력하려면 손을 떼세요."
-        },
-        "read": {
-          "title": "Read",
-          "description": "선택한 텍스트를 자연스러운 목소리로 읽어보세요."
-        }
       },
       "permissions": {
         "inputMonitoringTitle": "입력 모니터링",
-        "inputMonitoringDescription": "Whisper 모드에서 Fn 길게 눌러 말하기 감지와 기타 전역 키 모니터링에 필요합니다.",
-        "speechRecognitionTitle": "음성 인식",
-        "speechRecognitionDescription": "선택 사항입니다. Whisper를 Apple Speech Recognition 대체 모드로 전환한 경우에만 필요합니다.",
-        "microphoneTitle": "마이크로폰",
-        "microphoneDescription": "SuperCmd Whisper 받아쓰기에 필요합니다."
+        "inputMonitoringDescription": "HyperKey 및 전역 키 감지에 필요합니다."
       },
       "permissionNotes": {
-        "blocked": "{target} 접근이 차단되었습니다. 시스템 설정에서 SuperCmd를 허용한 뒤 다시 돌아오세요.",
-        "promptFailed": "권한 프롬프트를 트리거할 수 없습니다. 시스템 설정 -> 개인 정보 보호 및 보안을 열고 SuperCmd를 활성화한 다음 요청을 다시 누르세요.",
-        "notShown": "권한 프롬프트가 나타나지 않았습니다. Whisper를 한 번 연 뒤 다시 눌러 주세요.",
         "homeFolder": "메시지가 나타나면 홈 폴더를 선택한 다음, 필요한 경우 파일 및 폴더에서 SuperCmd를 활성화합니다.",
         "inputMonitoring": "입력 모니터링에서 왼쪽 아래의 \"+\"를 클릭한 뒤 응용 프로그램 폴더에서 SuperCmd를 추가하세요."
-      },
-      "dictation": {
-        "title": "받아쓰기 모드",
-        "howToTest": "테스트 방법",
-        "howToTestHint": "키를 누른 채 샘플을 읽은 후 손을 떼면 삽입됩니다.",
-        "holdKeyUpdated": "길게 누르기 키가 업데이트되었습니다.",
-        "language": "받아쓰기 언어",
-        "sampleTitle": "메시지 샘플",
-        "sampleHint": "키를 누른 채 위 메시지를 읽어보세요.",
-        "placeholder": "받아쓰기 텍스트가 여기에 표시됩니다...",
-        "footerHint": "SuperCmd Whisper는 기본적으로 로컬 ggml base 모델을 사용합니다. Apple Speech Recognition은 설정에서 대체 옵션으로 계속 사용할 수 있습니다.",
-        "models": {
-          "downloadFailed": "모델 다운로드에 실패했습니다. 지금 다시 시도하거나 설정 -> AI -> SuperCmd Whisper를 사용하세요.",
-          "actions": {
-            "downloaded": "다운로드됨",
-            "downloading": "다운로드 중...",
-            "download": "모델 다운로드"
-          },
-          "parakeet": {
-            "title": "Parakeet TDT v3",
-            "ready": "다운로드가 완료되었습니다. Parakeet v3 받아쓰기가 준비되었습니다.",
-            "downloadingLead": "모델을 다운로드하는 중입니다. 잠시만 기다리세요.",
-            "downloading": "Parakeet v3 CoreML 모델 다운로드",
-            "notDownloaded": "SuperCmd는 이 단계에서 Parakeet v3 모델 다운로드를 시작하므로 처음 사용하기 전에 받아쓰기가 준비됩니다."
-          },
-          "whispercpp": {
-            "title": "SuperCmd Whisper",
-            "ready": "다운로드가 완료되었습니다. SuperCmd Whisper 받아쓰기가 준비되었습니다.",
-            "downloadingLead": "모델을 다운로드하는 중입니다. 잠시만 기다리세요.",
-            "downloading": "~300MB ggml 기본 모델 다운로드",
-            "notDownloaded": "SuperCmd는 이 단계에서 SuperCmd Whisper 모델 다운로드를 시작하므로 처음 사용하기 전에 받아쓰기가 준비됩니다."
-          },
-          "cloud": {
-            "title": "클라우드 전사",
-            "description": "클라우드 기반 전사를 사용합니다. 모델 다운로드가 필요하지 않습니다."
-          }
-        },
-        "sampleText": "최고의 시대이자 최악의 시대였으며, 지혜의 시대이자 어리석음의 시대였습니다."
-      },
-      "read": {
-        "badge": "고전문학",
-        "readTime": "1분 읽기",
-        "articleTitle": "오만과 편견",
-        "instructions": {
-          "before": "위의 텍스트를 선택한 후 다음을 누르세요.",
-          "after": "을 눌러 소리 내어 읽어보세요."
-        },
-        "sampleText": "음성 우선 인터페이스가 인기를 끌고 있습니다. 몇 년 동안 속임수로 여겨졌던 새로운 도구가 문자 입력보다 말하는 속도를 훨씬 더 빠르게 만들고 있습니다. 이에 맞춰 기록하는 기능, 스마트 수정 기능, 중단 없이 기존 작업 흐름에 삽입되는 바로가기 키 등이 있습니다."
       },
       "final": {
         "title": "마지막 단계: 어디서든 SuperCmd 시작하기",
         "description": "이제 전역 단축키를 눌러 모든 앱에서 SuperCmd를 시작하세요.",
-        "nextStep": "다음 단계: SuperCmd 설정 -> 확장에서 AI 프롬프트 및 메모리용 단축키를 설정하여 어디에서나 AI 사용을 시작할 수 있습니다."
+        "nextStep": "다음 단계: SuperCmd 설정 → 확장 프로그램에서 Inline AI Prompt 단축키를 설정하세요."
       },
-      "setupDescription": "런처 단축키, 개인정보 보호 권한, Whisper 모드를 한 번에 설정합니다.",
-      "setupSummary": "Whisper 받아쓰기와 읽기 모드 연습",
+      "setupDescription": "런처 단축키와 개인정보 보호 권한을 설정합니다.",
+      "setupSummary": "런처 단축키 및 권한",
       "summary": {
         "title": "지금 구성되는 사항은 다음과 같습니다.",
         "hotkey": "1. 런처 단축키",
-        "permissions": "2. 접근성, 입력 모니터링, 음성 인식, 마이크"
+        "permissions": "2. 손쉬운 사용, 입력 모니터링, 홈 폴더"
       },
-      "setupTitle": "실행, 질문, 받아쓰기, 읽기를 하나로 묶은 명령 인터페이스입니다."
+      "setupTitle": "앱을 실행하고 AI에게 질문하며 명령을 실행하세요."
     }
-  },
-  "whisper": {
-    "title": "SuperCmd Whisper",
-    "description": "음성을 텍스트로 간단하게 변환",
-    "start": "말하기 시작",
-    "stop": "말하기 중지",
-    "listening": "청취...",
-    "processing": "처리 중...",
-    "placeholder": "지금 말하세요...",
-    "close": "Whisper 닫기",
-    "coachmark": {
-      "holdToTalk": "Whisper가 여기에 표시됩니다. {shortcut}을 길게 눌러 말하고, 놓으면 입력됩니다.",
-      "warmingUp": "최초 설정 - 모델 준비 중..."
-    },
-    "status": {
-      "idle": "말하기를 시작하려면 시작을 누르세요.",
-      "apiError": "Whisper API 오류입니다.",
-      "nativeFallback": "현재 Whisper 모델은 Apple Speech Recognition입니다. Apple 대체 모델을 사용하려면 시작을 누르세요.",
-      "transcriptionFailedLocal": "SuperCmd Whisper 전사에 실패했습니다.",
-      "transcriptionFailed": "Whisper 전사에 실패했습니다.",
-      "microphonePermissionRequired": "마이크 권한이 필요합니다.",
-      "microphonePermissionCheckFailed": "마이크 권한 확인에 실패했습니다.",
-      "microphoneAccessDenied": "마이크 액세스가 거부되었습니다.",
-      "startingMicrophone": "마이크 시작 중...",
-      "loadingModels": "Whisper 모델 로드 중...",
-      "nativeRecognizerStartFailed": "음성 인식을 시작하지 못했습니다.",
-      "finishing": "텍스트 변환을 완료하는 중...",
-      "listeningReleaseToProcess": "청취. 처리하려면 릴리스하세요.",
-      "listeningPressAgainToFinish": "청취. 완료하려면 다시 누르세요.",
-      "recordingFailed": "녹음에 실패했습니다.",
-      "speechRecognitionError": "음성 인식 오류입니다."
-    },
-    "errors": {
-      "typeIntoActiveApp": "활성 앱에 입력할 수 없습니다.",
-      "enableMicrophonePermission": "시스템 설정 -> 개인 정보 보호 및 보안 -> 마이크에서 SuperCmd를 활성화한 후 다시 시도하세요.",
-      "allowMicrophonePermission": "SuperCmd Whisper를 사용하려면 마이크 권한을 허용하세요.",
-      "microphoneUnavailable": "마이크에 액세스할 수 없습니다. 시스템 설정 -> 개인 정보 보호 및 보안 -> 마이크를 확인하세요.",
-      "nativeRecognizerStartFailed": "기본 음성 인식기를 시작하지 못했습니다.",
-      "liveTypingRetry": "라이브 타이핑이 뒤쳐졌습니다. 다시 시도해 보세요.",
-      "modelNotReady": "모델은 아직 워밍업 중입니다. 잠시 후에 다시 시도해 보세요.",
-      "recordingFailed": "오디오 녹음을 시작할 수 없습니다."
-    }
-  },
-  "read": {
-    "title": "SuperCmd Read",
-    "description": "선택한 텍스트를 음성으로 읽어줍니다.",
-    "start": "읽기 시작",
-    "stop": "읽기 중지",
-    "reading": "읽는 중...",
-    "noText": "선택한 텍스트가 없습니다."
   },
   "camera": {
     "title": "카메라",

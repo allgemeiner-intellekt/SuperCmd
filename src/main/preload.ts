@@ -66,13 +66,13 @@ const electronAPI = {
   resetLauncherPosition: (): Promise<void> => ipcRenderer.invoke('reset-launcher-position'),
   openDevTools: (): Promise<boolean> => ipcRenderer.invoke('open-devtools'),
   closePromptWindow: (): Promise<void> => ipcRenderer.invoke('close-prompt-window'),
-  setLauncherMode: (mode: 'default' | 'onboarding' | 'whisper' | 'speak' | 'prompt'): Promise<void> =>
+  setLauncherMode: (mode: 'default' | 'onboarding' | 'prompt'): Promise<void> =>
     ipcRenderer.invoke('set-launcher-mode', mode),
   getLastFrontmostApp: (): Promise<{ name: string; path: string; bundleId?: string } | null> =>
     ipcRenderer.invoke('get-last-frontmost-app'),
   restoreLastFrontmostApp: (): Promise<boolean> =>
     ipcRenderer.invoke('restore-last-frontmost-app'),
-  onWindowShown: (callback: (payload?: { mode?: 'default' | 'onboarding' | 'whisper' | 'speak' | 'prompt'; systemCommandId?: string; selectedTextSnapshot?: string }) => void) => {
+  onWindowShown: (callback: (payload?: { mode?: 'default' | 'onboarding' | 'prompt'; systemCommandId?: string; selectedTextSnapshot?: string }) => void) => {
     const listener = (_event: any, payload: any) => callback(payload);
     ipcRenderer.on('window-shown', listener);
     return () => {
@@ -121,40 +121,7 @@ const electronAPI = {
       ipcRenderer.removeListener('onboarding-hotkey-pressed', listener);
     };
   },
-  setDetachedOverlayState: (overlay: 'whisper' | 'speak', visible: boolean): void => {
-    ipcRenderer.send('set-detached-overlay-state', { overlay, visible });
-  },
-  setWhisperIgnoreMouseEvents: (ignore: boolean): void => {
-    ipcRenderer.send('whisper-ignore-mouse-events', { ignore });
-  },
-  onWhisperStopAndClose: (callback: () => void) => {
-    const listener = () => callback();
-    ipcRenderer.on('whisper-stop-and-close', listener);
-    return () => {
-      ipcRenderer.removeListener('whisper-stop-and-close', listener);
-    };
-  },
-  onWhisperStartListening: (callback: () => void) => {
-    const listener = () => callback();
-    ipcRenderer.on('whisper-start-listening', listener);
-    return () => {
-      ipcRenderer.removeListener('whisper-start-listening', listener);
-    };
-  },
-  onWhisperStopListening: (callback: () => void) => {
-    const listener = () => callback();
-    ipcRenderer.on('whisper-stop-listening', listener);
-    return () => {
-      ipcRenderer.removeListener('whisper-stop-listening', listener);
-    };
-  },
-  onWhisperToggleListening: (callback: () => void) => {
-    const listener = () => callback();
-    ipcRenderer.on('whisper-toggle-listening', listener);
-    return () => {
-      ipcRenderer.removeListener('whisper-toggle-listening', listener);
-    };
-  },
+
   onOAuthCallback: (callback: (url: string) => void) => {
     const listener = (_event: any, url: string) => callback(url);
     ipcRenderer.on('oauth-callback', listener);
@@ -179,32 +146,6 @@ const electronAPI = {
       ipcRenderer.removeListener('oauth-logout', listener);
     };
   },
-  onSpeakStatus: (callback: (payload: { state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error'; text: string; index: number; total: number; message?: string; wordIndex?: number }) => void) => {
-    const listener = (_event: any, payload: any) => callback(payload);
-    ipcRenderer.on('speak-status', listener);
-    return () => {
-      ipcRenderer.removeListener('speak-status', listener);
-    };
-  },
-  speakStop: (): Promise<boolean> => ipcRenderer.invoke('speak-stop'),
-  speakTogglePause: (): Promise<{ ok: boolean; status: { state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error'; text: string; index: number; total: number; message?: string; wordIndex?: number } }> =>
-    ipcRenderer.invoke('speak-toggle-pause'),
-  speakPreviousParagraph: (): Promise<boolean> =>
-    ipcRenderer.invoke('speak-previous-paragraph'),
-  speakNextParagraph: (): Promise<boolean> =>
-    ipcRenderer.invoke('speak-next-paragraph'),
-  speakGetStatus: (): Promise<{ state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error'; text: string; index: number; total: number; message?: string; wordIndex?: number }> =>
-    ipcRenderer.invoke('speak-get-status'),
-  speakGetOptions: (): Promise<{ voice: string; rate: string }> =>
-    ipcRenderer.invoke('speak-get-options'),
-  speakUpdateOptions: (patch: { voice?: string; rate?: string; restartCurrent?: boolean }): Promise<{ voice: string; rate: string }> =>
-    ipcRenderer.invoke('speak-update-options', patch),
-  speakPreviewVoice: (payload: { voice: string; text?: string; rate?: string; provider?: 'edge-tts' | 'elevenlabs'; model?: string }): Promise<boolean> =>
-    ipcRenderer.invoke('speak-preview-voice', payload),
-  edgeTtsListVoices: (): Promise<Array<{ id: string; label: string; languageCode: string; languageLabel: string; gender: 'female' | 'male'; style?: string }>> =>
-    ipcRenderer.invoke('edge-tts-list-voices'),
-  elevenLabsListVoices: (): Promise<{ voices: Array<{ id: string; name: string; category: string; description?: string; labels?: Record<string, string>; previewUrl?: string }>; error?: string }> =>
-    ipcRenderer.invoke('elevenlabs-list-voices'),
 
   // ─── Settings ───────────────────────────────────────────────────
   getSettings: (): Promise<any> => ipcRenderer.invoke('get-settings'),
@@ -320,12 +261,9 @@ const electronAPI = {
     ipcRenderer.invoke('replace-spotlight-with-supercmd'),
   checkOnboardingPermissions: (): Promise<Record<string, boolean>> =>
     ipcRenderer.invoke('check-onboarding-permissions'),
-  enableFnWatcherForOnboarding: (): Promise<void> =>
-    ipcRenderer.invoke('enable-fn-watcher-for-onboarding'),
-  disableFnWatcherForOnboarding: (): Promise<void> =>
-    ipcRenderer.invoke('disable-fn-watcher-for-onboarding'),
+
   onboardingRequestPermission: (
-    target: 'accessibility' | 'input-monitoring' | 'microphone' | 'speech-recognition' | 'home-folder'
+    target: 'accessibility' | 'input-monitoring' | 'home-folder'
   ): Promise<{
     granted: boolean;
     requested: boolean;
@@ -754,8 +692,6 @@ const electronAPI = {
     ipcRenderer.invoke('get-selected-text'),
   getSelectedTextStrict: (): Promise<string> =>
     ipcRenderer.invoke('get-selected-text-strict'),
-  memoryAdd: (payload: { text: string; userId?: string; source?: string; metadata?: Record<string, any> }): Promise<{ success: boolean; memoryId?: string; error?: string }> =>
-    ipcRenderer.invoke('memory-add', payload),
 
   // ─── Snippet Manager ────────────────────────────────────────────
   snippetGetAll: (): Promise<any[]> =>
@@ -923,10 +859,7 @@ const electronAPI = {
     ipcRenderer.invoke('paste-file', filePath),
   typeTextLive: (text: string): Promise<boolean> =>
     ipcRenderer.invoke('type-text-live', text),
-  whisperTypeTextLive: (
-    text: string
-  ): Promise<{ typed: boolean; fallbackClipboard: boolean; message?: string }> =>
-    ipcRenderer.invoke('whisper-type-text-live', text),
+
   replaceLiveText: (previousText: string, nextText: string): Promise<boolean> =>
     ipcRenderer.invoke('replace-live-text', previousText, nextText),
   promptApplyGeneratedText: (payload: { previousText?: string; nextText: string }): Promise<boolean> =>
@@ -993,90 +926,7 @@ const electronAPI = {
     ipcRenderer.invoke('ai-cancel', requestId),
   aiIsAvailable: (): Promise<boolean> =>
     ipcRenderer.invoke('ai-is-available'),
-  whisperRefineTranscript: (transcript: string): Promise<{ correctedText: string; source: 'ai' | 'heuristic' | 'raw' }> =>
-    ipcRenderer.invoke('whisper-refine-transcript', transcript),
-  whisperCppModelStatus: (): Promise<{
-    state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-    modelName: string;
-    path: string;
-    bytesDownloaded: number;
-    totalBytes: number | null;
-    error?: string;
-  }> =>
-    ipcRenderer.invoke('whispercpp-model-status'),
-  whisperCppDownloadModel: (): Promise<{
-    state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-    modelName: string;
-    path: string;
-    bytesDownloaded: number;
-    totalBytes: number | null;
-    error?: string;
-  }> =>
-    ipcRenderer.invoke('whispercpp-download-model'),
-  parakeetModelStatus: (): Promise<any> =>
-    ipcRenderer.invoke('parakeet-model-status'),
-  parakeetDownloadModel: (): Promise<any> =>
-    ipcRenderer.invoke('parakeet-download-model'),
-  parakeetWarmup: (): Promise<{ ready: boolean; error?: string }> =>
-    ipcRenderer.invoke('parakeet-warmup'),
-  whisperCppWarmup: (): Promise<{ ready: boolean; error?: string }> =>
-    ipcRenderer.invoke('whispercpp-warmup'),
-  qwen3ModelStatus: (): Promise<any> =>
-    ipcRenderer.invoke('qwen3-model-status'),
-  qwen3DownloadModel: (): Promise<any> =>
-    ipcRenderer.invoke('qwen3-download-model'),
-  qwen3Warmup: (): Promise<{ ready: boolean; error?: string }> =>
-    ipcRenderer.invoke('qwen3-warmup'),
-  whisperDebugLog: (tag: string, message: string, data?: any): void =>
-    ipcRenderer.send('whisper-debug-log', { tag, message, data }),
-  audioCapturerWarmup: (): Promise<{ ready: boolean; error?: string }> =>
-    ipcRenderer.invoke('audio-capturer-warmup'),
-  audioCapturerStart: (): Promise<{ recording: boolean; error?: string }> =>
-    ipcRenderer.invoke('audio-capturer-start'),
-  audioCapturerStop: (): Promise<{ file: string | null; duration: number; error?: string }> =>
-    ipcRenderer.invoke('audio-capturer-stop'),
-  audioCapturerSnapshot: (): Promise<{ file: string | null; duration: number; error?: string }> =>
-    ipcRenderer.invoke('audio-capturer-snapshot'),
-  audioCapturerMeter: (): Promise<{ average: number; peak: number }> =>
-    ipcRenderer.invoke('audio-capturer-meter'),
-  audioCapturerStatus: (): Promise<{ engineReady: boolean; recording: boolean; processAlive: boolean }> =>
-    ipcRenderer.invoke('audio-capturer-status'),
-  whisperTranscribeFile: (audioPath: string, options?: { language?: string }): Promise<string> =>
-    ipcRenderer.invoke('whisper-transcribe-file', audioPath, options),
-  whisperTranscribe: (audioBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }): Promise<string> =>
-    ipcRenderer.invoke('whisper-transcribe', audioBuffer, options),
-  whisperEnsureMicrophoneAccess: (
-    options?: { prompt?: boolean }
-  ): Promise<{
-    granted: boolean;
-    requested: boolean;
-    status: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
-    canPrompt: boolean;
-    error?: string;
-  }> =>
-    ipcRenderer.invoke('whisper-ensure-microphone-access', options),
-  whisperEnsureSpeechRecognitionAccess: (
-    options?: { prompt?: boolean }
-  ): Promise<{
-    granted: boolean;
-    requested: boolean;
-    speechStatus: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
-    microphoneStatus: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
-    error?: string;
-  }> =>
-    ipcRenderer.invoke('whisper-ensure-speech-recognition-access', options),
-  whisperStartNative: (
-    language?: string,
-    options?: { singleUtterance?: boolean }
-  ): Promise<void> =>
-    ipcRenderer.invoke('whisper-start-native', language, options),
-  whisperStopNative: (): Promise<void> =>
-    ipcRenderer.invoke('whisper-stop-native'),
-  onWhisperNativeChunk: (callback: (data: { transcript?: string; isFinal?: boolean; error?: string; ready?: boolean; ended?: boolean }) => void) => {
-    const listener = (_event: any, data: any) => callback(data);
-    ipcRenderer.on('whisper-native-chunk', listener);
-    return () => { ipcRenderer.removeListener('whisper-native-chunk', listener); };
-  },
+
   onAIStreamChunk: (callback: (data: { requestId: string; chunk: string }) => void) => {
     const listener = (_event: any, data: any) => callback(data);
     ipcRenderer.on('ai-stream-chunk', listener);

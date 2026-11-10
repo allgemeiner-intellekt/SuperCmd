@@ -116,6 +116,8 @@ function fixture(t, { contents, encrypted = false } = {}) {
       if (specifier === 'path') return path;
       if (specifier === 'crypto') return crypto;
       if (specifier === 'child_process') return { spawnSync() { assert.fail('unexpected native invocation'); } };
+      if (specifier === '../shared/retired-commands') return load('../shared/retired-commands');
+      if (specifier === '../shared/ai-models') return load('../shared/ai-models');
       if (specifier === './safe-storage' || specifier === './native-binary') return load(specifier.slice(2));
       assert.fail(`unexpected dependency: ${specifier}`);
     };
@@ -355,4 +357,56 @@ test('OAuth migration retains plaintext across failed retries and recovers after
   assert.deepEqual(JSON.parse(fs.readFileSync(tokenPath, 'utf8')).provider, { obtainedAt: token.obtainedAt });
   h.restart();
   assert.deepEqual(h.settings.getOAuthToken('provider'), token);
+});
+
+for (const [provider, model, expectedProvider, expectedModel] of [
+  ['openai', '', 'openai', 'gpt-6.1-terra'],
+  ['openai', 'openai-gpt-4o-mini', 'openai', 'openai-gpt-4o-mini'],
+  ['anthropic', 'anthropic-claude-sonnet', 'openai', 'gpt-6.1-terra'],
+  ['gemini', '', 'openai', 'gpt-6.1-terra'],
+  ['ollama', 'ollama-llama3', 'openai', 'gpt-6.1-terra'],
+  ['lm-studio', 'lm-studio-local', 'openai', 'gpt-6.1-terra'],
+  ['openai-compatible', 'openai-compatible-private', 'openai-compatible', 'openai-compatible-private'],
+]) {
+  test(`AI upgrade preserves credentials and persists ${provider}/${model}`, (t) => {
+    const h = fixture(t);
+    fs.writeFileSync(h.settingsPath, JSON.stringify({ ai: {
+      provider, defaultModel: model, openaiApiKey: 'test-openai', elevenlabsApiKey: 'test-voice',
+      openaiCompatibleApiKey: 'test-custom', openaiCompatibleBaseUrl: 'https://private.test/api',
+      openaiCompatibleModel: 'private', openaiCompatibleAppendV1: false,
+    } }));
+    for (let i = 0; i < 2; i++) {
+      const ai = h.settings.loadSettings().ai;
+      assert.equal(ai.provider, expectedProvider);
+      assert.equal(ai.defaultModel, expectedModel);
+      assert.equal(ai.openaiApiKey, 'test-openai');
+      assert.equal(ai.elevenlabsApiKey, 'test-voice');
+      assert.equal(ai.openaiCompatibleApiKey, 'test-custom');
+      assert.equal(ai.openaiCompatibleBaseUrl, 'https://private.test/api');
+      assert.equal(ai.openaiCompatibleAppendV1, false);
+      h.settings.saveSettings({ ai });
+      h.restart();
+    }
+  });
+}
+
+test('voice retirement releases legacy shortcuts without touching unrelated mappings or secrets', t => {
+  const h = fixture(t);
+  fs.writeFileSync(h.settingsPath, JSON.stringify({
+    commandHotkeys: { 'system-supercmd-whisper': 'Command+Shift+W', 'system-supercmd-whisper-speak-toggle': 'Fn', 'system-supercmd-speak': 'Command+Shift+R', 'system-add-to-memory': 'Command+M', 'extension-private': 'Hyper+P', 'system-cursor-prompt': 'Hyper+K' },
+    ai: { openaiApiKey: 'test-openai', elevenlabsApiKey: 'legacy-voice', mistralApiKey: 'legacy-mistral', openaiCompatibleApiKey: 'test-custom' },
+  }));
+  for (let i = 0; i < 2; i++) {
+    const settings = h.settings.loadSettings();
+    for (const id of ['system-supercmd-whisper', 'system-supercmd-whisper-speak-toggle', 'system-supercmd-speak', 'system-add-to-memory']) assert.equal(id in settings.commandHotkeys, false);
+    assert.equal(settings.commandHotkeys['extension-private'], 'Hyper+P');
+    assert.equal(settings.commandHotkeys['system-cursor-prompt'], 'Hyper+K');
+    assert.equal(settings.ai.openaiApiKey, 'test-openai');
+    assert.equal(settings.ai.elevenlabsApiKey, 'legacy-voice');
+    assert.equal(settings.ai.mistralApiKey, 'legacy-mistral');
+    assert.equal(settings.ai.openaiCompatibleApiKey, 'test-custom');
+    const updated = h.settings.saveSettings({ commandHotkeys: { ...settings.commandHotkeys, 'system-supercmd-whisper-stop': 'Fn' } });
+    assert.equal('system-supercmd-whisper-stop' in updated.commandHotkeys, false);
+    h.restart();
+  }
 });

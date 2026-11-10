@@ -1,9 +1,10 @@
 /**
- * AI Provider — streaming LLM completions via OpenAI, Anthropic, Gemini, or Ollama.
+ * AI Provider — streaming LLM completions via OpenAI or Custom.
  *
  * Uses Node.js built-in https/http modules — no npm dependencies.
  */
 
+import { DEFAULT_OPENAI_MODEL, isRemovedAIModel } from '../shared/ai-models';
 import * as https from 'https';
 import * as http from 'http';
 import type { AISettings } from './settings-store';
@@ -32,72 +33,16 @@ export interface AIChatRequestOptions {
 // ─── Model routing ────────────────────────────────────────────────────
 
 interface ModelRoute {
-  provider: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'lm-studio' | 'openai-compatible';
+  provider: 'openai' | 'openai-compatible';
   modelId: string;
 }
 
-const MODEL_ROUTES: Record<string, ModelRoute> = {
-  // OpenAI
-  'openai-gpt-4o': { provider: 'openai', modelId: 'gpt-4o' },
-  'openai-gpt-4o-mini': { provider: 'openai', modelId: 'gpt-4o-mini' },
-  'openai-gpt-4-turbo': { provider: 'openai', modelId: 'gpt-4-turbo' },
-  'openai-gpt-3.5-turbo': { provider: 'openai', modelId: 'gpt-3.5-turbo' },
-  'openai-o1': { provider: 'openai', modelId: 'o1' },
-  'openai-o1-mini': { provider: 'openai', modelId: 'o1-mini' },
-  'openai-o3-mini': { provider: 'openai', modelId: 'o3-mini' },
-  // Anthropic
-  'anthropic-claude-opus': { provider: 'anthropic', modelId: 'claude-opus-4-7' },
-  'anthropic-claude-sonnet': { provider: 'anthropic', modelId: 'claude-sonnet-4-6' },
-  'anthropic-claude-haiku': { provider: 'anthropic', modelId: 'claude-haiku-4-5-20251001' },
-  // Google Gemini
-  'gemini-gemini-2.5-pro': { provider: 'gemini', modelId: 'gemini-2.5-pro' },
-  'gemini-gemini-2.5-flash': { provider: 'gemini', modelId: 'gemini-2.5-flash' },
-  'gemini-gemini-2.5-flash-lite': { provider: 'gemini', modelId: 'gemini-2.5-flash-lite' },
-  // Ollama (user-managed models)
-  'ollama-llama3': { provider: 'ollama', modelId: 'llama3' },
-  'ollama-mistral': { provider: 'ollama', modelId: 'mistral' },
-  'ollama-codellama': { provider: 'ollama', modelId: 'codellama' },
-};
-
 function resolveModel(model: string | undefined, config: AISettings): ModelRoute {
-  if (model && MODEL_ROUTES[model]) {
-    return MODEL_ROUTES[model];
-  }
-  // If the model key is not in our routing table, strip provider prefix and route directly
-  if (model) {
-    // Order matters: check longer prefixes first to avoid partial matches
-    const prefixes = ['openai-compatible-', 'lm-studio-', 'anthropic-', 'gemini-', 'ollama-', 'openai-'] as const;
-    for (const prefix of prefixes) {
-      if (model.startsWith(prefix)) {
-        return { provider: prefix.slice(0, -1) as 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible' | 'lm-studio', modelId: model.slice(prefix.length) };
-      }
-    }
-    return { provider: config.provider, modelId: model };
-  }
-  // Fallback to default model or provider default
-  if (config.defaultModel) {
-    if (MODEL_ROUTES[config.defaultModel]) {
-      return MODEL_ROUTES[config.defaultModel];
-    }
-    // Handle dynamic model IDs (e.g. "ollama-llama3.2")
-    // Order matters: check longer prefixes first to avoid partial matches
-    const prefixes = ['openai-compatible-', 'lm-studio-', 'anthropic-', 'gemini-', 'ollama-', 'openai-'] as const;
-    for (const prefix of prefixes) {
-      if (config.defaultModel.startsWith(prefix)) {
-        return { provider: prefix.slice(0, -1) as 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'openai-compatible' | 'lm-studio', modelId: config.defaultModel.slice(prefix.length) };
-      }
-    }
-  }
-  // Provider defaults
-  const defaults: Record<string, string> = {
-    openai: 'gpt-4o-mini',
-    anthropic: 'claude-haiku-4-5-20251001',
-    gemini: 'gemini-2.5-flash',
-    ollama: 'llama3',
-    'openai-compatible': config.openaiCompatibleModel?.trim() || 'gpt-4o',
-    'lm-studio': config.lmStudioModel?.trim() || 'local-model',
-  };
-  return { provider: config.provider, modelId: defaults[config.provider] || 'gpt-4o-mini' };
+  const selected = model || config.defaultModel;
+  if (selected && isRemovedAIModel(selected)) throw new Error('This AI provider has been removed. Choose OpenAI or Custom in Settings → AI → LLM.');
+  if (selected?.startsWith('openai-compatible-')) return { provider: 'openai-compatible', modelId: selected.slice(18) };
+  if (selected?.startsWith('openai-')) return { provider: 'openai', modelId: selected.slice(7) };
+  return { provider: config.provider === 'openai-compatible' ? 'openai-compatible' : 'openai', modelId: selected || (config.provider === 'openai-compatible' ? config.openaiCompatibleModel?.trim() || 'gpt-4o' : DEFAULT_OPENAI_MODEL) };
 }
 
 // ─── Model capability helpers ────────────────────────────────────────
@@ -105,12 +50,7 @@ function resolveModel(model: string | undefined, config: AISettings): ModelRoute
 // OpenAI reasoning models (o1, o1-mini, o1-preview, o3, o3-mini, o4-mini, …)
 // reject the `temperature` parameter — they only support the default.
 function isOpenAIReasoningModel(model: string): boolean {
-  return /^o\d/i.test(model.trim());
-}
-
-// Newer Anthropic models (Opus 4.7+) reject the `temperature` parameter.
-function anthropicSupportsTemperature(model: string): boolean {
-  return !/^claude-opus-4-7/i.test(model.trim());
+  return /^(o\d|gpt-[56])/i.test(model.trim());
 }
 
 // ─── Availability check ──────────────────────────────────────────────
@@ -119,18 +59,8 @@ function hasProviderCredentials(provider: ModelRoute['provider'], config: AISett
   switch (provider) {
     case 'openai':
       return !!config.openaiApiKey;
-    case 'anthropic':
-      return !!config.anthropicApiKey;
-    case 'gemini':
-      return !!config.geminiApiKey;
-    case 'ollama':
-      return !!config.ollamaBaseUrl;
     case 'openai-compatible':
       return !!(config.openaiCompatibleBaseUrl && config.openaiCompatibleApiKey);
-    case 'lm-studio':
-      return !!config.lmStudioBaseUrl;
-    default:
-      return false;
   }
 }
 
@@ -145,7 +75,7 @@ export function isAIAvailable(config: AISettings): boolean {
   if (hasProviderCredentials(route.provider, config)) return true;
 
   // Fallback to configured provider in case defaultModel is invalid.
-  return hasProviderCredentials(config.provider, config);
+  return false;
 }
 
 // ─── Streaming implementation ────────────────────────────────────────
@@ -161,15 +91,6 @@ export async function* streamAI(
     case 'openai':
       yield* streamOpenAI(config.openaiApiKey, route.modelId, options.prompt, temperature, options.systemPrompt, options.signal);
       break;
-    case 'anthropic':
-      yield* streamAnthropic(config.anthropicApiKey, route.modelId, options.prompt, temperature, options.systemPrompt, options.signal);
-      break;
-    case 'gemini':
-      yield* streamGemini(config.geminiApiKey, route.modelId, options.prompt, temperature, options.systemPrompt, options.signal);
-      break;
-    case 'ollama':
-      yield* streamOllama(config.ollamaBaseUrl, route.modelId, options.prompt, temperature, options.systemPrompt, options.signal);
-      break;
     case 'openai-compatible':
       yield* streamOpenAICompatible(
         config.openaiCompatibleBaseUrl,
@@ -180,17 +101,6 @@ export async function* streamAI(
         options.systemPrompt,
         options.signal,
         config.openaiCompatibleAppendV1
-      );
-      break;
-    case 'lm-studio':
-      yield* streamOpenAICompatible(
-        config.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1',
-        config.lmStudioApiKey || 'lm-studio',
-        route.modelId,
-        options.prompt,
-        temperature,
-        options.systemPrompt,
-        options.signal
       );
       break;
   }
@@ -209,15 +119,6 @@ export async function* streamAIChat(
     case 'openai':
       yield* streamOpenAIChat(config.openaiApiKey, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
       break;
-    case 'anthropic':
-      yield* streamAnthropicChat(config.anthropicApiKey, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
-      break;
-    case 'gemini':
-      yield* streamGeminiChat(config.geminiApiKey, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
-      break;
-    case 'ollama':
-      yield* streamOllamaChat(config.ollamaBaseUrl, route.modelId, options.messages, temperature, options.systemPrompt, options.signal);
-      break;
     case 'openai-compatible':
       yield* streamOpenAICompatibleChat(
         config.openaiCompatibleBaseUrl,
@@ -228,17 +129,6 @@ export async function* streamAIChat(
         options.systemPrompt,
         options.signal,
         config.openaiCompatibleAppendV1
-      );
-      break;
-    case 'lm-studio':
-      yield* streamOpenAICompatibleChat(
-        config.lmStudioBaseUrl || 'http://127.0.0.1:1234/v1',
-        config.lmStudioApiKey || 'lm-studio',
-        route.modelId,
-        options.messages,
-        temperature,
-        options.systemPrompt,
-        options.signal
       );
       break;
   }
@@ -252,33 +142,27 @@ async function* streamOpenAIChat(
   systemPrompt?: string,
   signal?: AbortSignal
 ): AsyncGenerator<string> {
-  const full: any[] = [];
-  if (systemPrompt) full.push({ role: 'system', content: systemPrompt });
-  for (const m of messages) full.push({ role: m.role, content: m.content });
-
-  const payload: any = { model, messages: full, stream: true };
+  if (!apiKey) throw new Error('Set an OpenAI API key in Settings → AI → LLM.');
+  const payload: any = { model, input: messages, stream: true, store: false };
+  if (systemPrompt) payload.instructions = systemPrompt;
   if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
-  const body = JSON.stringify(payload);
-
   const response = await httpRequest({
-    hostname: 'api.openai.com',
-    path: '/v1/chat/completions',
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body,
-    signal,
-    useHttps: true,
+    hostname: 'api.openai.com', path: '/v1/responses', method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(payload), signal, useHttps: true,
   });
-
+  let completed = false;
   yield* parseSSE(response, (data) => {
-    if (data === '[DONE]') return null;
-    try {
-      const parsed = JSON.parse(data);
-      return parsed.choices?.[0]?.delta?.content || null;
-    } catch {
-      return null;
+    const event = JSON.parse(data);
+    if (event.type === 'error' || event.type === 'response.failed') {
+      throw new Error(event.error?.message || event.response?.error?.message || event.message || 'OpenAI response failed');
     }
+    if (event.type === 'response.incomplete') throw new Error(`OpenAI response incomplete: ${event.response?.incomplete_details?.reason || 'unknown reason'}`);
+    if (event.type === 'response.completed') completed = true;
+    if (event.type === 'response.output_text.delta' || event.type === 'response.refusal.delta') return event.delta || null;
+    return null;
   });
+  if (!completed) throw new Error('OpenAI stream ended before the response completed');
 }
 
 async function* streamOpenAICompatibleChat(
@@ -296,7 +180,7 @@ async function* streamOpenAICompatibleChat(
   for (const m of messages) full.push({ role: m.role, content: m.content });
 
   const payload: any = { model, messages: full, stream: true };
-  if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
+  if (!/^o\d/i.test(model.trim())) payload.temperature = temperature;
   const body = JSON.stringify(payload);
 
   const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
@@ -328,125 +212,6 @@ async function* streamOpenAICompatibleChat(
   });
 }
 
-async function* streamAnthropicChat(
-  apiKey: string,
-  model: string,
-  messages: ChatMessage[],
-  temperature: number,
-  systemPrompt?: string,
-  signal?: AbortSignal
-): AsyncGenerator<string> {
-  const body: any = {
-    model,
-    max_tokens: 4096,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
-    stream: true,
-  };
-  if (temperature !== undefined && anthropicSupportsTemperature(model)) body.temperature = temperature;
-  if (systemPrompt) body.system = systemPrompt;
-
-  const response = await httpRequest({
-    hostname: 'api.anthropic.com',
-    path: '/v1/messages',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-    signal,
-    useHttps: true,
-  });
-
-  yield* parseSSE(response, (data) => {
-    try {
-      const parsed = JSON.parse(data);
-      if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-        return parsed.delta.text;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  });
-}
-
-async function* streamGeminiChat(
-  apiKey: string,
-  model: string,
-  messages: ChatMessage[],
-  temperature: number,
-  systemPrompt?: string,
-  signal?: AbortSignal
-): AsyncGenerator<string> {
-  const contents = messages.map((m) => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: m.content }],
-  }));
-
-  const body: any = { contents, generationConfig: { temperature } };
-  if (systemPrompt) body.systemInstruction = { parts: [{ text: systemPrompt }] };
-
-  const response = await httpRequest({
-    hostname: 'generativelanguage.googleapis.com',
-    path: `/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-    useHttps: true,
-  });
-
-  yield* parseSSE(response, (data) => {
-    try {
-      const parsed = JSON.parse(data);
-      const parts = parsed?.candidates?.[0]?.content?.parts;
-      if (Array.isArray(parts)) {
-        return parts.map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('') || null;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  });
-}
-
-async function* streamOllamaChat(
-  baseUrl: string,
-  model: string,
-  messages: ChatMessage[],
-  temperature: number,
-  systemPrompt?: string,
-  signal?: AbortSignal
-): AsyncGenerator<string> {
-  const url = new URL('/api/chat', baseUrl);
-  const full: any[] = [];
-  if (systemPrompt) full.push({ role: 'system', content: systemPrompt });
-  for (const m of messages) full.push({ role: m.role, content: m.content });
-
-  const body = {
-    model,
-    messages: full,
-    stream: true,
-    options: { temperature },
-  };
-
-  const useHttps = url.protocol === 'https:';
-  const response = await httpRequest({
-    hostname: url.hostname,
-    port: url.port ? parseInt(url.port) : undefined,
-    path: url.pathname,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-    useHttps,
-  });
-
-  yield* parseNDJSON(response, (obj) => obj?.message?.content || null);
-}
-
 // ─── OpenAI ──────────────────────────────────────────────────────────
 
 async function* streamOpenAI(
@@ -457,36 +222,7 @@ async function* streamOpenAI(
   systemPrompt?: string,
   signal?: AbortSignal
 ): AsyncGenerator<string> {
-  const messages: any[] = [];
-  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-  messages.push({ role: 'user', content: prompt });
-
-  const payload: any = { model, messages, stream: true };
-  if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
-  const body = JSON.stringify(payload);
-
-  const response = await httpRequest({
-    hostname: 'api.openai.com',
-    path: '/v1/chat/completions',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body,
-    signal,
-    useHttps: true,
-  });
-
-  yield* parseSSE(response, (data) => {
-    if (data === '[DONE]') return null;
-    try {
-      const parsed = JSON.parse(data);
-      return parsed.choices?.[0]?.delta?.content || null;
-    } catch {
-      return null;
-    }
-  });
+  yield* streamOpenAIChat(apiKey, model, [{ role: 'user', content: prompt }], temperature, systemPrompt, signal);
 }
 
 // ─── OpenAI-Compatible (Generic) ──────────────────────────────────────
@@ -506,14 +242,14 @@ async function* streamOpenAICompatible(
   messages.push({ role: 'user', content: prompt });
 
   const payload: any = { model, messages, stream: true };
-  if (!isOpenAIReasoningModel(model)) payload.temperature = temperature;
+  if (!/^o\d/i.test(model.trim())) payload.temperature = temperature;
   const body = JSON.stringify(payload);
 
   const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
   const chatUrl = (appendV1 !== false && !normalizedBaseUrl.endsWith('/v1'))
     ? `${normalizedBaseUrl}/v1/chat/completions`
     : `${normalizedBaseUrl}/chat/completions`;
-  
+
   const url = new URL(chatUrl);
   const useHttps = url.protocol === 'https:';
 
@@ -539,135 +275,6 @@ async function* streamOpenAICompatible(
     } catch {
       return null;
     }
-  });
-}
-
-// ─── Anthropic ───────────────────────────────────────────────────────
-
-async function* streamAnthropic(
-  apiKey: string,
-  model: string,
-  prompt: string,
-  temperature: number,
-  systemPrompt?: string,
-  signal?: AbortSignal
-): AsyncGenerator<string> {
-  const body: any = {
-    model,
-    max_tokens: 4096,
-    messages: [{ role: 'user', content: prompt }],
-    stream: true,
-  };
-  if (temperature !== undefined && anthropicSupportsTemperature(model)) body.temperature = temperature;
-  if (systemPrompt) body.system = systemPrompt;
-
-  const response = await httpRequest({
-    hostname: 'api.anthropic.com',
-    path: '/v1/messages',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify(body),
-    signal,
-    useHttps: true,
-  });
-
-  yield* parseSSE(response, (data) => {
-    try {
-      const parsed = JSON.parse(data);
-      if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-        return parsed.delta.text;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  });
-}
-
-// ─── Gemini ──────────────────────────────────────────────────────────
-
-async function* streamGemini(
-  apiKey: string,
-  model: string,
-  prompt: string,
-  temperature: number,
-  systemPrompt?: string,
-  signal?: AbortSignal
-): AsyncGenerator<string> {
-  const body: any = {
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { temperature },
-  };
-  if (systemPrompt) {
-    body.systemInstruction = { parts: [{ text: systemPrompt }] };
-  }
-
-  const response = await httpRequest({
-    hostname: 'generativelanguage.googleapis.com',
-    path: `/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-    useHttps: true,
-  });
-
-  const parsed = JSON.parse(await readResponseBody(response) || '{}');
-  const text = Array.isArray(parsed?.candidates?.[0]?.content?.parts)
-    ? parsed.candidates[0].content.parts
-        .map((part: any) => (typeof part?.text === 'string' ? part.text : ''))
-        .join('')
-    : '';
-
-  if (text) {
-    yield text;
-    return;
-  }
-
-  const reason = String(parsed?.candidates?.[0]?.finishReason || parsed?.promptFeedback?.blockReason || '').trim();
-  if (reason) throw new Error(`Gemini returned no text (${reason}).`);
-  throw new Error('Gemini returned no text.');
-}
-
-// ─── Ollama ──────────────────────────────────────────────────────────
-
-async function* streamOllama(
-  baseUrl: string,
-  model: string,
-  prompt: string,
-  temperature: number,
-  systemPrompt?: string,
-  signal?: AbortSignal
-): AsyncGenerator<string> {
-  const url = new URL('/api/generate', baseUrl);
-
-  const body: any = {
-    model,
-    prompt,
-    stream: true,
-    options: { temperature },
-  };
-  if (systemPrompt) body.system = systemPrompt;
-
-  const useHttps = url.protocol === 'https:';
-  const response = await httpRequest({
-    hostname: url.hostname,
-    port: url.port ? parseInt(url.port) : undefined,
-    path: url.pathname,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-    useHttps,
-  });
-
-  // Ollama uses NDJSON — each line is a JSON object
-  yield* parseNDJSON(response, (obj) => {
-    return obj.response || null;
   });
 }
 
@@ -694,6 +301,7 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
       path: opts.path,
       method: opts.method,
       headers: opts.headers,
+      signal: opts.signal,
     };
 
     const req = mod.request(reqOpts, (res) => {
@@ -709,18 +317,6 @@ function httpRequest(opts: HttpRequestOptions): Promise<http.IncomingMessage> {
     });
 
     req.on('error', reject);
-
-    if (opts.signal) {
-      if (opts.signal.aborted) {
-        req.destroy();
-        reject(new Error('Request aborted'));
-        return;
-      }
-      opts.signal.addEventListener('abort', () => {
-        req.destroy();
-        reject(new Error('Request aborted'));
-      }, { once: true });
-    }
 
     req.write(opts.body);
     req.end();
@@ -740,6 +336,7 @@ async function* parseSSE(
   extractChunk: (data: string) => string | null
 ): AsyncGenerator<string> {
   let buffer = '';
+  response.setEncoding('utf8');
 
   for await (const rawChunk of response) {
     buffer += rawChunk.toString();
@@ -772,6 +369,7 @@ async function* parseNDJSON(
   extractChunk: (obj: any) => string | null
 ): AsyncGenerator<string> {
   let buffer = '';
+  response.setEncoding('utf8');
 
   for await (const rawChunk of response) {
     buffer += rawChunk.toString();
@@ -799,103 +397,4 @@ async function* parseNDJSON(
       if (text) yield text;
     } catch {}
   }
-}
-
-// ─── Whisper Audio Transcription ─────────────────────────────────────
-
-export interface TranscribeOptions {
-  audioBuffer: Buffer;
-  apiKey: string;
-  model: string;
-  language?: string;
-  mimeType?: string;
-  signal?: AbortSignal;
-}
-
-function resolveUploadMeta(mimeType?: string): { filename: string; contentType: string } {
-  const normalized = String(mimeType || '').toLowerCase();
-  if (normalized.includes('wav')) return { filename: 'audio.wav', contentType: 'audio/wav' };
-  if (normalized.includes('mpeg') || normalized.includes('mp3')) return { filename: 'audio.mp3', contentType: 'audio/mpeg' };
-  if (normalized.includes('mp4') || normalized.includes('m4a')) return { filename: 'audio.m4a', contentType: 'audio/mp4' };
-  if (normalized.includes('ogg') || normalized.includes('oga')) return { filename: 'audio.ogg', contentType: 'audio/ogg' };
-  if (normalized.includes('flac')) return { filename: 'audio.flac', contentType: 'audio/flac' };
-  return { filename: 'audio.webm', contentType: 'audio/webm' };
-}
-
-export function transcribeAudio(opts: TranscribeOptions): Promise<string> {
-  const boundary = `----SuperCmdBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
-  const uploadMeta = resolveUploadMeta(opts.mimeType);
-
-  const parts: Buffer[] = [];
-
-  // file field
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${uploadMeta.filename}"\r\nContent-Type: ${uploadMeta.contentType}\r\n\r\n`
-  ));
-  parts.push(opts.audioBuffer);
-  parts.push(Buffer.from('\r\n'));
-
-  // model field
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\n${opts.model}\r\n`
-  ));
-
-  // response_format field
-  parts.push(Buffer.from(
-    `--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\ntext\r\n`
-  ));
-
-  // language field (optional)
-  if (opts.language) {
-    parts.push(Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\n${opts.language}\r\n`
-    ));
-  }
-
-  parts.push(Buffer.from(`--${boundary}--\r\n`));
-
-  const body = Buffer.concat(parts);
-
-  return new Promise<string>((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname: 'api.openai.com',
-        path: '/v1/audio/transcriptions',
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${opts.apiKey}`,
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-        },
-      },
-      (res) => {
-        let responseBody = '';
-        res.on('data', (chunk) => { responseBody += chunk; });
-        res.on('end', () => {
-          if (res.statusCode && res.statusCode >= 400) {
-            reject(new Error(`Whisper API HTTP ${res.statusCode}: ${responseBody.slice(0, 500)}`));
-            return;
-          }
-          resolve(responseBody.trim());
-        });
-      }
-    );
-
-    req.on('error', reject);
-
-    if (opts.signal) {
-      if (opts.signal.aborted) {
-        req.destroy();
-        reject(new Error('Transcription aborted'));
-        return;
-      }
-      opts.signal.addEventListener('abort', () => {
-        req.destroy();
-        reject(new Error('Transcription aborted'));
-      }, { once: true });
-    }
-
-    req.write(body);
-    req.end();
-  });
 }

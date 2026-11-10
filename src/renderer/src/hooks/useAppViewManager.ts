@@ -4,7 +4,7 @@
  * Central view-state machine for the launcher. Owns every boolean/object flag
  * that determines which screen is shown (extension, preference setup, script
  * command setup/output, clipboard, snippets, quick links, file search, cursor prompt,
- * whisper, speak, camera, schedule, onboarding, AI mode).
+ * camera, schedule, onboarding, AI mode).
  *
  * Key exports:
  * - resetAllViews(): sets all view flags back to their default (hidden) state
@@ -50,15 +50,13 @@ export interface AppViewManager {
   showQuickLinkManager: 'search' | 'create' | null;
   showFileSearch: boolean;
   showCursorPrompt: boolean;
-  showWhisper: boolean;
-  showSpeak: boolean;
+
   showCamera: boolean;
   showSchedule: boolean;
   showWindowManager: boolean;
   showMenuItemSearch: boolean;
   showAppUninstall: string | null;
-  showWhisperOnboarding: boolean;
-  showWhisperHint: boolean;
+
   showOnboarding: boolean;
   aiMode: boolean;
 
@@ -77,14 +75,13 @@ export interface AppViewManager {
   openQuickLinkManager: (mode: 'search' | 'create') => void;
   openFileSearch: () => void;
   openCursorPrompt: () => void;
-  openWhisper: () => void;
-  openSpeak: () => void;
+
   openCamera: () => void;
   openSchedule: () => void;
   openWindowManager: () => void;
   openMenuItemSearch: () => void;
   openAppUninstall: (appPath: string) => void;
-  openWhisperOnboarding: () => void;
+
   openOnboarding: () => void;
   openAiMode: () => void;
   closeCurrentView: () => void;
@@ -102,15 +99,13 @@ export interface AppViewManager {
   setShowQuickLinkManager: React.Dispatch<React.SetStateAction<'search' | 'create' | null>>;
   setShowFileSearch: React.Dispatch<React.SetStateAction<boolean>>;
   setShowCursorPrompt: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowWhisper: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowSpeak: React.Dispatch<React.SetStateAction<boolean>>;
+
   setShowCamera: React.Dispatch<React.SetStateAction<boolean>>;
   setShowSchedule: React.Dispatch<React.SetStateAction<boolean>>;
   setShowWindowManager: React.Dispatch<React.SetStateAction<boolean>>;
   setShowMenuItemSearch: React.Dispatch<React.SetStateAction<boolean>>;
   setShowAppUninstall: React.Dispatch<React.SetStateAction<string | null>>;
-  setShowWhisperOnboarding: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowWhisperHint: React.Dispatch<React.SetStateAction<boolean>>;
+
   setShowOnboarding: React.Dispatch<React.SetStateAction<boolean>>;
   setAiMode: React.Dispatch<React.SetStateAction<boolean>>;
 }
@@ -128,18 +123,15 @@ export function useAppViewManager(): AppViewManager {
   const [showQuickLinkManager, setShowQuickLinkManager] = useState<'search' | 'create' | null>(null);
   const [showFileSearch, setShowFileSearch] = useState(false);
   const [showCursorPrompt, setShowCursorPrompt] = useState(false);
-  const [showWhisper, setShowWhisper] = useState(false);
-  const [showSpeak, setShowSpeak] = useState(false);
+
   const [showCamera, setShowCamera] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [showWindowManager, setShowWindowManager] = useState(false);
   const [showMenuItemSearch, setShowMenuItemSearch] = useState(false);
   const [showAppUninstall, setShowAppUninstall] = useState<string | null>(null);
-  const [showWhisperOnboarding, setShowWhisperOnboarding] = useState(false);
-  const [showWhisperHint, setShowWhisperHint] = useState(false);
+
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [aiMode, setAiMode] = useState(false);
-  const whisperHintShownCountRef = useRef(0);
 
   const resetAllViews = useCallback(() => {
     setExtensionView(null);
@@ -154,15 +146,13 @@ export function useAppViewManager(): AppViewManager {
     setShowQuickLinkManager(null);
     setShowFileSearch(false);
     setShowCursorPrompt(false);
-    setShowWhisper(false);
-    setShowSpeak(false);
+
     setShowCamera(false);
     setShowSchedule(false);
     setShowWindowManager(false);
     setShowMenuItemSearch(false);
     setShowAppUninstall(null);
-    setShowWhisperOnboarding(false);
-    setShowWhisperHint(false);
+
     setShowOnboarding(false);
     setAiMode(false);
   }, []);
@@ -223,21 +213,6 @@ export function useAppViewManager(): AppViewManager {
     setShowCursorPrompt(true);
   }, [resetAllViews]);
 
-  const openWhisper = useCallback(() => {
-    setShowWhisper(true);
-    if (whisperHintShownCountRef.current < 2) {
-      whisperHintShownCountRef.current += 1;
-      setShowWhisperHint(true);
-    } else {
-      setShowWhisperHint(false);
-    }
-  }, []);
-
-  const openSpeak = useCallback(() => {
-    resetAllViews();
-    setShowSpeak(true);
-  }, [resetAllViews]);
-
   const openCamera = useCallback(() => {
     resetAllViews();
     setShowCamera(true);
@@ -262,11 +237,6 @@ export function useAppViewManager(): AppViewManager {
     // Don't call resetAllViews() — it can trigger side effects in menubar
     // extensions that cause SIGTRAP crashes. Just set the uninstall view directly.
     setShowAppUninstall(appPath);
-  }, []);
-
-  const openWhisperOnboarding = useCallback(() => {
-    // Whisper onboarding co-exists with whisper
-    setShowWhisperOnboarding(true);
   }, []);
 
   const openOnboarding = useCallback(() => {
@@ -296,15 +266,13 @@ export function useAppViewManager(): AppViewManager {
     showQuickLinkManager,
     showFileSearch,
     showCursorPrompt,
-    showWhisper,
-    showSpeak,
+
     showCamera,
     showSchedule,
     showWindowManager,
     showMenuItemSearch,
     showAppUninstall,
-    showWhisperOnboarding,
-    showWhisperHint,
+
     showOnboarding,
     aiMode,
 
@@ -321,14 +289,13 @@ export function useAppViewManager(): AppViewManager {
     openQuickLinkManager,
     openFileSearch,
     openCursorPrompt,
-    openWhisper,
-    openSpeak,
+
     openCamera,
     openSchedule,
     openWindowManager,
     openMenuItemSearch,
     openAppUninstall,
-    openWhisperOnboarding,
+
     openOnboarding,
     openAiMode,
     closeCurrentView,
@@ -345,15 +312,13 @@ export function useAppViewManager(): AppViewManager {
     setShowQuickLinkManager,
     setShowFileSearch,
     setShowCursorPrompt,
-    setShowWhisper,
-    setShowSpeak,
+
     setShowCamera,
     setShowSchedule,
     setShowWindowManager,
     setShowMenuItemSearch,
     setShowAppUninstall,
-    setShowWhisperOnboarding,
-    setShowWhisperHint,
+
     setShowOnboarding,
     setAiMode,
   };

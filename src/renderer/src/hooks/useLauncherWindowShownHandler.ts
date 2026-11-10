@@ -26,7 +26,6 @@ export type UseLauncherWindowShownHandlerOptions = {
   commandsRef: React.MutableRefObject<CommandInfo[]>;
   lastCommandsFetchAtRef: React.MutableRefObject<number>;
   inputRef: React.RefObject<HTMLInputElement>;
-  whisperSessionRef: React.MutableRefObject<boolean>;
 
   expandLauncherForDirectLaunch: () => void;
   requestPendingInlineArgumentFocus: () => void;
@@ -36,8 +35,6 @@ export type UseLauncherWindowShownHandlerOptions = {
   fetchCommands: (options?: { showLoading?: boolean }) => void | Promise<void>;
   loadLauncherPreferences: () => void | Promise<void>;
 
-  openWhisper: () => void;
-  openSpeak: () => void;
   openCursorPrompt: () => void;
   openClipboardManager: (openedViaShortcut?: boolean) => void;
   openSnippetManager: (mode: 'search' | 'create') => void;
@@ -54,7 +51,7 @@ export type UseLauncherWindowShownHandlerOptions = {
   setMemoryFeedback: React.Dispatch<React.SetStateAction<MemoryFeedback>>;
   setMemoryActionLoading: React.Dispatch<React.SetStateAction<boolean>>;
   setShowCursorPrompt: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowWhisperHint: React.Dispatch<React.SetStateAction<boolean>>;
+
   setShowCamera: React.Dispatch<React.SetStateAction<boolean>>;
   setShowWindowManager: React.Dispatch<React.SetStateAction<boolean>>;
   setShowQuickLinkManager: React.Dispatch<React.SetStateAction<'search' | 'create' | null>>;
@@ -71,10 +68,9 @@ export type UseLauncherWindowShownHandlerOptions = {
   setContextMenu: React.Dispatch<React.SetStateAction<LauncherContextMenuState | null>>;
   setShowNotesSearch: React.Dispatch<React.SetStateAction<boolean>>;
   setShowCanvasSearch: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowWhisper: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowSpeak: React.Dispatch<React.SetStateAction<boolean>>;
+
   setShowSchedule: React.Dispatch<React.SetStateAction<boolean>>;
-  setShowWhisperOnboarding: React.Dispatch<React.SetStateAction<boolean>>;
+
   setSearchQuery: React.Dispatch<React.SetStateAction<string>>;
   setSelectedIndex: React.Dispatch<React.SetStateAction<number>>;
   setIsCompactCollapsed: React.Dispatch<React.SetStateAction<boolean>>;
@@ -96,15 +92,14 @@ export function useLauncherWindowShownHandler(
     commandsRef,
     lastCommandsFetchAtRef,
     inputRef,
-    whisperSessionRef,
+
     expandLauncherForDirectLaunch,
     requestPendingInlineArgumentFocus,
     exitAiMode,
     resetCursorPromptState,
     fetchCommands,
     loadLauncherPreferences,
-    openWhisper,
-    openSpeak,
+
     openCursorPrompt,
     openClipboardManager,
     openSnippetManager,
@@ -120,7 +115,7 @@ export function useLauncherWindowShownHandler(
     setMemoryFeedback,
     setMemoryActionLoading,
     setShowCursorPrompt,
-    setShowWhisperHint,
+
     setShowCamera,
     setShowWindowManager,
     setShowQuickLinkManager,
@@ -137,10 +132,9 @@ export function useLauncherWindowShownHandler(
     setContextMenu,
     setShowNotesSearch,
     setShowCanvasSearch,
-    setShowWhisper,
-    setShowSpeak,
+
     setShowSchedule,
-    setShowWhisperOnboarding,
+
     setSearchQuery,
     setSelectedIndex,
     setIsCompactCollapsed,
@@ -157,34 +151,17 @@ export function useLauncherWindowShownHandler(
       const routedSystemCommandId = String(payload?.systemCommandId || '');
       const isOnboardingMode =
         payload?.mode === 'onboarding' ||
-        routedSystemCommandId === 'system-open-onboarding' ||
-        routedSystemCommandId === 'system-whisper-onboarding';
+        routedSystemCommandId === 'system-open-onboarding';
 
       setForcedTheme(isOnboardingMode ? 'dark' : null, false);
       if (!isOnboardingMode) {
         refreshThemeFromStorage(false);
       }
-      const isWhisperMode = payload?.mode === 'whisper';
-      const isSpeakMode = payload?.mode === 'speak';
+
       const isPromptMode = payload?.mode === 'prompt';
-      if (isWhisperMode) {
-        whisperSessionRef.current = true;
-        setSelectedTextSnapshot('');
-        setMemoryFeedback(null);
-        setMemoryActionLoading(false);
-        openWhisper();
-        return;
-      }
-      if (isSpeakMode) {
-        whisperSessionRef.current = false;
-        setSelectedTextSnapshot('');
-        setMemoryFeedback(null);
-        setMemoryActionLoading(false);
-        openSpeak();
-        return;
-      }
+
       if (isPromptMode) {
-        whisperSessionRef.current = false;
+
         setSelectedTextSnapshot('');
         setMemoryFeedback(null);
         setMemoryActionLoading(false);
@@ -193,9 +170,9 @@ export function useLauncherWindowShownHandler(
         return;
       }
       if (routedSystemCommandId) {
-        whisperSessionRef.current = false;
+
         setShowCursorPrompt(false);
-        setShowWhisperHint(false);
+
         setShowCamera(false);
         setShowWindowManager(false);
         setShowQuickLinkManager(null);
@@ -317,16 +294,13 @@ export function useLauncherWindowShownHandler(
           openOnboarding();
           return;
         }
-        if (routedSystemCommandId === 'system-whisper-onboarding') {
-          openOnboarding();
-          return;
-        }
+
       }
 
       if (Date.now() <= directLaunchExpansionGuardUntilRef.current) {
-        whisperSessionRef.current = false;
+
         setShowCursorPrompt(false);
-        setShowWhisperHint(false);
+
         setMemoryFeedback(null);
         setMemoryActionLoading(false);
         setSelectedTextSnapshot(String(payload?.selectedTextSnapshot || '').trim());
@@ -335,9 +309,8 @@ export function useLauncherWindowShownHandler(
         return;
       }
 
-      whisperSessionRef.current = false;
       setShowCursorPrompt(false);
-      setShowWhisperHint(false);
+
       setShowWindowManager(false);
       setMemoryFeedback(null);
       setMemoryActionLoading(false);
@@ -362,11 +335,10 @@ export function useLauncherWindowShownHandler(
         setShowQuickLinkManager(null);
         setShowFileSearch(false);
         setShowCursorPrompt(false);
-        setShowWhisper(false);
-        setShowSpeak(false);
+
         setShowCamera(false);
         setShowSchedule(false);
-        setShowWhisperOnboarding(false);
+
       }
 
       // If a persistable view (extension or internal view like Clipboard,
@@ -437,8 +409,7 @@ export function useLauncherWindowShownHandler(
     openQuickLinkManager,
     openSchedule,
     openSnippetManager,
-    openSpeak,
-    openWhisper,
+
     pendingWindowShownQueryRef,
     popToRootTimeoutMsRef,
     refreshBrowserEntries,
@@ -470,11 +441,8 @@ export function useLauncherWindowShownHandler(
     setShowQuickLinkManager,
     setShowSchedule,
     setShowSnippetManager,
-    setShowSpeak,
-    setShowWhisper,
-    setShowWhisperHint,
-    setShowWhisperOnboarding,
+
     setShowWindowManager,
-    whisperSessionRef,
+
   ]);
 }

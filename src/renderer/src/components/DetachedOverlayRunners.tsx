@@ -1,34 +1,13 @@
 import React, { memo } from 'react';
 import { createPortal } from 'react-dom';
-import SuperCmdWhisper from '../SuperCmdWhisper';
-import SuperCmdRead from '../SuperCmdRead';
+
 import WindowManagerPanel from '../WindowManagerPanel';
-import type { SpeakStatus } from '../hooks/useSpeakManager';
+
 import type { UseCursorPromptReturn } from '../hooks/useCursorPrompt';
-import type { ReadVoiceOption } from '../utils/command-helpers';
+import type {  } from '../utils/command-helpers';
 import CursorPromptView from '../views/CursorPromptView';
 
 type DetachedOverlayRunnersProps = {
-  showWhisper: boolean;
-  whisperPortalTarget: HTMLElement | null;
-  whisperStartToken: number;
-  showWhisperOnboarding: boolean;
-  appendWhisperOnboardingPracticeText: (text: string) => void;
-  whisperCoachmarkText?: string;
-  whisperAutoClose: boolean;
-  onWhisperClose: () => void;
-
-  showSpeak: boolean;
-  speakPortalTarget: HTMLElement | null;
-  speakStatus: SpeakStatus;
-  speakOptions: { voice: string; rate: string };
-  readVoiceOptions: ReadVoiceOption[];
-  handleSpeakVoiceChange: (voice: string) => void;
-  handleSpeakRateChange: (rate: string) => void;
-  handleSpeakTogglePause: () => void;
-  handleSpeakPreviousParagraph: () => void;
-  handleSpeakNextParagraph: () => void;
-  onSpeakClose: () => void;
 
   showWindowManager: boolean;
   windowManagerPortalTarget: HTMLElement | null;
@@ -49,25 +28,7 @@ type DetachedOverlayRunnersProps = {
 };
 
 const DetachedOverlayRunners: React.FC<DetachedOverlayRunnersProps> = ({
-  showWhisper,
-  whisperPortalTarget,
-  whisperStartToken,
-  showWhisperOnboarding,
-  appendWhisperOnboardingPracticeText,
-  whisperCoachmarkText,
-  whisperAutoClose,
-  onWhisperClose,
-  showSpeak,
-  speakPortalTarget,
-  speakStatus,
-  speakOptions,
-  readVoiceOptions,
-  handleSpeakVoiceChange,
-  handleSpeakRateChange,
-  handleSpeakTogglePause,
-  handleSpeakPreviousParagraph,
-  handleSpeakNextParagraph,
-  onSpeakClose,
+
   showWindowManager,
   windowManagerPortalTarget,
   onWindowManagerClose,
@@ -86,32 +47,7 @@ const DetachedOverlayRunners: React.FC<DetachedOverlayRunnersProps> = ({
 }) => {
   return (
     <>
-      {showWhisper && whisperPortalTarget ? (
-        <SuperCmdWhisper
-          portalTarget={whisperPortalTarget}
-          startToken={whisperStartToken}
-          onboardingCaptureMode={showWhisperOnboarding}
-          onOnboardingTranscriptAppend={appendWhisperOnboardingPracticeText}
-          coachmarkText={whisperCoachmarkText}
-          autoClose={whisperAutoClose}
-          onClose={onWhisperClose}
-        />
-      ) : null}
-      {showSpeak && speakPortalTarget ? (
-        <SuperCmdRead
-          status={speakStatus}
-          voice={speakOptions.voice}
-          voiceOptions={readVoiceOptions}
-          rate={speakOptions.rate}
-          portalTarget={speakPortalTarget}
-          onVoiceChange={handleSpeakVoiceChange}
-          onRateChange={handleSpeakRateChange}
-          onPauseToggle={handleSpeakTogglePause}
-          onPreviousParagraph={handleSpeakPreviousParagraph}
-          onNextParagraph={handleSpeakNextParagraph}
-          onClose={onSpeakClose}
-        />
-      ) : null}
+
       {showWindowManager && windowManagerPortalTarget ? (
         <WindowManagerPanel
           show={showWindowManager}

@@ -215,18 +215,10 @@ export interface AISettings {
   supermemoryLocalMode: boolean;
   ollamaBaseUrl: string;
   defaultModel: string;
-  speechCorrectionModel: string;
-  speechToTextModel: string;
-  speechLanguage: string;
-  speechVocabulary: string;
-  textToSpeechModel: string;
-  edgeTtsVoice: string;
-  speechCorrectionEnabled: boolean;
+
   enabled: boolean;
   llmEnabled: boolean;
-  whisperEnabled: boolean;
-  whisperAutoClose: boolean;
-  readEnabled: boolean;
+
   openaiCompatibleAppendV1: boolean;
   openaiCompatibleBaseUrl: string;
   openaiCompatibleApiKey: string;
@@ -234,49 +226,6 @@ export interface AISettings {
   lmStudioBaseUrl: string;
   lmStudioModel: string;
   lmStudioApiKey: string;
-}
-
-export interface EdgeTtsVoice {
-  id: string;
-  label: string;
-  languageCode: string;
-  languageLabel: string;
-  gender: 'female' | 'male';
-  style?: string;
-}
-
-export interface ElevenLabsVoice {
-  id: string;
-  name: string;
-  category: 'premade' | 'cloned' | 'generated' | 'professional';
-  description?: string;
-  labels?: Record<string, string>;
-  previewUrl?: string;
-}
-
-export interface WhisperCppModelStatus {
-  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-  modelName: string;
-  path: string;
-  bytesDownloaded: number;
-  totalBytes: number | null;
-  error?: string;
-}
-
-export interface ParakeetModelStatus {
-  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-  modelName: string;
-  path: string;
-  progress: number;
-  error?: string;
-}
-
-export interface Qwen3ModelStatus {
-  state: 'not-downloaded' | 'downloading' | 'downloaded' | 'error';
-  modelName: string;
-  path: string;
-  progress: number;
-  error?: string;
 }
 
 export interface AppUpdaterStatus {
@@ -642,7 +591,7 @@ export interface AppSettings {
   recentCommands: string[];
   recentCommandLaunchCounts: Record<string, number>;
   hasSeenOnboarding: boolean;
-  hasSeenWhisperOnboarding: boolean;
+
   fileSearchProtectedRootsEnabled: boolean;
   disableFileSearchResults: boolean;
   showMenuBarIcon: boolean;
@@ -852,21 +801,16 @@ export interface ElectronAPI {
   resetLauncherPosition: () => Promise<void>;
   openDevTools: () => Promise<boolean>;
   closePromptWindow: () => Promise<void>;
-  setLauncherMode: (mode: 'default' | 'onboarding' | 'whisper' | 'speak' | 'prompt') => Promise<void>;
+  setLauncherMode: (mode: 'default' | 'onboarding' | 'prompt') => Promise<void>;
   getLastFrontmostApp: () => Promise<{ name: string; path: string; bundleId?: string } | null>;
   restoreLastFrontmostApp: () => Promise<boolean>;
-  onWindowShown: (callback: (payload?: { mode?: 'default' | 'onboarding' | 'whisper' | 'speak' | 'prompt'; systemCommandId?: string; selectedTextSnapshot?: string }) => void) => (() => void);
+  onWindowShown: (callback: (payload?: { mode?: 'default' | 'onboarding' | 'prompt'; systemCommandId?: string; selectedTextSnapshot?: string }) => void) => (() => void);
   onSelectionSnapshotUpdated: (callback: (payload?: { selectedTextSnapshot?: string }) => void) => (() => void);
   onWindowHidden: (callback: () => void) => (() => void);
   onCommandsUpdated: (callback: () => void) => (() => void);
   onRunSystemCommand: (callback: (commandId: string) => void) => (() => void);
   onOnboardingHotkeyPressed: (callback: () => void) => (() => void);
-  setDetachedOverlayState: (overlay: 'whisper' | 'speak', visible: boolean) => void;
-  setWhisperIgnoreMouseEvents: (ignore: boolean) => void;
-  onWhisperStopAndClose: (callback: () => void) => (() => void);
-  onWhisperStartListening: (callback: () => void) => (() => void);
-  onWhisperStopListening: (callback: () => void) => (() => void);
-  onWhisperToggleListening: (callback: () => void) => (() => void);
+
   onOAuthCallback: (callback: (url: string) => void) => (() => void);
   oauthGetToken: (provider: string) => Promise<{ accessToken: string; tokenType?: string; scope?: string; expiresIn?: number; obtainedAt: string } | null>;
   oauthSetToken: (provider: string, token: { accessToken: string; tokenType?: string; scope?: string; expiresIn?: number; obtainedAt: string }) => Promise<void>;
@@ -874,41 +818,6 @@ export interface ElectronAPI {
   oauthLogout: (provider: string) => Promise<void>;
   oauthSetFlowActive: (active: boolean) => Promise<void>;
   onOAuthLogout: (callback: (provider: string) => void) => (() => void);
-  onSpeakStatus: (callback: (payload: {
-    state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error';
-    text: string;
-    index: number;
-    total: number;
-    message?: string;
-    wordIndex?: number;
-  }) => void) => (() => void);
-  speakStop: () => Promise<boolean>;
-  speakTogglePause: () => Promise<{
-    ok: boolean;
-    status: {
-      state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error';
-      text: string;
-      index: number;
-      total: number;
-      message?: string;
-      wordIndex?: number;
-    };
-  }>;
-  speakPreviousParagraph: () => Promise<boolean>;
-  speakNextParagraph: () => Promise<boolean>;
-  speakGetStatus: () => Promise<{
-    state: 'idle' | 'loading' | 'speaking' | 'paused' | 'done' | 'error';
-    text: string;
-    index: number;
-    total: number;
-    message?: string;
-    wordIndex?: number;
-  }>;
-  speakGetOptions: () => Promise<{ voice: string; rate: string }>;
-  speakUpdateOptions: (patch: { voice?: string; rate?: string; restartCurrent?: boolean }) => Promise<{ voice: string; rate: string }>;
-  speakPreviewVoice: (payload: { voice: string; text?: string; rate?: string; provider?: 'edge-tts' | 'elevenlabs'; model?: string }) => Promise<boolean>;
-  edgeTtsListVoices: () => Promise<EdgeTtsVoice[]>;
-  elevenLabsListVoices: () => Promise<{ voices: ElevenLabsVoice[]; error?: string }>;
 
   // Window Management
   getActiveWindow: () => Promise<any>;
@@ -960,10 +869,9 @@ export interface ElectronAPI {
   setOpenAtLogin: (enabled: boolean) => Promise<boolean>;
   replaceSpotlightWithSuperCmdShortcut: () => Promise<boolean>;
   checkOnboardingPermissions: () => Promise<Record<string, boolean>>;
-  enableFnWatcherForOnboarding: () => Promise<void>;
-  disableFnWatcherForOnboarding: () => Promise<void>;
+
   onboardingRequestPermission: (
-    target: 'accessibility' | 'input-monitoring' | 'microphone' | 'speech-recognition' | 'home-folder'
+    target: 'accessibility' | 'input-monitoring' | 'home-folder'
   ) => Promise<{
     granted: boolean;
     requested: boolean;
@@ -1159,7 +1067,6 @@ export interface ElectronAPI {
 
   getSelectedText: () => Promise<string>;
   getSelectedTextStrict: () => Promise<string>;
-  memoryAdd: (payload: { text: string; userId?: string; source?: string; metadata?: Record<string, any> }) => Promise<{ success: boolean; memoryId?: string; error?: string }>;
 
   // Snippet Manager
   snippetGetAll: () => Promise<Snippet[]>;
@@ -1249,9 +1156,7 @@ export interface ElectronAPI {
   pasteText: (text: string) => Promise<boolean>;
   pasteFile: (filePath: string) => Promise<boolean>;
   typeTextLive: (text: string) => Promise<boolean>;
-  whisperTypeTextLive: (
-    text: string
-  ) => Promise<{ typed: boolean; fallbackClipboard: boolean; message?: string }>;
+
   replaceLiveText: (previousText: string, nextText: string) => Promise<boolean>;
   promptApplyGeneratedText: (payload: { previousText?: string; nextText: string }) => Promise<boolean>;
 
@@ -1287,57 +1192,6 @@ export interface ElectronAPI {
   onAIStreamDone: (callback: (data: { requestId: string }) => void) => (() => void);
   onAIStreamError: (callback: (data: { requestId: string; error: string }) => void) => (() => void);
   onPromptInsertText: (callback: (text: string) => void) => (() => void);
-  whisperRefineTranscript: (
-    transcript: string
-  ) => Promise<{ correctedText: string; source: 'ai' | 'heuristic' | 'raw' }>;
-  whisperCppModelStatus: () => Promise<WhisperCppModelStatus>;
-  whisperCppDownloadModel: () => Promise<WhisperCppModelStatus>;
-  parakeetModelStatus: () => Promise<ParakeetModelStatus>;
-  parakeetDownloadModel: () => Promise<ParakeetModelStatus>;
-  parakeetWarmup: () => Promise<{ ready: boolean; error?: string }>;
-  qwen3ModelStatus: () => Promise<Qwen3ModelStatus>;
-  qwen3DownloadModel: () => Promise<Qwen3ModelStatus>;
-  qwen3Warmup: () => Promise<{ ready: boolean; error?: string }>;
-  whisperCppWarmup: () => Promise<{ ready: boolean; error?: string }>;
-  whisperDebugLog: (tag: string, message: string, data?: any) => void;
-  audioCapturerWarmup: () => Promise<{ ready: boolean; error?: string }>;
-  audioCapturerStart: () => Promise<{ recording: boolean; error?: string }>;
-  audioCapturerStop: () => Promise<{ file: string | null; duration: number; error?: string }>;
-  audioCapturerSnapshot: () => Promise<{ file: string | null; duration: number; error?: string }>;
-  audioCapturerMeter: () => Promise<{ average: number; peak: number }>;
-  audioCapturerStatus: () => Promise<{ engineReady: boolean; recording: boolean; processAlive: boolean }>;
-  whisperTranscribeFile: (audioPath: string, options?: { language?: string }) => Promise<string>;
-  whisperTranscribe: (audioBuffer: ArrayBuffer, options?: { language?: string; mimeType?: string }) => Promise<string>;
-  whisperEnsureMicrophoneAccess: (
-    options?: { prompt?: boolean }
-  ) => Promise<{
-    granted: boolean;
-    requested: boolean;
-    status: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
-    canPrompt: boolean;
-    error?: string;
-  }>;
-  whisperEnsureSpeechRecognitionAccess: (
-    options?: { prompt?: boolean }
-  ) => Promise<{
-    granted: boolean;
-    requested: boolean;
-    speechStatus: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
-    microphoneStatus: 'granted' | 'denied' | 'restricted' | 'not-determined' | 'unknown';
-    error?: string;
-  }>;
-  whisperStartNative: (
-    language?: string,
-    options?: { singleUtterance?: boolean }
-  ) => Promise<void>;
-  whisperStopNative: () => Promise<void>;
-  onWhisperNativeChunk: (callback: (data: {
-    transcript?: string;
-    isFinal?: boolean;
-    error?: string;
-    ready?: boolean;
-    ended?: boolean;
-  }) => void) => (() => void);
 
   // Ollama Model Management
   ollamaStatus: () => Promise<{ running: boolean; models: OllamaLocalModel[] }>;

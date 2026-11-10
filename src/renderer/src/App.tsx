@@ -32,8 +32,7 @@ import { useAiChat } from './hooks/useAiChat';
 import { useCursorPrompt } from './hooks/useCursorPrompt';
 import { useMenuBarExtensions } from './hooks/useMenuBarExtensions';
 import { useBackgroundRefresh } from './hooks/useBackgroundRefresh';
-import { useSpeakManager } from './hooks/useSpeakManager';
-import { useWhisperManager } from './hooks/useWhisperManager';
+
 import { useBrowserSearch } from './hooks/useBrowserSearch';
 import { useBrowserResultsController } from './hooks/useBrowserResultsController';
 import { useWebSearchController } from './hooks/useWebSearchController';
@@ -190,37 +189,19 @@ const App: React.FC = () => {
   const {
     extensionView, extensionPreferenceSetup, scriptCommandSetup, scriptCommandOutput,
     showClipboardManager, clipboardManagerOpenedViaShortcut, showSnippetManager, showNotesSearch, showCanvasSearch, showQuickLinkManager, showFileSearch, showCursorPrompt,
-    showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showMenuItemSearch, showAppUninstall, showWhisperOnboarding, showWhisperHint, showOnboarding, aiMode,
-    openOnboarding, openWhisper, openClipboardManager,
-    openSnippetManager, openNotesSearch, openCanvasSearch, openQuickLinkManager, openFileSearch, openCursorPrompt, openSpeak, openCamera, openSchedule, openWindowManager, openMenuItemSearch, openAppUninstall,
+      showCamera, showSchedule, showWindowManager, showMenuItemSearch, showAppUninstall,   showOnboarding, aiMode,
+    openOnboarding,  openClipboardManager,
+    openSnippetManager, openNotesSearch, openCanvasSearch, openQuickLinkManager, openFileSearch, openCursorPrompt,  openCamera, openSchedule, openWindowManager, openMenuItemSearch, openAppUninstall,
     setExtensionView, setExtensionPreferenceSetup, setScriptCommandSetup, setScriptCommandOutput,
     setShowClipboardManager, setClipboardManagerOpenedViaShortcut, setShowSnippetManager, setShowNotesSearch, setShowCanvasSearch, setShowQuickLinkManager, setShowFileSearch, setShowCursorPrompt,
-    setShowWhisper, setShowSpeak, setShowCamera, setShowSchedule, setShowWindowManager, setShowMenuItemSearch, setShowAppUninstall, setShowWhisperOnboarding, setShowWhisperHint,
+      setShowCamera, setShowSchedule, setShowWindowManager, setShowMenuItemSearch, setShowAppUninstall,
     setShowOnboarding, setAiMode,
   } = useAppViewManager();
-  const {
-    whisperOnboardingPracticeText, setWhisperOnboardingPracticeText,
-    whisperSpeakToggleLabel, setWhisperSpeakToggleLabel,
-    whisperSessionRef,
-    appendWhisperOnboardingPracticeText,
-    whisperPortalTarget,
-  } = useWhisperManager({
-    showWhisper, setShowWhisper,
-    showWhisperOnboarding, setShowWhisperOnboarding,
-    showWhisperHint, setShowWhisperHint,
-  });
-  const [whisperStartToken, setWhisperStartToken] = useState(0);
-  const {
-    speakStatus, speakOptions,
-    setConfiguredEdgeTtsVoice, setConfiguredTtsModel,
-    readVoiceOptions,
-    handleSpeakVoiceChange, handleSpeakRateChange, handleSpeakTogglePause, handleSpeakPreviousParagraph, handleSpeakNextParagraph,
-    speakPortalTarget,
-  } = useSpeakManager({ showSpeak, setShowSpeak });
+
   const [onboardingRequiresShortcutFix, setOnboardingRequiresShortcutFix] = useState(false);
   const [onboardingHotkeyPresses, setOnboardingHotkeyPresses] = useState(0);
   const [launcherShortcut, setLauncherShortcut] = useState('Alt+Space');
-  const [whisperAutoClose, setWhisperAutoClose] = useState(true);
+
   const [showActions, setShowActions] = useState(false);
   const [actionsCommand, setActionsCommand] = useState<CommandInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<LauncherContextMenuState | null>(null);
@@ -461,7 +442,6 @@ const App: React.FC = () => {
     showAppUninstall
   );
 
-
   const cursorPromptPortalTarget = useDetachedPortalWindow(showCursorPrompt, {
     name: 'supercmd-prompt-window',
     title: 'SuperCmd Prompt',
@@ -483,7 +463,6 @@ const App: React.FC = () => {
       setShowWindowManager(false);
     },
   });
-
 
   const showLauncherFooterStatus = useCallback((type: 'success' | 'error', text: string, durationMs = 3000) => {
     if (launcherFooterStatusTimerRef.current !== null) {
@@ -564,11 +543,7 @@ const App: React.FC = () => {
       setRootSearchAutocompleteEnabled(settings.rootSearchAutocompleteEnabled !== false);
       setRootSearchRanking(settings.rootSearchRanking || {});
       hydrateWebSearchSettings(settings);
-      const speakToggleHotkey = settings.commandHotkeys?.['system-supercmd-whisper-speak-toggle'] ?? '';
-      setWhisperSpeakToggleLabel(formatShortcutLabel(speakToggleHotkey));
-      setConfiguredEdgeTtsVoice(String(settings.ai?.edgeTtsVoice || 'en-US-EricNeural'));
-      setConfiguredTtsModel(String(settings.ai?.textToSpeechModel || 'edge-tts'));
-      setWhisperAutoClose(settings.ai?.whisperAutoClose !== false);
+
       setLauncherBackgroundImagePath(String(settings.launcherBackgroundImagePath || ''));
       setLauncherBackgroundImageEverywhere(Boolean(settings.launcherBackgroundImageEverywhere));
       setLauncherBackgroundImageBlurPercent(
@@ -621,8 +596,7 @@ const App: React.FC = () => {
       setLauncherShortcut('Alt+Space');
       setWebSearchSuggestionsEnabled(true);
       setRootSearchRanking({});
-      setConfiguredEdgeTtsVoice('en-US-EricNeural');
-      setConfiguredTtsModel('edge-tts');
+
       setLauncherBackgroundImagePath('');
       setLauncherBackgroundImageEverywhere(false);
       setLauncherBackgroundImageBlurPercent(DEFAULT_LAUNCHER_BACKGROUND_BLUR_PERCENT);
@@ -735,15 +709,14 @@ const App: React.FC = () => {
     commandsRef,
     lastCommandsFetchAtRef,
     inputRef,
-    whisperSessionRef,
+
     expandLauncherForDirectLaunch,
     requestPendingInlineArgumentFocus,
     exitAiMode,
     resetCursorPromptState,
     fetchCommands,
     loadLauncherPreferences,
-    openWhisper,
-    openSpeak,
+
     openCursorPrompt,
     openClipboardManager,
     openSnippetManager,
@@ -759,7 +732,7 @@ const App: React.FC = () => {
     setMemoryFeedback,
     setMemoryActionLoading,
     setShowCursorPrompt,
-    setShowWhisperHint,
+
     setShowCamera,
     setShowWindowManager,
     setShowQuickLinkManager,
@@ -776,10 +749,9 @@ const App: React.FC = () => {
     setContextMenu,
     setShowNotesSearch,
     setShowCanvasSearch,
-    setShowWhisper,
-    setShowSpeak,
+
     setShowSchedule,
-    setShowWhisperOnboarding,
+
     setSearchQuery,
     setSelectedIndex,
     setIsCompactCollapsed,
@@ -1232,10 +1204,10 @@ const App: React.FC = () => {
   }, [contextMenu]);
 
   useEffect(() => {
-    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !bookmarkNicknamePrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showNotesSearch && !showQuickLinkManager && !showFileSearch && !showMenuItemSearch && !showCursorPrompt && !showWhisper && !showSpeak && !showCamera && !showSchedule && !showWindowManager && !showAppUninstall && !showOnboarding && browserResultsViewQuery === null && webSearchQuery === null) {
+    if (!showActions && !contextMenu && !quickLinkDynamicPrompt && !bookmarkNicknamePrompt && !aiMode && !extensionView && !showClipboardManager && !showSnippetManager && !showNotesSearch && !showQuickLinkManager && !showFileSearch && !showMenuItemSearch && !showCursorPrompt && !showCamera && !showSchedule && !showWindowManager && !showAppUninstall && !showOnboarding && browserResultsViewQuery === null && webSearchQuery === null) {
       restoreLauncherFocus();
     }
-  }, [showActions, contextMenu, quickLinkDynamicPrompt, bookmarkNicknamePrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showMenuItemSearch, showCursorPrompt, showWhisper, showSpeak, showCamera, showSchedule, showWindowManager, showAppUninstall, showOnboarding, showWhisperOnboarding, browserResultsViewQuery, webSearchQuery, restoreLauncherFocus]);
+  }, [showActions, contextMenu, quickLinkDynamicPrompt, bookmarkNicknamePrompt, aiMode, extensionView, showClipboardManager, showSnippetManager, showNotesSearch, showQuickLinkManager, showFileSearch, showMenuItemSearch, showCursorPrompt,   showCamera, showSchedule, showWindowManager, showAppUninstall, showOnboarding,  browserResultsViewQuery, webSearchQuery, restoreLauncherFocus]);
 
   const isLauncherModeActive =
     !showActions &&
@@ -1253,14 +1225,11 @@ const App: React.FC = () => {
     !showQuickLinkManager &&
     !showFileSearch &&
     !showCursorPrompt &&
-    !showWhisper &&
-    !showSpeak &&
     !showCamera &&
     !showSchedule &&
     !showWindowManager &&
     !showMenuItemSearch &&
-    !showOnboarding &&
-    !showWhisperOnboarding;
+    !showOnboarding ;
   isLauncherModeActiveRef.current = isLauncherModeActive;
   const shouldKeepLauncherSearchResults =
     isLauncherModeActive || showActions || Boolean(contextMenu);
@@ -1787,10 +1756,10 @@ const App: React.FC = () => {
     setMemoryFeedback,
     showOnboarding,
     showWindowManager,
-    whisperSessionRef,
+
     windowPresetCommandQueueRef,
     openOnboarding,
-    openWhisper,
+
     openClipboardManager,
     openSnippetManager,
     openNotesSearch,
@@ -1799,14 +1768,11 @@ const App: React.FC = () => {
     openFileSearch,
     openWebSearchMode,
     openCamera,
-    openSpeak,
+
     openWindowManager,
     openMenuItemSearch,
     openSchedule,
-    setShowWhisper,
-    setShowWhisperOnboarding,
-    setShowWhisperHint,
-    setShowSpeak,
+
     setShowWindowManager,
     setSearchQuery,
     setSelectedIndex,
@@ -1818,15 +1784,6 @@ const App: React.FC = () => {
     refreshBrowserEntries: browserSearch.refreshBrowserEntries,
     refreshBrowserEntriesIfStale: browserSearch.refreshBrowserEntriesIfStale,
   });
-
-  useEffect(() => {
-    const cleanup = window.electron.onWhisperStartListening(() => {
-      whisperSessionRef.current = true;
-      setShowWhisper(true);
-      setWhisperStartToken((value) => value + 1);
-    });
-    return cleanup;
-  }, [setShowWhisper, whisperSessionRef]);
 
   useEffect(() => {
     const cleanup = window.electron.onOnboardingHotkeyPressed(() => {
@@ -2282,40 +2239,9 @@ const App: React.FC = () => {
     />
   );
 
-  const whisperCoachmarkText =
-    showWhisperHint && whisperSpeakToggleLabel
-      ? t('whisper.coachmark.holdToTalk', { shortcut: whisperSpeakToggleLabel })
-      : undefined;
-
   const detachedOverlayRunners = (
     <DetachedOverlayRunners
-      showWhisper={showWhisper}
-      whisperPortalTarget={whisperPortalTarget}
-      whisperStartToken={whisperStartToken}
-      showWhisperOnboarding={showWhisperOnboarding}
-      appendWhisperOnboardingPracticeText={appendWhisperOnboardingPracticeText}
-      whisperCoachmarkText={whisperCoachmarkText}
-      whisperAutoClose={whisperAutoClose}
-      onWhisperClose={() => {
-        whisperSessionRef.current = false;
-        setShowWhisper(false);
-        setShowWhisperOnboarding(false);
-        setShowWhisperHint(false);
-      }}
-      showSpeak={showSpeak}
-      speakPortalTarget={speakPortalTarget}
-      speakStatus={speakStatus}
-      speakOptions={speakOptions}
-      readVoiceOptions={readVoiceOptions}
-      handleSpeakVoiceChange={handleSpeakVoiceChange}
-      handleSpeakRateChange={handleSpeakRateChange}
-      handleSpeakTogglePause={handleSpeakTogglePause}
-      handleSpeakPreviousParagraph={handleSpeakPreviousParagraph}
-      handleSpeakNextParagraph={handleSpeakNextParagraph}
-      onSpeakClose={() => {
-        setShowSpeak(false);
-        void window.electron.speakStop();
-      }}
+
       showWindowManager={showWindowManager}
       windowManagerPortalTarget={windowManagerPortalTarget}
       onWindowManagerClose={() => {
@@ -2918,22 +2844,21 @@ const App: React.FC = () => {
         <OnboardingExtension
           initialShortcut={launcherShortcut}
           requireWorkingShortcut={onboardingRequiresShortcutFix}
-          dictationPracticeText={whisperOnboardingPracticeText}
-          onDictationPracticeTextChange={setWhisperOnboardingPracticeText}
+
           onboardingHotkeyPresses={onboardingHotkeyPresses}
           onClose={async () => {
             await window.electron.setLauncherMode('default');
-            await window.electron.saveSettings({ hasSeenOnboarding: true, hasSeenWhisperOnboarding: true });
+            await window.electron.saveSettings({ hasSeenOnboarding: true,  });
             setShowOnboarding(false);
-            setShowWhisperOnboarding(false);
+
             setOnboardingRequiresShortcutFix(false);
             await window.electron.hideWindow();
           }}
           onComplete={async () => {
             await window.electron.setLauncherMode('default');
-            await window.electron.saveSettings({ hasSeenOnboarding: true, hasSeenWhisperOnboarding: true });
+            await window.electron.saveSettings({ hasSeenOnboarding: true,  });
             setShowOnboarding(false);
-            setShowWhisperOnboarding(false);
+
             setOnboardingRequiresShortcutFix(false);
             await window.electron.hideWindow();
           }}

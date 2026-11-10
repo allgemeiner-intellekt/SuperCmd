@@ -4,7 +4,7 @@
 </p>
 
 <h1 align="center"><b>SuperCmd</b></h1>
-<h4 align="center">Raycast + Wispr Flow + Speechify + Memory + AI</h4>
+<h4 align="center">Launcher + Extensions + AI</h4>
 
 <p align="center">
   <a href="https://supercmd.sh"><img src="https://img.shields.io/badge/website-supercmd.sh-black.svg" alt="Website"></a>
@@ -19,9 +19,9 @@
 
 ![SuperCmd Screenshot](./assets/supercmd.png)
 
-Open-source launcher for macOS: **Raycast + Wispr Flow + Speechify + Memory + AI** in one app.
+Open-source launcher for macOS: **Launcher + Extensions + AI** in one app.
 
-SuperCmd gives you Raycast-style extension workflows, hold-to-speak dictation, natural text-to-speech, AI actions backed by configurable providers and memory, notes, canvas, clipboard history, snippet expansion, and window tiling — all from a single keyboard shortcut.
+SuperCmd gives you Raycast-style extension workflows, AI actions backed by OpenAI or Custom providers, notes, canvas, clipboard history, snippet expansion, and window tiling — all from a single keyboard shortcut.
 
 <p align="center">
   <a href="https://buymeacoffee.com/shobhit99"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" height="48"></a>
@@ -45,7 +45,6 @@ SuperCmd is an Electron + React launcher that focuses on Raycast extension compa
 - **Raycast backup import** — import encrypted `.rayconfig` backups with settings, hotkeys, extensions, scripts, quicklinks, snippets, notes, and extension prefs
 - **AI cursor prompt** — inline AI suggestions at your cursor position across any app
 - **AI chat** — chat with configurable providers (OpenAI / Anthropic / Ollama / Gemini / OpenAI-compatible)
-- **Hold-to-speak dictation** — Wispr Flow-style voice input; hold hotkey, speak, release to type (Whisper, Parakeet, or native macOS STT)
 - **Read aloud** — Speechify-style TTS for selected text (Edge TTS or ElevenLabs)
 - **Clipboard history** — full clipboard manager with Cmd+1–9 quick-paste shortcuts
 - **Snippet expansion** — create and trigger text snippets with keyboard shortcuts
@@ -59,7 +58,6 @@ SuperCmd is an Electron + React launcher that focuses on Raycast extension compa
 - **System commands** — Sleep, Restart, Lock Screen, Log Out, Close All Apps, Empty Trash
 - **Script command support** — run custom shell/Python/Ruby scripts from the launcher
 - **Auto-updates** — built-in updater via GitHub Releases; check manually or install on next launch
-- **Memory-aware AI** — Supermemory integration
 - **Glassy UI** — liquid-glass morphism with custom background image, blur, and opacity controls
 - **Localization** — English, Chinese (Simplified/Traditional), Japanese, Korean, French, German, Spanish, Russian
 
@@ -104,16 +102,12 @@ dist/            Build output
 | `calendar-events` | EventKit calendar integration |
 | `color-picker` | System color picker |
 | `get-selected-text` | Extract selected text from frontmost app |
-| `hotkey-hold-monitor` | Hold-to-speak hotkey detection |
+| `hotkey-hold-monitor` | Fn shortcut detection |
 | `hyper-key-monitor` | Caps Lock → Hyper Key remapping |
 | `input-monitoring-request` | Request Input Monitoring permission |
-| `microphone-access` | Microphone permission checks |
 | `snippet-expander` | Keyboard-triggered snippet expansion |
-| `speech-recognizer` | macOS native speech recognition (STT) |
-| `whisper-transcriber` | OpenAI Whisper STT integration |
 | `window-adjust` | Window tiling and resizing (ApplicationServices) |
 | `fast-paste-addon/` | Node.js native module for fast clipboard paste (Cmd+1–9) |
-| `parakeet-transcriber/` | Swift package — on-device STT via swift-transformers |
 
 ## Install
 
@@ -141,7 +135,7 @@ SuperCmd needs the following permissions. The app will prompt you on first use, 
 | Permission | Why | Required for |
 |---|---|---|
 | **Accessibility** | Window management, keystroke injection | Window tiling, snippet expansion |
-| **Input Monitoring** | Global hotkey detection (hold-to-speak, launcher shortcut, hyper key) | Core launcher functionality |
+| **Input Monitoring** | Global hotkey detection (Fn shortcuts, launcher shortcut, HyperKey) | Core launcher functionality |
 | **Microphone** | Voice dictation (speech-to-text) | Optional — only if using voice features |
 | **Automation (AppleScript)** | Selected text capture, system automation | Extension actions |
 | **Calendars** | Reading today's events | Optional — only if using schedule feature |
@@ -269,97 +263,30 @@ npm run check:i18n       # Check internationalization strings
 | Apple Silicon (M1/M2/M3) issues | Ensure you're running the arm64 version of Node.js, not the x64 version via Rosetta |
 | Native features missing after `npm run dev` | Run `npm run build:native` first — the dev script doesn't compile Swift binaries |
 | Snippet expansion not working | Grant **Accessibility** permission; snippet-expander uses `CGEventPost` for keystroke injection |
-| Whisper/Parakeet STT not working | Grant **Microphone** permission in System Settings → Privacy & Security |
 
-## AI + Memory Setup
+## AI setup
 
-Configure everything from the app UI:
+Open Settings → AI → LLM to choose OpenAI or Custom and configure its credentials.
+OpenAI offers GPT-6.1 Terra by default, GPT-6.1 Sol, GPT-6 Luna and GPT-6 Astra.
+Requests use the Responses API. Explicit legacy OpenAI models remain selected
+until changed, and service errors are shown without silently switching models.
 
-1. Launch SuperCmd.
-2. Open **Settings** (search "Settings" or use the gear icon).
-3. Go to the **AI** tab.
-4. Enable AI (`enabled = true`).
-5. Pick your default provider and add the required key(s).
+Custom retains its OpenAI-compatible Chat Completions protocol, base URL, API key,
+model name and optional `/v1` URL suffix. Ask AI, Inline AI Prompt and extension
+requests without an explicit model follow the selected LLM configuration.
 
-### Providers
-
-| Provider | Setting | Notes |
-|---|---|---|
-| OpenAI | `openaiApiKey` | GPT-4o, GPT-4o-mini, etc. |
-| Anthropic (Claude) | `anthropicApiKey` | Claude 3.5 Sonnet, Haiku, etc. |
-| Google Gemini | `geminiApiKey` | Gemini 1.5 Pro, Flash, etc. |
-| Ollama | `ollamaBaseUrl` | Default `http://localhost:11434` — local models |
-| OpenAI-compatible | `openaiCompatibleBaseUrl` + `openaiCompatibleApiKey` | Any OpenAI-compatible endpoint |
-
-### Speech / voice keys
-
-| Feature | Setting |
-|---|---|
-| ElevenLabs TTS | `elevenlabsApiKey` |
-| Edge TTS (built-in) | No key required |
-| Native macOS STT | No key required |
-| Whisper STT | Runs locally — no key required |
-| Parakeet STT | Runs locally via swift-transformers — no key required |
-
-### Memory keys
-
-| Setting | Purpose |
-|---|---|
-| `supermemoryApiKey` | Supermemory API key |
-| `supermemoryClient` | Supermemory client ID |
-| `supermemoryBaseUrl` | Base URL (default: `https://api.supermemory.ai`) |
-| `supermemoryLocalMode` | Use local Supermemory instance |
-
-### Where settings are stored
-
-All app settings are persisted in:
-
-`~/Library/Application Support/SuperCmd/settings.json`
-
-Key fields:
-
-```json
-{
-  "globalShortcut": "Alt+Space",
-  "openAtLogin": false,
-  "uiStyle": "glassy",
-  "fontSize": "medium",
-  "appLanguage": "system",
-  "ai": {
-    "enabled": true,
-    "provider": "openai",
-    "openaiApiKey": "",
-    "anthropicApiKey": "",
-    "geminiApiKey": "",
-    "ollamaBaseUrl": "http://localhost:11434",
-    "elevenlabsApiKey": "",
-    "supermemoryApiKey": "",
-    "supermemoryBaseUrl": "https://api.supermemory.ai",
-    "defaultModel": "openai-gpt-4o-mini",
-    "speechToTextModel": "native",
-    "textToSpeechModel": "edge-tts"
-  }
-}
-```
-
-OAuth tokens are stored separately in `~/Library/Application Support/SuperCmd/oauth-tokens.json`.
-
-### Optional environment variable fallbacks
-
-- `ELEVENLABS_API_KEY`
-- `SUPERMEMORY_API_KEY`
-- `SUPERMEMORY_CLIENT`
-- `SUPERMEMORY_BASE_URL`
-- `SUPERMEMORY_LOCAL`
+Settings remain at `~/Library/Application Support/SuperCmd/settings.json`.
+API keys are kept in the existing safe-storage vault rather than plaintext JSON.
+Built-in Whisper, Read and Supermemory integrations are retired in this fork.
+Existing credentials, downloaded models, memory files and chat history are retained.
 
 ## Privacy & Security
 
 SuperCmd is open-source, so you can audit exactly what it does. The short version:
 
 - **Telemetry**: one anonymous `app_started` event via [Aptabase](https://aptabase.com/).
-- **AI prompts**: sent directly from your device to your configured provider (OpenAI / Anthropic / Gemini / Ollama).
+- **AI prompts**: sent directly from your device to your configured provider (OpenAI / Custom).
 - **Extension install/uninstall**: reports extension name + an anonymous random machine ID to `api.supercmd.sh` for download counts.
-- **Voice data**: STT runs fully on-device (Whisper, Parakeet, native macOS) — audio never leaves your machine.
 
 See **[SECURITY.md](./SECURITY.md)** for the full breakdown.
 

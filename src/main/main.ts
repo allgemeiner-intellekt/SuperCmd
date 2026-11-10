@@ -7929,6 +7929,18 @@ async function runCommandById(commandId: string, source: 'launcher' | 'hotkey' |
   return success;
 }
 
+// ─── Settings Window ────────────────────────────────────────────────
+
+type SettingsTabId = 'general' | 'ai' | 'extensions' | 'advanced';
+type SettingsPanelTarget = {
+  extensionName?: string;
+  commandName?: string;
+};
+type SettingsNavigationPayload = {
+  tab: SettingsTabId;
+  target?: SettingsPanelTarget;
+};
+
 function normalizeSettingsTabId(input: any): SettingsTabId | undefined {
   if (input === 'general' || input === 'ai' || input === 'extensions' || input === 'advanced') return input;
   return undefined;

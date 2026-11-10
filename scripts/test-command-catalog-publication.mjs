@@ -202,6 +202,7 @@ test('disk cold start is stale; invalidated discovery cannot write disk or notif
 test('retired voice and memory commands are absent from disk seed and fresh catalog', async () => {
   const retired = ['system-supercmd-whisper', 'system-supercmd-whisper-speak-toggle', 'system-supercmd-speak', 'system-add-to-memory'];
   const h = harness({ disk: { version: 1, commands: [...retired, 'retained'].map(id => ({ id, title: id, category: 'system' })) } });
+  h.commands.initCommandsCache();
   const seeded = await h.invoke('get-commands');
   assert.deepEqual(seeded.map(c => c.id), ['retained']);
   await h.finishScan(0);
